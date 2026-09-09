@@ -72,9 +72,12 @@ def check_all(
             log(f"{target.id}: no snapshot yet")
             continue
         # Findings are re-derived from the current snapshot, so the previous
-        # evaluation's rows are retired rather than left to accumulate.
+        # evaluation's rows are retired rather than left to accumulate. Scoped to
+        # source='rule': agent findings cost real money and come from their own
+        # run, so a nightly sweep must never delete them.
         store.conn.execute(
-            "DELETE FROM findings WHERE site = ? AND resolved_at IS NULL", (target.id,)
+            "DELETE FROM findings " "WHERE site = ? AND resolved_at IS NULL AND source = 'rule'",
+            (target.id,),
         )
         store.conn.commit()
         findings = evaluate(target.id, rows)

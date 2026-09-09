@@ -53,10 +53,25 @@ CREATE TABLE IF NOT EXISTS findings (
     subjects    TEXT NOT NULL,
     detail      TEXT,
     found_at    TEXT NOT NULL,
-    resolved_at TEXT
+    resolved_at TEXT,
+    -- 'rule' for a deterministic check, 'agent:<skill>' for an escalated one.
+    -- They differ enough in reliability that the UI has to be able to say which.
+    source      TEXT NOT NULL DEFAULT 'rule'
 );
 CREATE INDEX IF NOT EXISTS idx_find_open ON findings (site, resolved_at);
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations.
+
+    CREATE TABLE IF NOT EXISTS silently does nothing on a database that already
+    exists, so a new column in SCHEMA never reaches one — and this tool's only
+    database is already in use.
+    """
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(findings)")}
+    if "source" not in have:
+        conn.execute("ALTER TABLE findings ADD COLUMN source TEXT NOT NULL DEFAULT 'rule'")
 
 
 class Store:
@@ -78,6 +93,7 @@ class Store:
         # WAL so a long collect run does not block a concurrent `foreman status`.
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
         self._conn = conn
 
@@ -139,7 +155,9 @@ class Store:
 
     # --- findings ---------------------------------------------------------
 
-    def record_findings(self, run_id: int, findings: Iterable[Finding]) -> int:
+    def record_findings(
+        self, run_id: int, findings: Iterable[Finding], source: str = "rule"
+    ) -> int:
         now = utcnow()
         rows = [
             (
@@ -151,13 +169,14 @@ class Store:
                 json.dumps(f.subjects),
                 f.detail,
                 now,
+                source,
             )
             for f in findings
         ]
         self.conn.executemany(
             "INSERT INTO findings "
-            "(run_id, site, rule, severity, summary, subjects, detail, found_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(run_id, site, rule, severity, summary, subjects, detail, found_at, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         self.conn.commit()

@@ -11,7 +11,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .collectors import COLLECTORS
+from .audit import DEFAULT_SKILL, AuditError, run_audit
+from .budget import Budget
+from .collectors import COLLECTORS, DEFAULT_COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
 from .models import Severity
 from .runner import check_all, collect_all
@@ -64,7 +66,9 @@ def collect(
 ) -> None:
     """Run collectors and store a timestamped snapshot."""
     reg = load_registry(registry)
-    names = [collector] if collector else list(COLLECTORS)
+    # DEFAULT_COLLECTORS, not every registered one: `render` needs Playwright and
+    # costs seconds per page, so it stays opt-in via --collector.
+    names = [collector] if collector else list(DEFAULT_COLLECTORS)
     for name in names:
         if name not in COLLECTORS:
             raise typer.BadParameter(f"unknown collector {name!r} (have: {', '.join(COLLECTORS)})")
@@ -124,6 +128,51 @@ def status(
         )
     console.print(table)
     console.print(f"\n{len(rows)} open finding(s).")
+
+
+@app.command()
+def audit(
+    site: str = typer.Argument(None, help="Site id. Omit to audit every site."),
+    skill: str = typer.Option(DEFAULT_SKILL, "--skill", help="/seo plugin skill to run."),
+    budget_usd: float = typer.Option(5.0, "--budget", help="Ceiling for this whole invocation."),
+    model: str = typer.Option(None, "--model"),
+    timeout: int = typer.Option(1800, "--timeout", help="Per-site seconds."),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Escalate to the /seo plugin's agents for judgement the rules can't make.
+
+    Costs real money — it runs Claude Code per site. Deterministic findings are
+    passed in so the agent skips what the nightly sweep already knows.
+    """
+    reg = load_registry(registry)
+    targets = [reg.get(site)] if site else reg.active
+    budget = Budget(limit_usd=budget_usd)
+
+    async def run() -> None:
+        with Store(db or DEFAULT_DB) as store:
+            for target in targets:
+                if budget.remaining <= 0:
+                    console.print(
+                        f"[yellow]Budget of ${budget_usd:.2f} spent; "
+                        f"skipping {len(targets) - targets.index(target)} site(s).[/]"
+                    )
+                    break
+                try:
+                    await run_audit(
+                        target,
+                        store,
+                        skill=skill,
+                        budget=budget,
+                        timeout_s=timeout,
+                        model=model,
+                        log=lambda m: console.print(f"  {m}"),
+                    )
+                except AuditError as exc:
+                    console.print(f"  [red]{target.id}: {exc}[/]")
+            console.print(f"\n[bold]${budget.spent:.2f}[/] spent of ${budget_usd:.2f}.")
+
+    asyncio.run(run())
 
 
 @app.command()

@@ -153,6 +153,11 @@
   .subjects li { color: var(--text-2); word-break: break-all; }
   .rule-tag { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
               color: var(--text-3); }
+  /* Provenance, not decoration: a rule finding is reproducible and a judgement
+     call from an agent is not, and the reader has to be able to tell. */
+  .src { font-size: 11px; padding: 1px 7px; border-radius: 999px; margin-left: 8px;
+         border: 1px solid var(--border-firm); color: var(--text-3);
+         white-space: nowrap; vertical-align: 1px; }
 
   .site-row { display: flex; align-items: center; gap: 12px; padding: 11px 16px;
               border-bottom: 1px solid var(--border); cursor: pointer; }
@@ -302,7 +307,7 @@ function visible() {
   return state.findings.filter((f) =>
     (state.sevs.size === 0 || state.sevs.has(f.severity)) &&
     (!state.site || f.site === state.site) &&
-    (!state.q || (f.summary + " " + f.rule + " " + f.subjects.join(" "))
+    (!state.q || (f.summary + " " + f.rule + " " + (f.source || "") + " " + f.subjects.join(" "))
       .toLowerCase().includes(state.q)));
 }
 
@@ -324,7 +329,8 @@ function renderFindings() {
     return `<tr class="row" data-id="${f.id}">
         <td><span class="sev sev-${esc(f.severity)}"><span class="glyph">${s.glyph}</span><span class="txt">${esc(s.label)}</span></span></td>
         <td class="site-cell">${esc(f.site)}</td>
-        <td>${esc(f.summary)}</td>
+        <td>${esc(f.summary)}${f.source && f.source.startsWith("agent:")
+            ? `<span class="src" title="Reported by an agent, not a deterministic rule">${esc(f.source.slice(6))}</span>` : ""}</td>
         <td class="num">${f.subjects.length}</td>
       </tr>${detail}`;
   }).join("");

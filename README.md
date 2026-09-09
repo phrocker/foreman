@@ -91,9 +91,36 @@ foreman collect --collector render
 | `foreman collect` | Run collectors, store a timestamped snapshot |
 | `foreman check` | Evaluate rules against the latest snapshot |
 | `foreman status` | Open findings across the portfolio |
+| `foreman audit [site]` | Escalate to a `/seo` plugin skill via Claude Code |
 | `foreman serve` | Interactive dashboard on loopback (default `:8765`) |
 
 `--site` scopes any of them to one site; `--collector` scopes `collect`.
+
+## Escalation: `foreman audit`
+
+Collectors answer "what is true about this site". They cannot answer "is this
+content any good", "would an AI search engine cite this page", or "why does this
+rank below a competitor" — those need judgement, and the `/seo` plugin already
+has specialists for them. Foreman does not reimplement that; it decides *which*
+of 40 sites deserve it and hands those few to Claude Code.
+
+```bash
+foreman audit mfa --skill seo-page --budget 2.00
+foreman audit --skill seo-geo --budget 20.00     # every site
+```
+
+The open deterministic findings go into the prompt so the agent skips what the
+nightly sweep already knows — the same work-on-the-delta principle the
+collectors follow. Results come back as schema-validated JSON, are namespaced
+`skill/rule`, and are stored with `source='agent:<skill>'`. That last part
+matters twice over: the dashboard badges them, because a judgement call and a
+reproducible check deserve different trust, and `foreman check` only ever
+deletes `source='rule'` rows, so a nightly sweep cannot wipe results you paid
+for.
+
+`--budget` is a real ceiling. Cost comes back in Claude Code's JSON envelope and
+is charged to a `Budget`, which gates the *next* site — so a sweep across 40
+sites stops rather than running away. This is what `budget.py` was written for.
 
 ## The dashboard
 
