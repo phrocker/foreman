@@ -63,6 +63,7 @@ $EDITOR sites.yaml
 foreman collect              # crawl every site, store a snapshot
 foreman check                # run the deterministic rules
 foreman status               # what needs attention, portfolio-wide
+foreman serve                # dashboard at http://127.0.0.1:8765
 ```
 
 ## Commands
@@ -74,8 +75,23 @@ foreman status               # what needs attention, portfolio-wide
 | `foreman collect` | Run collectors, store a timestamped snapshot |
 | `foreman check` | Evaluate rules against the latest snapshot |
 | `foreman status` | Open findings across the portfolio |
+| `foreman serve` | Interactive dashboard on loopback (default `:8765`) |
 
 `--site` scopes any of them to one site; `--collector` scopes `collect`.
+
+## The dashboard
+
+`foreman serve` reads `foreman.db` directly, so the page always shows the last
+run — no export step, and nothing about your sites leaves the machine. It binds
+loopback only: the database names real client sites and one endpoint triggers
+crawls.
+
+Filter by severity, site, or free text; click a finding to see every affected URL
+and why it matters; click a site to scope to it; hit "Run sweep" to collect and
+re-evaluate with a live log. Severity is encoded as **shape + label + colour** —
+the status palette's medium and low steps measure only 13.6 ΔE apart, which is
+below the threshold at which full-colour vision separates them reliably, so
+colour is never load-bearing.
 
 ## Next
 

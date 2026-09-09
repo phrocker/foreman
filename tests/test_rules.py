@@ -80,3 +80,23 @@ def test_anchored_asset_disallow_is_fine():
         ),
     )
     assert not [f for f in findings if f.rule == "robots_blocks_assets"]
+
+
+def test_site_summary_does_not_multiply_by_run_count(tmp_path):
+    """Regression: rolling findings up across a join on `runs` counted each
+    finding once per run, so the per-site totals grew every sweep."""
+    from foreman.models import Finding, Severity
+    from foreman.store import Store
+
+    with Store(tmp_path / "t.db") as store:
+        run_ids = []
+        for _ in range(5):  # five sweeps of the same site
+            run_id = store.start_run("s1", "crawl")
+            store.finish_run(run_id, ok=True)
+            run_ids.append(run_id)
+        store.record_findings(
+            run_ids[-1],
+            [Finding(site="s1", rule="r", severity=Severity.HIGH, summary="one")],
+        )
+        row = store.site_summary()[0]
+        assert (row["high"], row["medium"], row["low"]) == (1, 0, 0)

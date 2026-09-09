@@ -12,9 +12,9 @@ from rich.console import Console
 from rich.table import Table
 
 from .collectors import COLLECTORS
-from .config import DEFAULT_REGISTRY, Site, load_registry
+from .config import DEFAULT_REGISTRY, load_registry
 from .models import Severity
-from .rules import evaluate
+from .runner import check_all, collect_all
 from .store import DEFAULT_DB, Store
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
@@ -55,25 +55,6 @@ def list_sites(registry: Path = typer.Option(None, "--registry", "-r")) -> None:
     console.print(table)
 
 
-async def _collect_site(site: Site, names: list[str], store: Store) -> int:
-    """One site, all collectors. Failures are contained here: a host that hangs
-    or dies fails its own run and leaves the other 39 untouched."""
-    total = 0
-    for name in names:
-        collector = COLLECTORS[name]
-        run_id = store.start_run(site.id, name)
-        try:
-            observations = await collector.collect(site)
-        except Exception as exc:  # noqa: BLE001 — one site must not end the run
-            store.finish_run(run_id, ok=False, error=f"{type(exc).__name__}: {exc}")
-            console.print(f"  [red]{site.id}/{name} failed:[/] {exc}")
-            continue
-        total += store.record(run_id, observations)
-        store.finish_run(run_id, ok=True)
-        console.print(f"  [green]{site.id}/{name}[/] {len(observations)} observations")
-    return total
-
-
 @app.command()
 def collect(
     site: str = typer.Option(None, "--site", "-s", help="Only this site id."),
@@ -83,7 +64,6 @@ def collect(
 ) -> None:
     """Run collectors and store a timestamped snapshot."""
     reg = load_registry(registry)
-    targets = [reg.get(site)] if site else reg.active
     names = [collector] if collector else list(COLLECTORS)
     for name in names:
         if name not in COLLECTORS:
@@ -91,10 +71,14 @@ def collect(
 
     async def run() -> None:
         with Store(db or DEFAULT_DB) as store:
-            # Sites run concurrently; URLs within a site are throttled by the
-            # collector's own semaphore, so this does not stampede any one host.
-            results = await asyncio.gather(*(_collect_site(s, names, store) for s in targets))
-            console.print(f"\n[bold]{sum(results)}[/] observations across {len(targets)} site(s).")
+            total = await collect_all(
+                reg,
+                store,
+                site=site,
+                collectors=names,
+                log=lambda m: console.print(f"  {m}"),
+            )
+            console.print(f"\n[bold]{total}[/] observations stored.")
 
     asyncio.run(run())
 
@@ -107,29 +91,13 @@ def check(
 ) -> None:
     """Evaluate the deterministic rules against the latest snapshot."""
     reg = load_registry(registry)
-    targets = [reg.get(site)] if site else reg.active
     with Store(db or DEFAULT_DB) as store:
-        for target in targets:
-            rows: list = []
-            latest_run = None
-            for name in COLLECTORS:
-                runs = store.recent_runs(target.id, name, limit=1)
-                if runs:
-                    latest_run = latest_run or runs[0]
-                    rows.extend(store.run_observations(runs[0]))
-            if not rows:
-                console.print(f"[dim]{target.id}: no snapshot yet — run `foreman collect`.[/]")
-                continue
-            findings = evaluate(target.id, rows)
-            store.record_findings(latest_run, findings)
-            console.print(f"[bold]{target.id}[/]: {len(findings)} finding(s)")
-            for finding in findings:
-                style = SEVERITY_STYLE[finding.severity.value]
-                console.print(f"  [{style}]{finding.severity.value:<6}[/] {finding.summary}")
-                for subject in finding.subjects[:3]:
-                    console.print(f"         [dim]{subject}[/]")
-                if len(finding.subjects) > 3:
-                    console.print(f"         [dim]… and {len(finding.subjects) - 3} more[/]")
+        check_all(reg, store, site=site, log=lambda m: console.print(f"[bold]{m}[/]"))
+        for row in store.open_findings(site):
+            style = SEVERITY_STYLE.get(row["severity"], "")
+            console.print(
+                f"  [{style}]{row['severity']:<6}[/] [dim]{row['site']}[/] {row['summary']}"
+            )
 
 
 @app.command()
@@ -156,6 +124,23 @@ def status(
         )
     console.print(table)
     console.print(f"\n{len(rows)} open finding(s).")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port", "-p"),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Serve the dashboard. Binds loopback only — it reads a database naming
+    real client sites and has an endpoint that triggers crawls."""
+    import uvicorn
+
+    from .web import create_app
+
+    console.print(f"[bold]Foreman[/] → [link]http://{host}:{port}[/]")
+    uvicorn.run(create_app(registry, db or DEFAULT_DB), host=host, port=port, log_level="warning")
 
 
 def main() -> None:

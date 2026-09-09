@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foreman</title>
+<style>
+  /* Status palette is fixed and never themed: severity is state, not identity.
+     Medium (#ec835a) and low (#fab219) sit only 13.6 ΔE apart, which is below
+     the threshold at which full-colour vision reliably separates them — so
+     every severity carries a distinct SHAPE and a text label, and the colour is
+     strictly redundant. Never encode severity with colour alone here. */
+  :root {
+    color-scheme: light;
+    --page:        #f4f4f2;
+    --surface:     #fcfcfb;
+    --surface-alt: #efefec;
+    --border:      #e0e0db;
+    --border-firm: #cfcfc8;
+    --text:        #0b0b0b;
+    --text-2:      #52514e;
+    --text-3:      #83827c;
+    --accent:      #2a78d6;
+    --high:        #d03b3b;
+    --medium:      #ec835a;
+    --low:         #fab219;
+    --good:        #0ca30c;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:        #121211;
+      --surface:     #1a1a19;
+      --surface-alt: #232322;
+      --border:      #2e2e2c;
+      --border-firm: #3d3d3a;
+      --text:        #ffffff;
+      --text-2:      #c3c2b7;
+      --text-3:      #8e8d85;
+      --accent:      #3987e5;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:        #121211;
+    --surface:     #1a1a19;
+    --surface-alt: #232322;
+    --border:      #2e2e2c;
+    --border-firm: #3d3d3a;
+    --text:        #ffffff;
+    --text-2:      #c3c2b7;
+    --text-3:      #8e8d85;
+    --accent:      #3987e5;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 64px; }
+
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding-bottom: 20px; margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+  .brand span { color: var(--text-3); font-weight: 400; margin-left: 8px; }
+  .spacer { flex: 1; }
+
+  button {
+    font: inherit; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border-firm); border-radius: 8px;
+    padding: 7px 13px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--surface-alt); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+  button.icon { padding: 7px 10px; }
+
+  /* Hero — exactly one per view. Proportional figures: tabular-nums makes a
+     large standalone number read loose. */
+  .hero {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 24px; margin-bottom: 14px;
+    display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
+  }
+  .hero-figure { font-size: 54px; font-weight: 650; line-height: 1; letter-spacing: -0.03em; }
+  .hero-label { color: var(--text-2); font-size: 14px; }
+  .hero-note { color: var(--text-3); font-size: 13px; margin-left: auto; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 26px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px;
+  }
+  .tile-label { color: var(--text-2); font-size: 12.5px; margin-bottom: 6px; }
+  .tile-value { font-size: 25px; font-weight: 600; line-height: 1.1; }
+
+  h2 { font-size: 13px; font-weight: 600; color: var(--text-2); text-transform: uppercase;
+       letter-spacing: 0.06em; margin: 0 0 12px; }
+
+  /* Filters live in one row above the data. */
+  .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 999px;
+    border: 1px solid var(--border-firm); background: var(--surface);
+    cursor: pointer; font-size: 13px; color: var(--text-2);
+  }
+  .chip[aria-pressed="true"] { background: var(--surface-alt); color: var(--text); border-color: var(--text-3); }
+  .chip .glyph { font-size: 11px; }
+  input[type="search"], select {
+    font: inherit; padding: 7px 11px; border-radius: 8px;
+    border: 1px solid var(--border-firm); background: var(--surface); color: var(--text);
+  }
+  input[type="search"] { flex: 1; min-width: 170px; }
+
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 11.5px; font-weight: 600; color: var(--text-3);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  td { padding: 11px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr.row { cursor: pointer; }
+  tr.row:hover td { background: var(--surface-alt); }
+  .num { font-variant-numeric: tabular-nums; text-align: right; color: var(--text-2); }
+  .site-cell { color: var(--text-2); white-space: nowrap; }
+
+  /* Severity: shape + label + colour, in that order of importance. */
+  .sev { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: 13px; }
+  .sev .glyph { font-size: 10px; line-height: 1; }
+  .sev-high   { color: var(--high); }
+  .sev-medium { color: var(--medium); }
+  .sev-low    { color: var(--low); }
+  .sev .txt { color: var(--text); }
+
+  .detail td { background: var(--surface-alt); padding: 0 16px; }
+  .detail-inner { padding: 14px 0 18px; }
+  .detail p { margin: 0 0 12px; color: var(--text-2); max-width: 68ch; }
+  .subjects { margin: 0; padding: 0; list-style: none;
+              font: 12.5px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .subjects li { color: var(--text-2); word-break: break-all; }
+  .rule-tag { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+              color: var(--text-3); }
+
+  .site-row { display: flex; align-items: center; gap: 12px; padding: 11px 16px;
+              border-bottom: 1px solid var(--border); cursor: pointer; }
+  .site-row:last-child { border-bottom: none; }
+  .site-row:hover { background: var(--surface-alt); }
+  .site-name { font-weight: 550; }
+  .site-when { color: var(--text-3); font-size: 12.5px; margin-left: auto; white-space: nowrap; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px;
+          padding: 2px 9px; border-radius: 999px; background: var(--surface-alt);
+          border: 1px solid var(--border-firm); color: var(--text); }
+  .pill .glyph { font-size: 9px; }
+  .pill.clean { color: var(--good); }
+
+  .empty { padding: 34px 16px; text-align: center; color: var(--text-3); }
+  .log { margin-top: 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border);
+         border-radius: var(--radius); font: 12.5px/1.7 ui-monospace, Menlo, monospace;
+         color: var(--text-2); max-height: 190px; overflow-y: auto; white-space: pre-wrap; }
+  .err { color: var(--high); }
+  section { margin-bottom: 30px; }
+  @media (max-width: 620px) {
+    .hero-figure { font-size: 42px; }
+    .hero-note { margin-left: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">Foreman <span id="lastRun">—</span></div>
+    <div class="spacer"></div>
+    <button id="runBtn" class="primary">Run sweep</button>
+    <button id="themeBtn" class="icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </header>
+
+  <div class="hero">
+    <div class="hero-figure" id="heroValue">—</div>
+    <div class="hero-label">open findings<br><span id="heroBreak" class="rule-tag"></span></div>
+    <div class="hero-note" id="heroNote"></div>
+  </div>
+
+  <div class="tiles" id="tiles"></div>
+  <div id="log" class="log" hidden></div>
+
+  <section>
+    <h2>Findings</h2>
+    <div class="filters">
+      <button class="chip" data-sev="high"   aria-pressed="false"><span class="glyph sev-high">▲</span> High</button>
+      <button class="chip" data-sev="medium" aria-pressed="false"><span class="glyph sev-medium">◆</span> Medium</button>
+      <button class="chip" data-sev="low"    aria-pressed="false"><span class="glyph sev-low">●</span> Low</button>
+      <select id="siteFilter"><option value="">All sites</option></select>
+      <input type="search" id="search" placeholder="Filter findings…  (press /)">
+    </div>
+    <div class="panel scroll">
+      <table>
+        <thead><tr><th>Severity</th><th>Site</th><th>Finding</th><th class="num">URLs</th></tr></thead>
+        <tbody id="findingRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sites</h2>
+    <div class="panel" id="siteRows"></div>
+  </section>
+</div>
+
+<script>
+const SEV = {
+  high:   { glyph: "▲", label: "High" },
+  medium: { glyph: "◆", label: "Medium" },
+  low:    { glyph: "●", label: "Low" },
+};
+const state = { findings: [], overview: null, sevs: new Set(), site: "", q: "", open: new Set() };
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function ago(iso) {
+  if (!iso) return "never";
+  const secs = (Date.now() - new Date(iso + (iso.endsWith("Z") ? "" : "Z")).getTime()) / 1000;
+  if (secs < 90) return "just now";
+  if (secs < 5400) return Math.round(secs / 60) + "m ago";
+  if (secs < 172800) return Math.round(secs / 3600) + "h ago";
+  return Math.round(secs / 86400) + "d ago";
+}
+
+async function load() {
+  const [overview, findings] = await Promise.all([
+    fetch("/api/overview").then((r) => r.json()),
+    fetch("/api/findings").then((r) => r.json()),
+  ]);
+  state.overview = overview;
+  state.findings = findings;
+  renderOverview();
+  renderSites();
+  renderFindings();
+}
+
+function renderOverview() {
+  const t = state.overview.totals;
+  $("heroValue").textContent = t.open;
+  $("heroBreak").textContent =
+    t.open ? `${t.high} high · ${t.medium} medium · ${t.low} low` : "everything clear";
+  $("lastRun").textContent = "· last swept " + ago(state.overview.last_run);
+  $("heroNote").textContent = `across ${t.sites} site${t.sites === 1 ? "" : "s"}`;
+  $("tiles").innerHTML = [
+    ["Sites monitored", t.sites],
+    ["High severity", t.high],
+    ["Sites clean", `${t.clean} / ${t.sites}`],
+  ].map(([label, value]) =>
+    `<div class="tile"><div class="tile-label">${esc(label)}</div>
+     <div class="tile-value">${esc(value)}</div></div>`).join("");
+
+  const sel = $("siteFilter");
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All sites</option>' +
+    state.overview.sites.map((s) => `<option value="${esc(s.site)}">${esc(s.site)}</option>`).join("");
+  sel.value = current;
+}
+
+function renderSites() {
+  const rows = state.overview.sites;
+  $("siteRows").innerHTML = rows.length ? rows.map((s) => {
+    const pills = s.total === 0
+      ? '<span class="pill clean"><span class="glyph">✓</span> clean</span>'
+      : ["high", "medium", "low"].filter((k) => s[k] > 0).map((k) =>
+          `<span class="pill"><span class="glyph sev-${k}">${SEV[k].glyph}</span>${s[k]} ${SEV[k].label.toLowerCase()}</span>`
+        ).join("");
+    return `<div class="site-row" data-site="${esc(s.site)}">
+      <span class="site-name">${esc(s.site)}</span>
+      <span class="pills">${pills}</span>
+      <span class="site-when">swept ${esc(ago(s.last_run))}</span></div>`;
+  }).join("") : '<div class="empty">No sites collected yet. Run a sweep.</div>';
+
+  document.querySelectorAll(".site-row").forEach((el) =>
+    el.addEventListener("click", () => {
+      $("siteFilter").value = el.dataset.site;
+      state.site = el.dataset.site;
+      renderFindings();
+      document.querySelector("section").scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
+}
+
+function visible() {
+  return state.findings.filter((f) =>
+    (state.sevs.size === 0 || state.sevs.has(f.severity)) &&
+    (!state.site || f.site === state.site) &&
+    (!state.q || (f.summary + " " + f.rule + " " + f.subjects.join(" "))
+      .toLowerCase().includes(state.q)));
+}
+
+function renderFindings() {
+  const rows = visible();
+  if (!rows.length) {
+    $("findingRows").innerHTML =
+      `<tr><td colspan="4" class="empty">${state.findings.length ? "Nothing matches these filters." : "No findings yet. Run a sweep."}</td></tr>`;
+    return;
+  }
+  $("findingRows").innerHTML = rows.map((f) => {
+    const s = SEV[f.severity] || { glyph: "•", label: f.severity };
+    const open = state.open.has(f.id);
+    const detail = open ? `<tr class="detail"><td colspan="4"><div class="detail-inner">
+        ${f.detail ? `<p>${esc(f.detail)}</p>` : ""}
+        <div class="rule-tag">${esc(f.rule)}</div>
+        <ul class="subjects">${f.subjects.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>
+      </div></td></tr>` : "";
+    return `<tr class="row" data-id="${f.id}">
+        <td><span class="sev sev-${esc(f.severity)}"><span class="glyph">${s.glyph}</span><span class="txt">${esc(s.label)}</span></span></td>
+        <td class="site-cell">${esc(f.site)}</td>
+        <td>${esc(f.summary)}</td>
+        <td class="num">${f.subjects.length}</td>
+      </tr>${detail}`;
+  }).join("");
+
+  document.querySelectorAll("tr.row").forEach((el) =>
+    el.addEventListener("click", () => {
+      const id = Number(el.dataset.id);
+      state.open.has(id) ? state.open.delete(id) : state.open.add(id);
+      renderFindings();
+    }));
+}
+
+document.querySelectorAll(".chip").forEach((chip) =>
+  chip.addEventListener("click", () => {
+    const sev = chip.dataset.sev;
+    state.sevs.has(sev) ? state.sevs.delete(sev) : state.sevs.add(sev);
+    chip.setAttribute("aria-pressed", String(state.sevs.has(sev)));
+    renderFindings();
+  }));
+$("siteFilter").addEventListener("change", (e) => { state.site = e.target.value; renderFindings(); });
+$("search").addEventListener("input", (e) => { state.q = e.target.value.toLowerCase().trim(); renderFindings(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && document.activeElement !== $("search")) { e.preventDefault(); $("search").focus(); }
+  if (e.key === "Escape") { state.open.clear(); renderFindings(); }
+});
+
+// Theme. localStorage can throw outright in a locked-down browser, so every
+// access is guarded and the page renders correctly with no stored value.
+const themeBtn = $("themeBtn");
+try {
+  const saved = localStorage.getItem("foreman-theme");
+  if (saved) document.documentElement.dataset.theme = saved;
+} catch {}
+themeBtn.addEventListener("click", () => {
+  const dark = document.documentElement.dataset.theme === "dark" ||
+    (!document.documentElement.dataset.theme &&
+      matchMedia("(prefers-color-scheme: dark)").matches);
+  const next = dark ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("foreman-theme", next); } catch {}
+});
+
+// Sweep. The server allows one at a time; the button reflects that rather than
+// letting a second click race the first.
+const runBtn = $("runBtn"), logEl = $("log");
+async function poll() {
+  const job = await fetch("/api/run").then((r) => r.json());
+  logEl.hidden = !job.log.length && !job.error;
+  logEl.innerHTML = job.log.map(esc).join("\n") +
+    (job.error ? `\n<span class="err">${esc(job.error)}</span>` : "");
+  logEl.scrollTop = logEl.scrollHeight;
+  runBtn.disabled = job.running;
+  runBtn.textContent = job.running ? "Sweeping…" : "Run sweep";
+  if (job.running) setTimeout(poll, 1000);
+  else load();
+}
+runBtn.addEventListener("click", async () => {
+  runBtn.disabled = true;
+  runBtn.textContent = "Sweeping…";
+  await fetch("/api/run", { method: "POST" });
+  poll();
+});
+
+load();
+poll();
+</script>
+</body>
+</html>

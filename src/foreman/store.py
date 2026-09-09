@@ -163,6 +163,35 @@ class Store:
         self.conn.commit()
         return len(rows)
 
+    def finding(self, finding_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+
+    def site_summary(self) -> list[sqlite3.Row]:
+        """Per-site rollup: open findings by severity, and when it was last seen."""
+        # Two aggregates joined, not one join then aggregated: `runs` has many
+        # rows per site, so counting findings across that join multiplies every
+        # finding by the number of runs.
+        return self.conn.execute("""
+            SELECT
+                r.site                     AS site,
+                r.last_run                 AS last_run,
+                COALESCE(f.high, 0)        AS high,
+                COALESCE(f.medium, 0)      AS medium,
+                COALESCE(f.low, 0)         AS low
+            FROM (
+                SELECT site, MAX(finished_at) AS last_run
+                FROM runs WHERE ok = 1 GROUP BY site
+            ) r
+            LEFT JOIN (
+                SELECT site,
+                       SUM(severity = 'high')   AS high,
+                       SUM(severity = 'medium') AS medium,
+                       SUM(severity = 'low')    AS low
+                FROM findings WHERE resolved_at IS NULL GROUP BY site
+            ) f ON f.site = r.site
+            ORDER BY high DESC, medium DESC, r.site
+            """).fetchall()
+
     def open_findings(self, site: str | None = None) -> list[sqlite3.Row]:
         sql = "SELECT * FROM findings WHERE resolved_at IS NULL"
         params: tuple[str, ...] = ()
