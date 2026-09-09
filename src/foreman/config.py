@@ -22,6 +22,9 @@ class Site(BaseModel):
     cms: str = "other"  # spa | wordpress | static | other — selects which rules apply
     gsc_property: str | None = None
     max_urls: int = 500
+    # Pages to render in a real browser. Metadata bugs are template-level, so a
+    # handful catches them; rendering all 500 would not pay for itself.
+    render_sample: int = 5
     tags: list[str] = Field(default_factory=list)
     enabled: bool = True
 

@@ -13,8 +13,12 @@ that they shared one root cause did.
 from __future__ import annotations
 
 from .crawl import CrawlCollector
+from .render import RenderCollector
 from .tls import TlsCollector
 
-COLLECTORS = {c.name: c for c in (CrawlCollector(), TlsCollector())}
+# render is not in the default set: it needs the optional Playwright extra and
+# costs seconds per page. Opt in with `foreman collect --collector render`.
+COLLECTORS = {c.name: c for c in (CrawlCollector(), TlsCollector(), RenderCollector())}
+DEFAULT_COLLECTORS = ("crawl", "tls")
 
-__all__ = ["COLLECTORS", "CrawlCollector", "TlsCollector"]
+__all__ = ["COLLECTORS", "DEFAULT_COLLECTORS", "CrawlCollector", "RenderCollector", "TlsCollector"]

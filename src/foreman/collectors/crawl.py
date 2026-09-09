@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import html as htmllib
 import re
-import xml.etree.ElementTree as ET
 from urllib.parse import urljoin
 
 import httpx
 
 from ..config import Site
 from ..models import Observation
+from .discovery import discover_urls
 
 # Only <head> is needed, and some pages are megabytes. Cap the read.
 HEAD_BYTES = 65_536
@@ -32,6 +32,8 @@ PROBE_PATHS = (
 )
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_RE = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
 _CONTENT_RE = re.compile(r"""content=["']([^"']*)["']""", re.IGNORECASE)
 _CANONICAL_RE = re.compile(r"""<link\s+[^>]*rel=["']canonical["'][^>]*>""", re.IGNORECASE)
 _HREF_RE = re.compile(r"""href=["']([^"']*)["']""", re.IGNORECASE)
@@ -46,6 +48,17 @@ def _meta(head: str, name: str) -> str | None:
         return None
     content = _CONTENT_RE.search(tag.group(0))
     return htmllib.unescape(content.group(1)).strip() if content else None
+
+
+def _text_length(html: str) -> int:
+    """Rough count of the human-readable text the server actually sent.
+
+    Compared against the rendered DOM's text, this is the measure that says how
+    much of a page exists only after JavaScript runs — i.e. how much of it no
+    non-JS crawler will ever index.
+    """
+    stripped = _TAG_RE.sub(" ", _SCRIPT_RE.sub(" ", html))
+    return len(" ".join(htmllib.unescape(stripped).split()))
 
 
 def _title(head: str) -> str | None:
@@ -70,7 +83,7 @@ class CrawlCollector:
         ) as client:
             obs = await self._site_level(client, site)
             obs.extend(await self._probe(client, site))
-            urls = await self._discover(client, site)
+            urls = await discover_urls(client, site)
             obs.append(
                 Observation(
                     site=site.id,
@@ -160,54 +173,6 @@ class CrawlCollector:
             out.append(ob("homepage_title", home_title))
         return out
 
-    async def _discover(self, client: httpx.AsyncClient, site: Site) -> list[str]:
-        """Sitemap first (it is the site's own claim about what should be
-        indexed); homepage alone if there isn't one."""
-        sitemaps: list[str] = []
-        try:
-            r = await client.get(f"{site.url}/robots.txt")
-            if r.status_code == 200:
-                sitemaps = [
-                    line.split(":", 1)[1].strip()
-                    for line in r.text.splitlines()
-                    if line.lower().startswith("sitemap:")
-                ]
-        except httpx.HTTPError:
-            pass
-        if not sitemaps:
-            sitemaps = [f"{site.url}/sitemap.xml"]
-
-        urls: list[str] = []
-        seen: set[str] = set()
-        for sm in sitemaps[:5]:
-            for url in await self._read_sitemap(client, sm, depth=0):
-                if url not in seen:
-                    seen.add(url)
-                    urls.append(url)
-                if len(urls) >= site.max_urls:
-                    return urls
-        return urls or [site.url + "/"]
-
-    async def _read_sitemap(self, client: httpx.AsyncClient, url: str, depth: int) -> list[str]:
-        if depth > 1:  # one level of <sitemapindex> nesting is enough
-            return []
-        try:
-            r = await client.get(url)
-            if r.status_code != 200:
-                return []
-            root = ET.fromstring(r.content)
-        except (httpx.HTTPError, ET.ParseError):
-            return []
-
-        ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
-        if root.tag == f"{ns}sitemapindex":
-            nested: list[str] = []
-            for loc in root.iterfind(f".//{ns}sitemap/{ns}loc"):
-                if loc.text:
-                    nested.extend(await self._read_sitemap(client, loc.text.strip(), depth + 1))
-            return nested
-        return [loc.text.strip() for loc in root.iterfind(f".//{ns}url/{ns}loc") if loc.text]
-
     async def _page(
         self, client: httpx.AsyncClient, site: Site, url: str, sem: asyncio.Semaphore
     ) -> list[Observation]:
@@ -235,7 +200,9 @@ class CrawlCollector:
             if "html" not in r.headers.get("content-type", ""):
                 return out
 
-            head = r.text[:HEAD_BYTES]
+            body = r.text
+            head = body[:HEAD_BYTES]
+            out.append(ob("served_text_chars", str(_text_length(body))))
             out.append(ob("title", _title(head)))
             out.append(ob("meta_description", _meta(head, "description")))
             out.append(ob("meta_robots", _meta(head, "robots")))

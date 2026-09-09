@@ -34,6 +34,14 @@ every collector: a change is a row whose value differs from the previous run's
 row with the same `(site, subject, key)`. Add a collector, get drift detection
 free.
 
+**Render only to compare.** The crawl collector reads what the server sends,
+because that is what a non-JS crawler indexes. The optional `render` collector
+reads what a browser produces after JavaScript runs. Where the two disagree you
+have found content or metadata that exists only for users — invisible to Bing,
+to AI crawlers, and to every social scraper. Plain Playwright with an honest
+User-Agent: a stealth browser would defeat the purpose, since the question being
+asked is "what does a crawler see".
+
 **Probe for what the sitemap won't admit.** A sitemap crawl only sees pages a
 site claims to have, which makes it structurally blind to the most common SPA
 defect: unmatched URLs answering 200 with the homepage shell, turning every typo
@@ -48,6 +56,10 @@ shouldn't exist and compares what comes back.
   bottleneck. `budget.py` is kept regardless — anything that spawns subagents
   needs a ceiling, single-machine or not.
 - **No Postgres.** Single operator, single machine. SQLite in WAL mode.
+- **No stealth browser.** Foreman crawls sites you own. If a WAF blocks it,
+  allowlist it — that is one firewall rule, not a patched Chromium. Fingerprint
+  spoofing would also give a view no search engine has, which is the opposite of
+  the diagnostic.
 - **No second model provider yet.** Worth adding for redundancy and cost
   arbitrage, not for speed — nothing here is rate-limited.
 
@@ -64,6 +76,10 @@ foreman collect              # crawl every site, store a snapshot
 foreman check                # run the deterministic rules
 foreman status               # what needs attention, portfolio-wide
 foreman serve                # dashboard at http://127.0.0.1:8765
+
+# Browser rendering is an optional extra (Playwright + Chromium, ~150MB):
+uv pip install -e ".[browser]" && playwright install chromium
+foreman collect --collector render
 ```
 
 ## Commands

@@ -100,3 +100,93 @@ def test_site_summary_does_not_multiply_by_run_count(tmp_path):
         )
         row = store.site_summary()[0]
         assert (row["high"], row["medium"], row["low"]) == (1, 0, 0)
+
+
+def test_served_and_rendered_title_disagreeing_is_high():
+    """The SPA failure: users see one title, every non-JS crawler sees another."""
+    findings = evaluate(
+        "x",
+        rows(
+            ("https://x/p", "status", "200"),
+            ("https://x/p", "title", "Homepage Shell"),
+            ("https://x/p", "rendered_title", "Actual Article Title"),
+        ),
+    )
+    hit = [f for f in findings if f.rule == "title_only_after_js"]
+    assert len(hit) == 1
+    assert hit[0].severity is Severity.HIGH
+
+
+def test_matching_titles_are_not_flagged():
+    findings = evaluate(
+        "x",
+        rows(
+            ("https://x/p", "status", "200"),
+            ("https://x/p", "title", "Same"),
+            ("https://x/p", "rendered_title", "Same"),
+        ),
+    )
+    assert not [f for f in findings if f.rule == "title_only_after_js"]
+
+
+def test_client_side_only_content_is_flagged():
+    findings = evaluate(
+        "x",
+        rows(
+            ("https://x/p", "status", "200"),
+            ("https://x/p", "served_text_chars", "120"),
+            ("https://x/p", "rendered_text_chars", "4200"),
+        ),
+    )
+    assert [f.rule for f in findings if f.rule == "content_only_after_js"]
+
+
+def test_prerendered_page_passes_the_text_ratio():
+    findings = evaluate(
+        "x",
+        rows(
+            ("https://x/p", "status", "200"),
+            ("https://x/p", "served_text_chars", "3900"),
+            ("https://x/p", "rendered_text_chars", "4200"),
+        ),
+    )
+    assert not [f for f in findings if f.rule == "content_only_after_js"]
+
+
+def test_short_pages_are_not_ratio_tested():
+    """A 200-char page has no meaningful ratio; don't manufacture a finding."""
+    findings = evaluate(
+        "x",
+        rows(
+            ("https://x/p", "status", "200"),
+            ("https://x/p", "served_text_chars", "10"),
+            ("https://x/p", "rendered_text_chars", "200"),
+        ),
+    )
+    assert not [f for f in findings if f.rule == "content_only_after_js"]
+
+
+def test_redirect_is_not_mistaken_for_js_only_metadata():
+    """Regression: the crawler does not follow redirects, so a 301 records no
+    served title. Reading that absence as "JS-only" flagged every page behind a
+    trailing-slash redirect."""
+    findings = evaluate(
+        "x",
+        rows(
+            ("https://x/p", "status", "301"),
+            ("https://x/p", "redirect_to", "https://x/p/"),
+            ("https://x/p", "rendered_title", "Real Title"),
+        ),
+    )
+    assert not [f for f in findings if f.rule == "title_only_after_js"]
+
+
+def test_js_only_title_still_flagged_on_a_200():
+    findings = evaluate(
+        "x",
+        rows(
+            ("https://x/p", "status", "200"),
+            ("https://x/p", "rendered_title", "Real Title"),
+        ),
+    )
+    assert [f.rule for f in findings if f.rule == "title_only_after_js"]

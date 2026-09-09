@@ -16,6 +16,11 @@ from typing import Any
 from .models import Finding, Severity
 
 CERT_WARN_DAYS = 21
+LCP_BUDGET_MS = 2500  # Core Web Vitals "good" threshold
+CLS_BUDGET = 0.1
+# Below this ratio of served-to-rendered text, the page is substantially
+# client-side only.
+SERVED_TEXT_FLOOR = 0.35
 # Directories a CMS or bundler serves front-end assets from. An unanchored
 # Disallow on any of these blocks the JS and CSS every page needs to render.
 ASSET_PREFIXES = ("/assets", "/static", "/_next", "/dist", "/build", "/wp-includes")
@@ -124,6 +129,85 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
             noindexed,
             "The sitemap asks for indexing and the page refuses. One of them is wrong.",
         )
+
+    # --- served HTML vs rendered DOM --------------------------------------
+    # Only runs where the render collector has been over the same URL.
+    for url, facts in pages.items():
+        if facts.get("render_error"):
+            add(
+                "render_failed",
+                Severity.HIGH,
+                "page does not render in a browser",
+                [url],
+                facts["render_error"],
+            )
+            continue
+        # Only meaningful where the fetch actually got a page. The crawler does
+        # not follow redirects, so a 301 leaves no served title — absence there
+        # means "we looked at a redirect", not "the title is JS-only".
+        if facts.get("status") != "200":
+            continue
+
+        rendered_title = facts.get("rendered_title")
+        if rendered_title and facts.get("title") and rendered_title != facts["title"]:
+            add(
+                "title_only_after_js",
+                Severity.HIGH,
+                "served title differs from the rendered title",
+                [url],
+                f"served:   {facts['title']!r}\nrendered: {rendered_title!r}\n\n"
+                "Crawlers that do not execute JavaScript — Bing, most AI crawlers, "
+                "every social scraper — index the served one. Prerender the route "
+                "so both agree.",
+            )
+        if rendered_title and not facts.get("title"):
+            add(
+                "title_only_after_js",
+                Severity.HIGH,
+                "title exists only after JavaScript runs",
+                [url],
+                f"rendered: {rendered_title!r} — the served HTML has no title at all.",
+            )
+
+        served = facts.get("served_text_chars")
+        rendered = facts.get("rendered_text_chars")
+        if served is not None and rendered and int(rendered) > 500:
+            ratio = int(served) / int(rendered)
+            if ratio < SERVED_TEXT_FLOOR:
+                add(
+                    "content_only_after_js",
+                    Severity.HIGH,
+                    f"only {ratio:.0%} of the page's text is in the served HTML",
+                    [url],
+                    f"served {served} chars vs {rendered} rendered. The rest is "
+                    "invisible to any crawler that does not run JavaScript.",
+                )
+
+        lcp = facts.get("lcp_ms")
+        if lcp and int(lcp) > LCP_BUDGET_MS:
+            add(
+                "slow_lcp",
+                Severity.MEDIUM,
+                f"LCP {int(lcp)}ms, over the {LCP_BUDGET_MS}ms budget",
+                [url],
+            )
+        cls = facts.get("cls")
+        if cls and float(cls) > CLS_BUDGET:
+            add(
+                "layout_shift",
+                Severity.MEDIUM,
+                f"CLS {float(cls):.3f}, over the {CLS_BUDGET} budget",
+                [url],
+            )
+        failed = facts.get("requests_failed")
+        if failed and int(failed) > 0:
+            add(
+                "requests_failed",
+                Severity.MEDIUM,
+                f"{failed} request(s) failed while rendering",
+                [url],
+                facts.get("request_failed_sample"),
+            )
 
     # --- site-level: robots.txt, TLS, scheme ------------------------------
     for subject, facts in pages.items():

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 
-from .collectors import COLLECTORS
+from .collectors import COLLECTORS, DEFAULT_COLLECTORS
 from .config import Registry, Site
 from .rules import evaluate
 from .store import Store
@@ -46,7 +46,7 @@ async def collect_all(
     log: Log = lambda _: None,
 ) -> int:
     targets = [registry.get(site)] if site else registry.active
-    names = list(collectors) if collectors else list(COLLECTORS)
+    names = list(collectors) if collectors else list(DEFAULT_COLLECTORS)
     results = await asyncio.gather(*(collect_site(t, names, store, log) for t in targets))
     return sum(results)
 
