@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local state: your registry names real client sites, and the store holds
+# their crawl history. Neither belongs on GitHub.
+sites.yaml
+*.db
+*.db-journal
+*.db-wal
+.env

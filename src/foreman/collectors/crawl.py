@@ -1,0 +1,243 @@
+"""Crawl a site's sitemap and record the SEO-critical facts of every page."""
+
+from __future__ import annotations
+
+import asyncio
+import html as htmllib
+import re
+import xml.etree.ElementTree as ET
+from urllib.parse import urljoin
+
+import httpx
+
+from ..config import Site
+from ..models import Observation
+
+# Only <head> is needed, and some pages are megabytes. Cap the read.
+HEAD_BYTES = 65_536
+CONCURRENCY = 8
+TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+UA = "ForemanBot/0.1 (+portfolio monitoring; contact site owner)"
+
+# Paths that should not exist. A sitemap crawl only ever sees pages the site
+# claims to have, so it is structurally blind to the most common SPA defect:
+# an unmatched URL answering 200 with the homepage shell. That turns every
+# typo, stale link and scanner probe into an indexable duplicate — which is
+# what search engines report as "too many pages with identical titles". Three
+# extra requests per site find it; nothing in the sitemap ever will.
+PROBE_PATHS = (
+    "/foreman-probe-does-not-exist-9f3a",
+    "/index.php",
+    "/wp-login.php",
+)
+
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_CONTENT_RE = re.compile(r"""content=["']([^"']*)["']""", re.IGNORECASE)
+_CANONICAL_RE = re.compile(r"""<link\s+[^>]*rel=["']canonical["'][^>]*>""", re.IGNORECASE)
+_HREF_RE = re.compile(r"""href=["']([^"']*)["']""", re.IGNORECASE)
+
+
+def _meta(head: str, name: str) -> str | None:
+    """Value of <meta name="..." content="...">. Regex rather than a parser:
+    only head metadata is read, the shapes are rigid, and it keeps the
+    dependency list to things that matter."""
+    tag = re.search(rf"""<meta\s+[^>]*name=["']{name}["'][^>]*>""", head, re.IGNORECASE)
+    if not tag:
+        return None
+    content = _CONTENT_RE.search(tag.group(0))
+    return htmllib.unescape(content.group(1)).strip() if content else None
+
+
+def _title(head: str) -> str | None:
+    m = _TITLE_RE.search(head)
+    return htmllib.unescape(m.group(1)).strip() if m else None
+
+
+def _canonical(head: str, base: str) -> str | None:
+    tag = _CANONICAL_RE.search(head)
+    if not tag:
+        return None
+    href = _HREF_RE.search(tag.group(0))
+    return urljoin(base, href.group(1)) if href else None
+
+
+class CrawlCollector:
+    name = "crawl"
+
+    async def collect(self, site: Site) -> list[Observation]:
+        async with httpx.AsyncClient(
+            timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=False
+        ) as client:
+            obs = await self._site_level(client, site)
+            obs.extend(await self._probe(client, site))
+            urls = await self._discover(client, site)
+            obs.append(
+                Observation(
+                    site=site.id,
+                    collector=self.name,
+                    subject=site.host,
+                    key="urls_discovered",
+                    value=str(len(urls)),
+                )
+            )
+            sem = asyncio.Semaphore(CONCURRENCY)
+            results = await asyncio.gather(*(self._page(client, site, url, sem) for url in urls))
+            for page in results:
+                obs.extend(page)
+        return obs
+
+    async def _site_level(self, client: httpx.AsyncClient, site: Site) -> list[Observation]:
+        """robots.txt, verbatim. It is one file that can silently cost a site
+        every rendered page — an unanchored `Disallow: /assets` blocks the JS
+        bundles, and nothing in a rank tracker will ever tell you."""
+        out: list[Observation] = []
+        try:
+            r = await client.get(f"{site.url}/robots.txt")
+            out.append(
+                Observation(
+                    site=site.id,
+                    collector=self.name,
+                    subject=site.host,
+                    key="robots_txt_status",
+                    value=str(r.status_code),
+                )
+            )
+            if r.status_code == 200:
+                out.append(
+                    Observation(
+                        site=site.id,
+                        collector=self.name,
+                        subject=site.host,
+                        key="robots_txt",
+                        value=r.text[:8000],
+                    )
+                )
+        except httpx.HTTPError as exc:
+            out.append(
+                Observation(
+                    site=site.id,
+                    collector=self.name,
+                    subject=site.host,
+                    key="robots_txt_error",
+                    value=str(exc),
+                )
+            )
+        return out
+
+    async def _probe(self, client: httpx.AsyncClient, site: Site) -> list[Observation]:
+        """Ask for URLs that should 404 and see what actually comes back."""
+
+        def ob(key: str, value: str | None) -> Observation:
+            return Observation(
+                site=site.id, collector=self.name, subject=site.host, key=key, value=value
+            )
+
+        try:
+            home = await client.get(f"{site.url}/", follow_redirects=True)
+            home_title = _title(home.text[:HEAD_BYTES])
+        except httpx.HTTPError:
+            home_title = None
+
+        out: list[Observation] = []
+        served = 0
+        shells = 0
+        for path in PROBE_PATHS:
+            try:
+                r = await client.get(f"{site.url}{path}", follow_redirects=True)
+            except httpx.HTTPError:
+                continue
+            if r.status_code == 200:
+                served += 1
+                # Serving *the homepage* on a nonexistent path is the specific
+                # failure. A real custom 404 page also answers 200 sometimes,
+                # but it does not carry the homepage's title.
+                if home_title and _title(r.text[:HEAD_BYTES]) == home_title:
+                    shells += 1
+        out.append(ob("probe_paths_tried", str(len(PROBE_PATHS))))
+        out.append(ob("probe_served_200", str(served)))
+        out.append(ob("probe_served_homepage_shell", str(shells)))
+        if home_title:
+            out.append(ob("homepage_title", home_title))
+        return out
+
+    async def _discover(self, client: httpx.AsyncClient, site: Site) -> list[str]:
+        """Sitemap first (it is the site's own claim about what should be
+        indexed); homepage alone if there isn't one."""
+        sitemaps: list[str] = []
+        try:
+            r = await client.get(f"{site.url}/robots.txt")
+            if r.status_code == 200:
+                sitemaps = [
+                    line.split(":", 1)[1].strip()
+                    for line in r.text.splitlines()
+                    if line.lower().startswith("sitemap:")
+                ]
+        except httpx.HTTPError:
+            pass
+        if not sitemaps:
+            sitemaps = [f"{site.url}/sitemap.xml"]
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for sm in sitemaps[:5]:
+            for url in await self._read_sitemap(client, sm, depth=0):
+                if url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+                if len(urls) >= site.max_urls:
+                    return urls
+        return urls or [site.url + "/"]
+
+    async def _read_sitemap(self, client: httpx.AsyncClient, url: str, depth: int) -> list[str]:
+        if depth > 1:  # one level of <sitemapindex> nesting is enough
+            return []
+        try:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return []
+            root = ET.fromstring(r.content)
+        except (httpx.HTTPError, ET.ParseError):
+            return []
+
+        ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+        if root.tag == f"{ns}sitemapindex":
+            nested: list[str] = []
+            for loc in root.iterfind(f".//{ns}sitemap/{ns}loc"):
+                if loc.text:
+                    nested.extend(await self._read_sitemap(client, loc.text.strip(), depth + 1))
+            return nested
+        return [loc.text.strip() for loc in root.iterfind(f".//{ns}url/{ns}loc") if loc.text]
+
+    async def _page(
+        self, client: httpx.AsyncClient, site: Site, url: str, sem: asyncio.Semaphore
+    ) -> list[Observation]:
+        def ob(key: str, value: str | None) -> Observation:
+            return Observation(site=site.id, collector=self.name, subject=url, key=key, value=value)
+
+        async with sem:
+            try:
+                r = await client.get(url)
+            except httpx.HTTPError as exc:
+                return [ob("fetch_error", str(exc))]
+
+            out = [ob("status", str(r.status_code))]
+            # Redirects are not followed on purpose: a sitemap URL that answers
+            # 301 is itself the finding, and following it would hide that.
+            if 300 <= r.status_code < 400:
+                out.append(ob("redirect_to", r.headers.get("location")))
+                return out
+            if r.status_code != 200:
+                return out
+
+            xrobots = r.headers.get("x-robots-tag")
+            if xrobots:
+                out.append(ob("x_robots_tag", xrobots))
+            if "html" not in r.headers.get("content-type", ""):
+                return out
+
+            head = r.text[:HEAD_BYTES]
+            out.append(ob("title", _title(head)))
+            out.append(ob("meta_description", _meta(head, "description")))
+            out.append(ob("meta_robots", _meta(head, "robots")))
+            out.append(ob("canonical", _canonical(head, url)))
+            return out

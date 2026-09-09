@@ -1,0 +1,20 @@
+# Copy to sites.yaml (gitignored) and fill in.
+#
+# `repo` is the field that matters most: a site with a local checkout is one
+# Foreman can open a PR against, not just report on. That asymmetry is the
+# whole reason to run this locally instead of buying a SaaS seat.
+
+sites:
+  - id: mfa
+    url: https://www.myfinanceadvisor.com
+    repo: /mnt/ExtraDrive/repos/MyFinanceAdvisor-tres
+    cms: spa            # spa | wordpress | static | other — shapes which rules apply
+    max_urls: 500
+    tags: [owned, production]
+
+  - id: example-client
+    url: https://example.com
+    cms: wordpress
+    max_urls: 200
+    tags: [client]
+    # No repo: monitored and reported on, never auto-fixed.
