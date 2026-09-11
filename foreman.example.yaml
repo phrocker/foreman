@@ -1,0 +1,38 @@
+# Copy to foreman.yaml (gitignored) and fill in.
+#
+# A project is the unit. A website is one *surface* of a project — a project
+# with no `web:` block is still a project, and the collectors that need a URL
+# simply skip it.
+#
+# `repo` is the field that matters most: a project with a local checkout is one
+# Foreman can open a pull request against, not just report on. That asymmetry is
+# the whole argument for running this yourself rather than buying a seat.
+
+projects:
+  - id: mfa
+    name: MyFinanceAdvisor
+    repo: /mnt/ExtraDrive/repos/MyFinanceAdvisor-tres
+    domains: [seo, security, performance]
+    tags: [owned, production]
+    web:
+      url: https://www.myfinanceadvisor.com
+      kind: spa          # spa | wordpress | static | other
+      max_urls: 500
+      render_sample: 5
+
+  - id: example-client
+    name: Example Client
+    domains: [seo, security]
+    tags: [client]
+    web:
+      url: https://example.com
+      kind: wordpress
+      max_urls: 200
+    # No repo: monitored and reported on, never auto-fixed.
+
+  - id: internal-lib
+    name: Some library with no website
+    repo: /path/to/repo
+    domains: [security]
+    tags: [internal]
+    # No web surface. Crawl and TLS collectors skip it; security rules still apply.

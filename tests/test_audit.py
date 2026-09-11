@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from foreman.audit import AgentReport, _cost_of, _known_findings
-from foreman.config import Registry, Site
+from foreman.config import Project, Registry
 from foreman.models import Finding, Observation, Severity
 from foreman.runner import check_all
 from foreman.store import Store
@@ -40,7 +40,7 @@ def test_known_findings_are_formatted_for_the_prompt(tmp_path):
             run_id,
             [
                 Finding(
-                    site="s1",
+                    project="s1",
                     rule="soft_404_shell",
                     severity=Severity.HIGH,
                     summary="nonexistent URLs answer 200",
@@ -71,7 +71,7 @@ def test_nightly_check_does_not_delete_agent_findings(tmp_path):
             run_id,
             [
                 Observation(
-                    site="s1",
+                    project="s1",
                     collector="crawl",
                     subject="https://s1.test/p",
                     key="status",
@@ -84,7 +84,7 @@ def test_nightly_check_does_not_delete_agent_findings(tmp_path):
             run_id,
             [
                 Finding(
-                    site="s1",
+                    project="s1",
                     rule="seo-page/thin-content",
                     severity=Severity.MEDIUM,
                     summary="thin content on the pricing page",
@@ -96,7 +96,7 @@ def test_nightly_check_does_not_delete_agent_findings(tmp_path):
             run_id,
             [
                 Finding(
-                    site="s1",
+                    project="s1",
                     rule="missing_title",
                     severity=Severity.MEDIUM,
                     summary="a page has no title",
@@ -105,7 +105,7 @@ def test_nightly_check_does_not_delete_agent_findings(tmp_path):
         )
         assert len(store.open_findings("s1")) == 2
 
-        registry = Registry(sites=[Site(id="s1", url="https://s1.test")])
+        registry = Registry(projects=[Project(id="s1", web={"url": "https://s1.test"})])
         check_all(registry, store)
 
         remaining = store.open_findings("s1")

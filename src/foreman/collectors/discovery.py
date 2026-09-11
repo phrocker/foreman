@@ -11,15 +11,15 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from ..config import Site
+from ..config import Project
 
 
-async def discover_urls(client: httpx.AsyncClient, site: Site) -> list[str]:
-    """Sitemap first (it is the site's own claim about what should be
-    indexed); homepage alone if there isn't one."""
+async def discover_urls(client: httpx.AsyncClient, project: Project) -> list[str]:
+    """Sitemap first; homepage alone if there is not one."""
+    assert project.web is not None, "caller must check for a web surface"
     sitemaps: list[str] = []
     try:
-        r = await client.get(f"{site.url}/robots.txt")
+        r = await client.get(f"{project.web.url}/robots.txt")
         if r.status_code == 200:
             sitemaps = [
                 line.split(":", 1)[1].strip()
@@ -29,7 +29,7 @@ async def discover_urls(client: httpx.AsyncClient, site: Site) -> list[str]:
     except httpx.HTTPError:
         pass
     if not sitemaps:
-        sitemaps = [f"{site.url}/sitemap.xml"]
+        sitemaps = [f"{project.web.url}/sitemap.xml"]
 
     urls: list[str] = []
     seen: set[str] = set()
@@ -38,9 +38,9 @@ async def discover_urls(client: httpx.AsyncClient, site: Site) -> list[str]:
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
-            if len(urls) >= site.max_urls:
+            if len(urls) >= project.web.max_urls:
                 return urls
-    return urls or [site.url + "/"]
+    return urls or [project.web.url + "/"]
 
 
 async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> list[str]:

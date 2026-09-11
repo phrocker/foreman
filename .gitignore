@@ -9,8 +9,9 @@ build/
 .ruff_cache/
 .mypy_cache/
 
-# Local state: your registry names real client sites, and the store holds
-# their crawl history. Neither belongs on GitHub.
+# Local state: the registry names real client projects and the store holds
+# their history. Neither belongs on GitHub.
+foreman.yaml
 sites.yaml
 *.db
 *.db-journal

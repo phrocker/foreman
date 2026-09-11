@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 
 import httpx
 
-from ..config import Site
+from ..config import Project
 from ..models import Observation
 from .discovery import discover_urls
 
@@ -77,40 +77,44 @@ def _canonical(head: str, base: str) -> str | None:
 class CrawlCollector:
     name = "crawl"
 
-    async def collect(self, site: Site) -> list[Observation]:
+    async def collect(self, project: Project) -> list[Observation]:
+        # A project without a web surface is still a project; this collector
+        # simply has nothing to look at.
+        if project.web is None:
+            return []
         async with httpx.AsyncClient(
             timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=False
         ) as client:
-            obs = await self._site_level(client, site)
-            obs.extend(await self._probe(client, site))
-            urls = await discover_urls(client, site)
+            obs = await self._robots(client, project)
+            obs.extend(await self._probe(client, project))
+            urls = await discover_urls(client, project)
             obs.append(
                 Observation(
-                    site=site.id,
+                    project=project.id,
                     collector=self.name,
-                    subject=site.host,
+                    subject=project.web.host,
                     key="urls_discovered",
                     value=str(len(urls)),
                 )
             )
             sem = asyncio.Semaphore(CONCURRENCY)
-            results = await asyncio.gather(*(self._page(client, site, url, sem) for url in urls))
+            results = await asyncio.gather(*(self._page(client, project, url, sem) for url in urls))
             for page in results:
                 obs.extend(page)
         return obs
 
-    async def _site_level(self, client: httpx.AsyncClient, site: Site) -> list[Observation]:
+    async def _robots(self, client: httpx.AsyncClient, project: Project) -> list[Observation]:
         """robots.txt, verbatim. It is one file that can silently cost a site
         every rendered page — an unanchored `Disallow: /assets` blocks the JS
         bundles, and nothing in a rank tracker will ever tell you."""
         out: list[Observation] = []
         try:
-            r = await client.get(f"{site.url}/robots.txt")
+            r = await client.get(f"{project.web.url}/robots.txt")
             out.append(
                 Observation(
-                    site=site.id,
+                    project=project.id,
                     collector=self.name,
-                    subject=site.host,
+                    subject=project.web.host,
                     key="robots_txt_status",
                     value=str(r.status_code),
                 )
@@ -118,9 +122,9 @@ class CrawlCollector:
             if r.status_code == 200:
                 out.append(
                     Observation(
-                        site=site.id,
+                        project=project.id,
                         collector=self.name,
-                        subject=site.host,
+                        subject=project.web.host,
                         key="robots_txt",
                         value=r.text[:8000],
                     )
@@ -128,25 +132,29 @@ class CrawlCollector:
         except httpx.HTTPError as exc:
             out.append(
                 Observation(
-                    site=site.id,
+                    project=project.id,
                     collector=self.name,
-                    subject=site.host,
+                    subject=project.web.host,
                     key="robots_txt_error",
                     value=str(exc),
                 )
             )
         return out
 
-    async def _probe(self, client: httpx.AsyncClient, site: Site) -> list[Observation]:
+    async def _probe(self, client: httpx.AsyncClient, project: Project) -> list[Observation]:
         """Ask for URLs that should 404 and see what actually comes back."""
 
         def ob(key: str, value: str | None) -> Observation:
             return Observation(
-                site=site.id, collector=self.name, subject=site.host, key=key, value=value
+                project=project.id,
+                collector=self.name,
+                subject=project.web.host,
+                key=key,
+                value=value,
             )
 
         try:
-            home = await client.get(f"{site.url}/", follow_redirects=True)
+            home = await client.get(f"{project.web.url}/", follow_redirects=True)
             home_title = _title(home.text[:HEAD_BYTES])
         except httpx.HTTPError:
             home_title = None
@@ -156,7 +164,7 @@ class CrawlCollector:
         shells = 0
         for path in PROBE_PATHS:
             try:
-                r = await client.get(f"{site.url}{path}", follow_redirects=True)
+                r = await client.get(f"{project.web.url}{path}", follow_redirects=True)
             except httpx.HTTPError:
                 continue
             if r.status_code == 200:
@@ -174,10 +182,12 @@ class CrawlCollector:
         return out
 
     async def _page(
-        self, client: httpx.AsyncClient, site: Site, url: str, sem: asyncio.Semaphore
+        self, client: httpx.AsyncClient, project: Project, url: str, sem: asyncio.Semaphore
     ) -> list[Observation]:
         def ob(key: str, value: str | None) -> Observation:
-            return Observation(site=site.id, collector=self.name, subject=url, key=key, value=value)
+            return Observation(
+                project=project.id, collector=self.name, subject=url, key=key, value=value
+            )
 
         async with sem:
             try:

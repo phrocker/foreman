@@ -53,8 +53,17 @@ class Budget:
         with self._lock:
             return max(0.0, self.limit_usd - self._spent)
 
+    @property
+    def exceeded(self) -> bool:
+        with self._lock:
+            return self._spent > self.limit_usd
+
     def spend(self, amount_usd: float) -> None:
-        """Charge the budget, or refuse. Checked *before* the API call, not after."""
+        """Authorise a charge *before* it happens, or refuse it.
+
+        Use where the cost is knowable in advance and the work can still be
+        called off.
+        """
         if amount_usd < 0:
             raise ValueError("amount_usd must be non-negative")
         with self._lock:
@@ -64,6 +73,23 @@ class Budget:
                     f"ceiling (${self._spent:.4f} already spent at depth {self.depth})"
                 )
             self._spent += amount_usd
+
+    def charge(self, amount_usd: float) -> bool:
+        """Record a charge that has *already* happened. Returns False if it put
+        the budget over its ceiling.
+
+        Separate from `spend` because some costs are only knowable afterwards —
+        a subprocess reports what it spent once it has finished. Refusing such a
+        charge would be a lie: the money is gone either way, and a ledger that
+        discards an over-ceiling entry reports zero spend while the invoice says
+        otherwise. It records the truth and lets the caller decide what to do
+        about it — which for a portfolio sweep is "stop before the next project".
+        """
+        if amount_usd < 0:
+            raise ValueError("amount_usd must be non-negative")
+        with self._lock:
+            self._spent += amount_usd
+            return self._spent <= self.limit_usd
 
     def split(self, n: int, *, reserve: float = 0.0) -> list[Budget]:
         """Carve n child budgets out of what is left.

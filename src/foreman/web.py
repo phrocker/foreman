@@ -1,7 +1,7 @@
 """Local web UI.
 
 Reads foreman.db directly, so what the page shows is what the last run stored —
-no export step, no sync, and nothing about your client sites leaves the machine.
+no export step, no sync, and nothing about your projects leaves the machine.
 """
 
 from __future__ import annotations
@@ -68,35 +68,35 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     def overview() -> dict[str, Any]:
         s = store()
         try:
-            sites = [dict(r) for r in s.site_summary()]
+            projects = [dict(r) for r in s.project_summary()]
             findings = s.open_findings()
         finally:
             s.close()
         counts = {"high": 0, "medium": 0, "low": 0}
         for row in findings:
             counts[row["severity"]] = counts.get(row["severity"], 0) + 1
-        for site in sites:
+        for project in projects:
             for key in ("high", "medium", "low"):
-                site[key] = int(site[key] or 0)
-            site["total"] = site["high"] + site["medium"] + site["low"]
+                project[key] = int(project[key] or 0)
+            project["total"] = project["high"] + project["medium"] + project["low"]
         return {
             "totals": {
                 "open": len(findings),
-                "sites": len(sites),
-                "clean": sum(1 for s_ in sites if s_["total"] == 0),
+                "projects": len(projects),
+                "clean": sum(1 for p_ in projects if p_["total"] == 0),
                 **counts,
             },
-            "sites": sites,
-            "last_run": max((s_["last_run"] or "" for s_ in sites), default=None) or None,
+            "projects": projects,
+            "last_run": max((p_["last_run"] or "" for p_ in projects), default=None) or None,
         }
 
     @app.get("/api/findings")
     def findings(
-        site: str | None = Query(None), severity: str | None = Query(None)
+        project: str | None = Query(None), severity: str | None = Query(None)
     ) -> list[dict[str, Any]]:
         s = store()
         try:
-            rows = s.open_findings(site)
+            rows = s.open_findings(project)
         finally:
             s.close()
         out = []
@@ -126,7 +126,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         return job.as_dict()
 
     @app.post("/api/run")
-    async def start_run(site: str | None = Query(None)) -> dict[str, Any]:
+    async def start_run(project: str | None = Query(None)) -> dict[str, Any]:
         with job.lock:
             if job.running:
                 raise HTTPException(409, "a run is already in progress")
@@ -144,8 +144,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 s = store()
                 try:
-                    await collect_all(load_registry(registry_path), s, site=site, log=note)
-                    check_all(load_registry(registry_path), s, site=site, log=note)
+                    await collect_all(load_registry(registry_path), s, project=project, log=note)
+                    check_all(load_registry(registry_path), s, project=project, log=note)
                 finally:
                     s.close()
             except Exception as exc:  # noqa: BLE001 — surfaced in the UI, not swallowed

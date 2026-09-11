@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from ..config import Site
+from ..config import Project
 from ..models import Observation
 
 SECURITY_HEADERS = (
@@ -33,12 +33,16 @@ def _cert_not_after(host: str, port: int = 443) -> str | None:
 class TlsCollector:
     name = "tls"
 
-    async def collect(self, site: Site) -> list[Observation]:
-        host = site.host
+    async def collect(self, project: Project) -> list[Observation]:
+        # A project without a web surface is still a project; this collector
+        # simply has nothing to look at.
+        if project.web is None:
+            return []
+        host = project.web.host
 
         def ob(key: str, value: str | None) -> Observation:
             return Observation(
-                site=site.id, collector=self.name, subject=host, key=key, value=value
+                project=project.id, collector=self.name, subject=host, key=key, value=value
             )
 
         out: list[Observation] = []
@@ -53,7 +57,7 @@ class TlsCollector:
 
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False) as client:
             try:
-                r = await client.get(f"{site.url}/", follow_redirects=True)
+                r = await client.get(f"{project.web.url}/", follow_redirects=True)
                 for header in SECURITY_HEADERS:
                     out.append(ob(f"header_{header.replace('-', '_')}", r.headers.get(header)))
             except httpx.HTTPError as exc:

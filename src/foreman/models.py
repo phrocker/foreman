@@ -26,7 +26,7 @@ def utcnow() -> str:
 class Observation(BaseModel):
     """One fact about one subject at one moment."""
 
-    site: str
+    project: str
     collector: str
     # A URL for page-level facts; the hostname for site-level ones.
     subject: str
@@ -49,7 +49,7 @@ class Finding(BaseModel):
     should be.
     """
 
-    site: str
+    project: str
     rule: str
     severity: Severity
     summary: str

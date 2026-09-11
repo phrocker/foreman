@@ -40,3 +40,28 @@ def test_depth_cap():
     grandchild = child.split(1)[0]
     with pytest.raises(DepthExceeded):
         grandchild.split(1)
+
+
+def test_charge_records_spend_that_went_over():
+    """Regression: an over-ceiling charge used to raise and discard the amount,
+    so a $2.18 audit reported $0.00 spent and the ceiling never gated anything."""
+    b = Budget(limit_usd=2.0)
+    assert b.charge(2.18) is False
+    assert b.spent == pytest.approx(2.18)
+    assert b.remaining == 0.0
+    assert b.exceeded is True
+
+
+def test_charge_under_ceiling_reports_ok():
+    b = Budget(limit_usd=2.0)
+    assert b.charge(0.5) is True
+    assert b.exceeded is False
+    assert b.remaining == pytest.approx(1.5)
+
+
+def test_spend_still_refuses_in_advance():
+    """spend() is for costs knowable before the work runs; it must still refuse."""
+    b = Budget(limit_usd=1.0)
+    with pytest.raises(BudgetExceeded):
+        b.spend(1.5)
+    assert b.spent == 0.0

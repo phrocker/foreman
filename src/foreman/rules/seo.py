@@ -1,62 +1,40 @@
-"""Deterministic findings over a single run's observations.
+"""Search-visibility rules.
 
-Every rule here is a comparison, not a judgement. That is the point: these run
-on all 40 sites nightly for free, and the model only ever sees what they surface.
-The seed set is drawn from real bugs found on a production site — each one was
-invisible to hosted rank trackers, and each one was a five-line check.
+One domain among several. Everything here is a comparison over observations the
+collectors already made — no rule in this file calls a model, and none should.
+The seed set is drawn from real defects on a production site, each of which was
+invisible to hosted rank trackers and each of which was a five-line check.
 """
 
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Sequence
-from typing import Any
 
-from .models import Finding, Severity
+from ..models import Severity
+from .common import Add, Pages
 
-CERT_WARN_DAYS = 21
-LCP_BUDGET_MS = 2500  # Core Web Vitals "good" threshold
-CLS_BUDGET = 0.1
-# Below this ratio of served-to-rendered text, the page is substantially
-# client-side only.
-SERVED_TEXT_FLOOR = 0.35
 # Directories a CMS or bundler serves front-end assets from. An unanchored
 # Disallow on any of these blocks the JS and CSS every page needs to render.
 ASSET_PREFIXES = ("/assets", "/static", "/_next", "/dist", "/build", "/wp-includes")
+# Below this ratio of served-to-rendered text, the page is substantially
+# client-side only.
+SERVED_TEXT_FLOOR = 0.35
 
 
-def _pages(rows: Sequence[Any]) -> dict[str, dict[str, str | None]]:
-    pages: dict[str, dict[str, str | None]] = defaultdict(dict)
-    for row in rows:
-        pages[row["subject"]][row["key"]] = row["value"]
-    return pages
+def evaluate(pages: Pages, add: Add) -> None:
+    _metadata(pages, add)
+    _sitemap_hygiene(pages, add)
+    _indexability(pages, add)
+    _served_vs_rendered(pages, add)
+    _robots(pages, add)
 
 
-def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
-    pages = _pages(rows)
-    findings: list[Finding] = []
-
-    def add(
-        rule: str, severity: Severity, summary: str, subjects: list[str], detail: str | None = None
-    ) -> None:
-        findings.append(
-            Finding(
-                site=site_id,
-                rule=rule,
-                severity=severity,
-                summary=summary,
-                subjects=subjects[:25],
-                detail=detail,
-            )
-        )
-
-    # --- duplicate and missing metadata ----------------------------------
+def _metadata(pages: Pages, add: Add) -> None:
     for key, label in (("title", "title"), ("meta_description", "meta description")):
         groups: dict[str, list[str]] = defaultdict(list)
         for url, facts in pages.items():
-            value = facts.get(key)
-            if value:
+            if value := facts.get(key):
                 groups[value].append(url)
         for value, urls in groups.items():
             if len(urls) > 1:
@@ -76,7 +54,8 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
         if missing:
             add(f"missing_{key}", Severity.MEDIUM, f"{len(missing)} pages have no {label}", missing)
 
-    # --- sitemap hygiene --------------------------------------------------
+
+def _sitemap_hygiene(pages: Pages, add: Add) -> None:
     redirecting = sorted(u for u, f in pages.items() if f.get("redirect_to"))
     if redirecting:
         add(
@@ -87,7 +66,6 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
             "A sitemap should list final URLs. If each also carries a canonical back "
             "to the redirecting form, the two disagree about which URL is real.",
         )
-
     broken = sorted(
         u
         for u, f in pages.items()
@@ -101,7 +79,8 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
             broken,
         )
 
-    # --- canonical pointing at a redirect ---------------------------------
+
+def _indexability(pages: Pages, add: Add) -> None:
     bad_canonical = sorted(
         u
         for u, f in pages.items()
@@ -114,8 +93,6 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
             f"{len(bad_canonical)} pages canonicalise to a URL that redirects",
             bad_canonical,
         )
-
-    # --- noindex on a sitemapped page -------------------------------------
     noindexed = sorted(
         u
         for u, f in pages.items()
@@ -130,21 +107,12 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
             "The sitemap asks for indexing and the page refuses. One of them is wrong.",
         )
 
-    # --- served HTML vs rendered DOM --------------------------------------
-    # Only runs where the render collector has been over the same URL.
+
+def _served_vs_rendered(pages: Pages, add: Add) -> None:
+    """Only fires where the render collector covered the same URL."""
     for url, facts in pages.items():
-        if facts.get("render_error"):
-            add(
-                "render_failed",
-                Severity.HIGH,
-                "page does not render in a browser",
-                [url],
-                facts["render_error"],
-            )
-            continue
-        # Only meaningful where the fetch actually got a page. The crawler does
-        # not follow redirects, so a 301 leaves no served title — absence there
-        # means "we looked at a redirect", not "the title is JS-only".
+        # The crawler does not follow redirects, so a 301 leaves no served
+        # title; absence there means "we looked at a redirect", not "JS-only".
         if facts.get("status") != "200":
             continue
 
@@ -169,8 +137,7 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
                 f"rendered: {rendered_title!r} — the served HTML has no title at all.",
             )
 
-        served = facts.get("served_text_chars")
-        rendered = facts.get("rendered_text_chars")
+        served, rendered = facts.get("served_text_chars"), facts.get("rendered_text_chars")
         if served is not None and rendered and int(rendered) > 500:
             ratio = int(served) / int(rendered)
             if ratio < SERVED_TEXT_FLOOR:
@@ -183,36 +150,10 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
                     "invisible to any crawler that does not run JavaScript.",
                 )
 
-        lcp = facts.get("lcp_ms")
-        if lcp and int(lcp) > LCP_BUDGET_MS:
-            add(
-                "slow_lcp",
-                Severity.MEDIUM,
-                f"LCP {int(lcp)}ms, over the {LCP_BUDGET_MS}ms budget",
-                [url],
-            )
-        cls = facts.get("cls")
-        if cls and float(cls) > CLS_BUDGET:
-            add(
-                "layout_shift",
-                Severity.MEDIUM,
-                f"CLS {float(cls):.3f}, over the {CLS_BUDGET} budget",
-                [url],
-            )
-        failed = facts.get("requests_failed")
-        if failed and int(failed) > 0:
-            add(
-                "requests_failed",
-                Severity.MEDIUM,
-                f"{failed} request(s) failed while rendering",
-                [url],
-                facts.get("request_failed_sample"),
-            )
 
-    # --- site-level: robots.txt, TLS, scheme ------------------------------
+def _robots(pages: Pages, add: Add) -> None:
     for subject, facts in pages.items():
-        robots = facts.get("robots_txt")
-        if robots:
+        if robots := facts.get("robots_txt"):
             blocking = [
                 line.strip()
                 for line in robots.splitlines()
@@ -227,9 +168,9 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
                     "robots.txt blocks a front-end asset directory",
                     [subject],
                     "\n".join(blocking)
-                    + "\n\nUnanchored, this blocks every script and stylesheet beneath it, "
-                    "so no crawler can render any page. Anchor it with $ if the intent "
-                    "was to block one route.",
+                    + "\n\nUnanchored, this blocks every script and stylesheet beneath "
+                    "it, so no crawler can render any page. Anchor it with $ if the "
+                    "intent was to block one route.",
                 )
 
         shells = facts.get("probe_served_homepage_shell")
@@ -254,34 +195,3 @@ def evaluate(site_id: str, rows: Sequence[Any]) -> list[Finding]:
                 "Not the homepage shell, so likely a custom error page — but it should "
                 "still return a 404 status so crawlers stop treating these as pages.",
             )
-
-        days = facts.get("cert_days_remaining")
-        if days is not None and int(days) < CERT_WARN_DAYS:
-            add(
-                "cert_expiring", Severity.HIGH, f"TLS certificate expires in {days} days", [subject]
-            )
-
-        if facts.get("http_status") == "200":
-            add(
-                "http_not_redirected",
-                Severity.MEDIUM,
-                "http:// serves content instead of redirecting to https://",
-                [subject],
-                "Every page exists on two schemes; only the canonical tag keeps the "
-                "http:// copies out of the index.",
-            )
-
-        for header in (
-            "strict_transport_security",
-            "content_security_policy",
-            "x_content_type_options",
-        ):
-            if f"header_{header}" in facts and facts[f"header_{header}"] is None:
-                add(
-                    "missing_security_header",
-                    Severity.LOW,
-                    f"no {header.replace('_', '-')} header",
-                    [subject],
-                )
-
-    return findings

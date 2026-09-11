@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import httpx
 
-from ..config import Site
+from ..config import Project
 from ..models import Observation
 from .discovery import discover_urls
 
@@ -57,7 +57,11 @@ VITALS_READ = """() => ({
 class RenderCollector:
     name = "render"
 
-    async def collect(self, site: Site) -> list[Observation]:
+    async def collect(self, project: Project) -> list[Observation]:
+        # A project without a web surface is still a project; this collector
+        # simply has nothing to look at.
+        if project.web is None:
+            return []
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:  # pragma: no cover - optional extra
@@ -66,7 +70,7 @@ class RenderCollector:
                 'uv pip install -e ".[browser]" && playwright install chromium'
             ) from exc
 
-        urls = await self._sample(site)
+        urls = await self._sample(project)
         out: list[Observation] = []
 
         async with async_playwright() as pw:
@@ -82,31 +86,33 @@ class RenderCollector:
             await context.add_init_script(VITALS_INIT)
             try:
                 for url in urls:
-                    out.extend(await self._page(context, site, url))
+                    out.extend(await self._page(context, project, url))
             finally:
                 await context.close()
                 await browser.close()
         return out
 
-    async def _sample(self, site: Site) -> list[str]:
+    async def _sample(self, project: Project) -> list[str]:
         """Homepage plus an even spread of the sitemap.
 
         Evenly spaced rather than the first N: sitemaps are usually grouped by
         section, so the first N are all the same template and would exercise one
         code path. A spread hits several.
         """
-        limit = site.render_sample or DEFAULT_SAMPLE
-        home = f"{site.url}/"
+        limit = project.web.render_sample or DEFAULT_SAMPLE
+        home = f"{project.web.url}/"
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            found = [u for u in await discover_urls(client, site) if u != home]
+            found = [u for u in await discover_urls(client, project) if u != home]
         if not found:
             return [home]
         step = max(1, len(found) // max(1, limit - 1))
         return [home, *found[::step]][:limit]
 
-    async def _page(self, context, site: Site, url: str) -> list[Observation]:
+    async def _page(self, context, project: Project, url: str) -> list[Observation]:
         def ob(key: str, value: str | None) -> Observation:
-            return Observation(site=site.id, collector=self.name, subject=url, key=key, value=value)
+            return Observation(
+                project=project.id, collector=self.name, subject=url, key=key, value=value
+            )
 
         page = await context.new_page()
         console_errors: list[str] = []

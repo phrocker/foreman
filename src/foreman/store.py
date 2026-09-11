@@ -20,7 +20,7 @@ DEFAULT_DB = Path("foreman.db")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY,
-    site        TEXT NOT NULL,
+    project     TEXT NOT NULL,
     collector   TEXT NOT NULL,
     started_at  TEXT NOT NULL,
     finished_at TEXT,
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS observations (
     id          INTEGER PRIMARY KEY,
     run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    site        TEXT NOT NULL,
+    project     TEXT NOT NULL,
     collector   TEXT NOT NULL,
     subject     TEXT NOT NULL,
     key         TEXT NOT NULL,
@@ -39,14 +39,14 @@ CREATE TABLE IF NOT EXISTS observations (
     observed_at TEXT NOT NULL
 );
 
--- Every diff is "same site+subject+key, ordered by time", so that is the index.
-CREATE INDEX IF NOT EXISTS idx_obs_subject ON observations (site, subject, key, observed_at);
+-- Every diff is "same project+subject+key, ordered by time"; hence the index.
+CREATE INDEX IF NOT EXISTS idx_obs_subject ON observations (project, subject, key, observed_at);
 CREATE INDEX IF NOT EXISTS idx_obs_run ON observations (run_id);
 
 CREATE TABLE IF NOT EXISTS findings (
     id          INTEGER PRIMARY KEY,
     run_id      INTEGER REFERENCES runs(id) ON DELETE CASCADE,
-    site        TEXT NOT NULL,
+    project     TEXT NOT NULL,
     rule        TEXT NOT NULL,
     severity    TEXT NOT NULL,
     summary     TEXT NOT NULL,
@@ -58,19 +58,37 @@ CREATE TABLE IF NOT EXISTS findings (
     -- They differ enough in reliability that the UI has to be able to say which.
     source      TEXT NOT NULL DEFAULT 'rule'
 );
-CREATE INDEX IF NOT EXISTS idx_find_open ON findings (site, resolved_at);
+CREATE INDEX IF NOT EXISTS idx_find_open ON findings (project, resolved_at);
 """
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Additive column migrations.
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Column names, or an empty set if the table does not exist yet."""
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _rename_migrations(conn: sqlite3.Connection) -> None:
+    """Renames, applied BEFORE the schema script.
+
+    `site` became `project` when it became clear a website is one surface of a
+    project rather than the unit itself. This has to run first: SCHEMA's
+    CREATE INDEX statements name the new column, and creating an index over a
+    column that has not been renamed yet fails outright.
+    """
+    for table in ("runs", "observations", "findings"):
+        columns = _columns(conn, table)
+        if "site" in columns and "project" not in columns:
+            conn.execute(f"ALTER TABLE {table} RENAME COLUMN site TO project")
+
+
+def _additive_migrations(conn: sqlite3.Connection) -> None:
+    """New columns, applied AFTER the schema script.
 
     CREATE TABLE IF NOT EXISTS silently does nothing on a database that already
-    exists, so a new column in SCHEMA never reaches one — and this tool's only
+    exists, so a column added to SCHEMA never reaches one — and this tool's only
     database is already in use.
     """
-    have = {row["name"] for row in conn.execute("PRAGMA table_info(findings)")}
-    if "source" not in have:
+    if "source" not in _columns(conn, "findings"):
         conn.execute("ALTER TABLE findings ADD COLUMN source TEXT NOT NULL DEFAULT 'rule'")
 
 
@@ -92,8 +110,9 @@ class Store:
         conn.execute("PRAGMA foreign_keys = ON")
         # WAL so a long collect run does not block a concurrent `foreman status`.
         conn.execute("PRAGMA journal_mode = WAL")
+        _rename_migrations(conn)
         conn.executescript(SCHEMA)
-        _migrate(conn)
+        _additive_migrations(conn)
         conn.commit()
         self._conn = conn
 
@@ -110,10 +129,10 @@ class Store:
 
     # --- runs -------------------------------------------------------------
 
-    def start_run(self, site: str, collector: str) -> int:
+    def start_run(self, project: str, collector: str) -> int:
         cur = self.conn.execute(
-            "INSERT INTO runs (site, collector, started_at) VALUES (?, ?, ?)",
-            (site, collector, utcnow()),
+            "INSERT INTO runs (project, collector, started_at) VALUES (?, ?, ?)",
+            (project, collector, utcnow()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -125,12 +144,12 @@ class Store:
         )
         self.conn.commit()
 
-    def recent_runs(self, site: str, collector: str, limit: int = 2) -> list[int]:
+    def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]:
         """Most recent successful run ids, newest first."""
         rows = self.conn.execute(
-            "SELECT id FROM runs WHERE site = ? AND collector = ? AND ok = 1 "
+            "SELECT id FROM runs WHERE project = ? AND collector = ? AND ok = 1 "
             "ORDER BY id DESC LIMIT ?",
-            (site, collector, limit),
+            (project, collector, limit),
         ).fetchall()
         return [int(r["id"]) for r in rows]
 
@@ -138,10 +157,12 @@ class Store:
 
     def record(self, run_id: int, observations: Iterable[Observation]) -> int:
         now = utcnow()
-        rows = [(run_id, o.site, o.collector, o.subject, o.key, o.value, now) for o in observations]
+        rows = [
+            (run_id, o.project, o.collector, o.subject, o.key, o.value, now) for o in observations
+        ]
         self.conn.executemany(
             "INSERT INTO observations "
-            "(run_id, site, collector, subject, key, value, observed_at) "
+            "(run_id, project, collector, subject, key, value, observed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
@@ -162,7 +183,7 @@ class Store:
         rows = [
             (
                 run_id,
-                f.site,
+                f.project,
                 f.rule,
                 f.severity.value,
                 f.summary,
@@ -175,7 +196,7 @@ class Store:
         ]
         self.conn.executemany(
             "INSERT INTO findings "
-            "(run_id, site, rule, severity, summary, subjects, detail, found_at, source) "
+            "(run_id, project, rule, severity, summary, subjects, detail, found_at, source) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
@@ -185,38 +206,38 @@ class Store:
     def finding(self, finding_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
 
-    def site_summary(self) -> list[sqlite3.Row]:
-        """Per-site rollup: open findings by severity, and when it was last seen."""
+    def project_summary(self) -> list[sqlite3.Row]:
+        """Per-project rollup: open findings by severity, and when it was last seen."""
         # Two aggregates joined, not one join then aggregated: `runs` has many
-        # rows per site, so counting findings across that join multiplies every
+        # rows per project, so counting findings across that join multiplies every
         # finding by the number of runs.
         return self.conn.execute("""
             SELECT
-                r.site                     AS site,
+                r.project                  AS project,
                 r.last_run                 AS last_run,
                 COALESCE(f.high, 0)        AS high,
                 COALESCE(f.medium, 0)      AS medium,
                 COALESCE(f.low, 0)         AS low
             FROM (
-                SELECT site, MAX(finished_at) AS last_run
-                FROM runs WHERE ok = 1 GROUP BY site
+                SELECT project, MAX(finished_at) AS last_run
+                FROM runs WHERE ok = 1 GROUP BY project
             ) r
             LEFT JOIN (
-                SELECT site,
+                SELECT project,
                        SUM(severity = 'high')   AS high,
                        SUM(severity = 'medium') AS medium,
                        SUM(severity = 'low')    AS low
-                FROM findings WHERE resolved_at IS NULL GROUP BY site
-            ) f ON f.site = r.site
-            ORDER BY high DESC, medium DESC, r.site
+                FROM findings WHERE resolved_at IS NULL GROUP BY project
+            ) f ON f.project = r.project
+            ORDER BY high DESC, medium DESC, r.project
             """).fetchall()
 
-    def open_findings(self, site: str | None = None) -> list[sqlite3.Row]:
+    def open_findings(self, project: str | None = None) -> list[sqlite3.Row]:
         sql = "SELECT * FROM findings WHERE resolved_at IS NULL"
         params: tuple[str, ...] = ()
-        if site:
-            sql += " AND site = ?"
-            params = (site,)
+        if project:
+            sql += " AND project = ?"
+            params = (project,)
         sql += (
             " ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
             "ELSE 2 END, found_at DESC"

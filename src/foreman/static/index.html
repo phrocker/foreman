@@ -135,7 +135,7 @@
   tr.row { cursor: pointer; }
   tr.row:hover td { background: var(--surface-alt); }
   .num { font-variant-numeric: tabular-nums; text-align: right; color: var(--text-2); }
-  .site-cell { color: var(--text-2); white-space: nowrap; }
+  .project-cell { color: var(--text-2); white-space: nowrap; }
 
   /* Severity: shape + label + colour, in that order of importance. */
   .sev { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: 13px; }
@@ -159,12 +159,12 @@
          border: 1px solid var(--border-firm); color: var(--text-3);
          white-space: nowrap; vertical-align: 1px; }
 
-  .site-row { display: flex; align-items: center; gap: 12px; padding: 11px 16px;
+  .project-row { display: flex; align-items: center; gap: 12px; padding: 11px 16px;
               border-bottom: 1px solid var(--border); cursor: pointer; }
-  .site-row:last-child { border-bottom: none; }
-  .site-row:hover { background: var(--surface-alt); }
-  .site-name { font-weight: 550; }
-  .site-when { color: var(--text-3); font-size: 12.5px; margin-left: auto; white-space: nowrap; }
+  .project-row:last-child { border-bottom: none; }
+  .project-row:hover { background: var(--surface-alt); }
+  .project-name { font-weight: 550; }
+  .project-when { color: var(--text-3); font-size: 12.5px; margin-left: auto; white-space: nowrap; }
   .pills { display: flex; gap: 6px; flex-wrap: wrap; }
   .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px;
           padding: 2px 9px; border-radius: 999px; background: var(--surface-alt);
@@ -208,20 +208,20 @@
       <button class="chip" data-sev="high"   aria-pressed="false"><span class="glyph sev-high">▲</span> High</button>
       <button class="chip" data-sev="medium" aria-pressed="false"><span class="glyph sev-medium">◆</span> Medium</button>
       <button class="chip" data-sev="low"    aria-pressed="false"><span class="glyph sev-low">●</span> Low</button>
-      <select id="siteFilter"><option value="">All sites</option></select>
+      <select id="projectFilter"><option value="">All projects</option></select>
       <input type="search" id="search" placeholder="Filter findings…  (press /)">
     </div>
     <div class="panel scroll">
       <table>
-        <thead><tr><th>Severity</th><th>Site</th><th>Finding</th><th class="num">URLs</th></tr></thead>
+        <thead><tr><th>Severity</th><th>Project</th><th>Finding</th><th class="num">URLs</th></tr></thead>
         <tbody id="findingRows"></tbody>
       </table>
     </div>
   </section>
 
   <section>
-    <h2>Sites</h2>
-    <div class="panel" id="siteRows"></div>
+    <h2>Projects</h2>
+    <div class="panel" id="projectRows"></div>
   </section>
 </div>
 
@@ -264,40 +264,40 @@ function renderOverview() {
   $("heroBreak").textContent =
     t.open ? `${t.high} high · ${t.medium} medium · ${t.low} low` : "everything clear";
   $("lastRun").textContent = "· last swept " + ago(state.overview.last_run);
-  $("heroNote").textContent = `across ${t.sites} site${t.sites === 1 ? "" : "s"}`;
+  $("heroNote").textContent = `across ${t.projects} site${t.projects === 1 ? "" : "s"}`;
   $("tiles").innerHTML = [
-    ["Sites monitored", t.sites],
+    ["Projects monitored", t.projects],
     ["High severity", t.high],
-    ["Sites clean", `${t.clean} / ${t.sites}`],
+    ["Projects clean", `${t.clean} / ${t.projects}`],
   ].map(([label, value]) =>
     `<div class="tile"><div class="tile-label">${esc(label)}</div>
      <div class="tile-value">${esc(value)}</div></div>`).join("");
 
-  const sel = $("siteFilter");
+  const sel = $("projectFilter");
   const current = sel.value;
-  sel.innerHTML = '<option value="">All sites</option>' +
-    state.overview.sites.map((s) => `<option value="${esc(s.site)}">${esc(s.site)}</option>`).join("");
+  sel.innerHTML = '<option value="">All projects</option>' +
+    state.overview.projects.map((s) => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join("");
   sel.value = current;
 }
 
 function renderSites() {
-  const rows = state.overview.sites;
-  $("siteRows").innerHTML = rows.length ? rows.map((s) => {
+  const rows = state.overview.projects;
+  $("projectRows").innerHTML = rows.length ? rows.map((p) => {
     const pills = s.total === 0
       ? '<span class="pill clean"><span class="glyph">✓</span> clean</span>'
       : ["high", "medium", "low"].filter((k) => s[k] > 0).map((k) =>
           `<span class="pill"><span class="glyph sev-${k}">${SEV[k].glyph}</span>${s[k]} ${SEV[k].label.toLowerCase()}</span>`
         ).join("");
-    return `<div class="site-row" data-site="${esc(s.site)}">
-      <span class="site-name">${esc(s.site)}</span>
+    return `<div class="project-row" data-project="${esc(p.project)}">
+      <span class="project-name">${esc(p.project)}</span>
       <span class="pills">${pills}</span>
-      <span class="site-when">swept ${esc(ago(s.last_run))}</span></div>`;
-  }).join("") : '<div class="empty">No sites collected yet. Run a sweep.</div>';
+      <span class="project-when">swept ${esc(ago(s.last_run))}</span></div>`;
+  }).join("") : '<div class="empty">No projects collected yet. Run a sweep.</div>';
 
-  document.querySelectorAll(".site-row").forEach((el) =>
+  document.querySelectorAll(".project-row").forEach((el) =>
     el.addEventListener("click", () => {
-      $("siteFilter").value = el.dataset.site;
-      state.site = el.dataset.site;
+      $("projectFilter").value = el.dataset.project;
+      state.project = el.dataset.project;
       renderFindings();
       document.querySelector("section").scrollIntoView({ behavior: "smooth", block: "start" });
     }));
@@ -306,7 +306,7 @@ function renderSites() {
 function visible() {
   return state.findings.filter((f) =>
     (state.sevs.size === 0 || state.sevs.has(f.severity)) &&
-    (!state.site || f.site === state.site) &&
+    (!state.project || f.project === state.project) &&
     (!state.q || (f.summary + " " + f.rule + " " + (f.source || "") + " " + f.subjects.join(" "))
       .toLowerCase().includes(state.q)));
 }
@@ -328,7 +328,7 @@ function renderFindings() {
       </div></td></tr>` : "";
     return `<tr class="row" data-id="${f.id}">
         <td><span class="sev sev-${esc(f.severity)}"><span class="glyph">${s.glyph}</span><span class="txt">${esc(s.label)}</span></span></td>
-        <td class="site-cell">${esc(f.site)}</td>
+        <td class="project-cell">${esc(f.project)}</td>
         <td>${esc(f.summary)}${f.source && f.source.startsWith("agent:")
             ? `<span class="src" title="Reported by an agent, not a deterministic rule">${esc(f.source.slice(6))}</span>` : ""}</td>
         <td class="num">${f.subjects.length}</td>
@@ -350,7 +350,7 @@ document.querySelectorAll(".chip").forEach((chip) =>
     chip.setAttribute("aria-pressed", String(state.sevs.has(sev)));
     renderFindings();
   }));
-$("siteFilter").addEventListener("change", (e) => { state.site = e.target.value; renderFindings(); });
+$("projectFilter").addEventListener("change", (e) => { state.project = e.target.value; renderFindings(); });
 $("search").addEventListener("input", (e) => { state.q = e.target.value.toLowerCase().trim(); renderFindings(); });
 document.addEventListener("keydown", (e) => {
   if (e.key === "/" && document.activeElement !== $("search")) { e.preventDefault(); $("search").focus(); }

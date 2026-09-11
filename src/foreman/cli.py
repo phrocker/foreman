@@ -31,35 +31,35 @@ SEVERITY_STYLE = {
 
 @app.command()
 def init() -> None:
-    """Create sites.yaml from the example."""
+    """Create foreman.yaml from the example."""
     if DEFAULT_REGISTRY.exists():
         console.print(f"[yellow]{DEFAULT_REGISTRY} already exists; leaving it alone.[/]")
         raise typer.Exit()
-    shutil.copy("sites.example.yaml", DEFAULT_REGISTRY)
-    console.print(f"[green]Wrote {DEFAULT_REGISTRY}.[/] Add your sites, then `foreman collect`.")
+    shutil.copy("foreman.example.yaml", DEFAULT_REGISTRY)
+    console.print(f"[green]Wrote {DEFAULT_REGISTRY}.[/] Add your projects, then `foreman collect`.")
 
 
-@app.command(name="sites")
-def list_sites(registry: Path = typer.Option(None, "--registry", "-r")) -> None:
-    """List the registered sites."""
+@app.command(name="projects")
+def list_projects(registry: Path = typer.Option(None, "--registry", "-r")) -> None:
+    """List the registered projects."""
     table = Table(box=None, pad_edge=False)
-    for col in ("id", "url", "cms", "urls", "fixable", "tags"):
+    for col in ("id", "name", "web", "domains", "fixable", "tags"):
         table.add_column(col)
-    for site in load_registry(registry).sites:
+    for project in load_registry(registry).projects:
         table.add_row(
-            site.id,
-            site.url,
-            site.cms,
-            str(site.max_urls),
-            "[green]yes[/]" if site.fixable else "[dim]no[/]",
-            ",".join(site.tags),
+            project.id,
+            project.label,
+            project.web.url if project.web else "[dim]—[/]",
+            ",".join(project.domains),
+            "[green]yes[/]" if project.fixable else "[dim]no[/]",
+            ",".join(project.tags),
         )
     console.print(table)
 
 
 @app.command()
 def collect(
-    site: str = typer.Option(None, "--site", "-s", help="Only this site id."),
+    project: str = typer.Option(None, "--project", "-P", help="Only this project id."),
     collector: str = typer.Option(None, "--collector", "-c", help="Only this collector."),
     registry: Path = typer.Option(None, "--registry", "-r"),
     db: Path = typer.Option(None, "--db"),
@@ -78,7 +78,7 @@ def collect(
             total = await collect_all(
                 reg,
                 store,
-                site=site,
+                project=project,
                 collectors=names,
                 log=lambda m: console.print(f"  {m}"),
             )
@@ -89,39 +89,39 @@ def collect(
 
 @app.command()
 def check(
-    site: str = typer.Option(None, "--site", "-s"),
+    project: str = typer.Option(None, "--project", "-P"),
     registry: Path = typer.Option(None, "--registry", "-r"),
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """Evaluate the deterministic rules against the latest snapshot."""
     reg = load_registry(registry)
     with Store(db or DEFAULT_DB) as store:
-        check_all(reg, store, site=site, log=lambda m: console.print(f"[bold]{m}[/]"))
-        for row in store.open_findings(site):
+        check_all(reg, store, project=project, log=lambda m: console.print(f"[bold]{m}[/]"))
+        for row in store.open_findings(project):
             style = SEVERITY_STYLE.get(row["severity"], "")
             console.print(
-                f"  [{style}]{row['severity']:<6}[/] [dim]{row['site']}[/] {row['summary']}"
+                f"  [{style}]{row['severity']:<6}[/] [dim]{row['project']}[/] {row['summary']}"
             )
 
 
 @app.command()
 def status(
-    site: str = typer.Option(None, "--site", "-s"),
+    project: str = typer.Option(None, "--project", "-P"),
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """What needs attention, across the whole portfolio."""
     with Store(db or DEFAULT_DB) as store:
-        rows = store.open_findings(site)
+        rows = store.open_findings(project)
     if not rows:
         console.print("[green]Nothing open.[/]")
         return
     table = Table(box=None, pad_edge=False)
-    for col in ("site", "severity", "finding", "affected"):
+    for col in ("project", "severity", "finding", "affected"):
         table.add_column(col)
     for row in rows:
         style = SEVERITY_STYLE.get(row["severity"], "")
         table.add_row(
-            row["site"],
+            row["project"],
             f"[{style}]{row['severity']}[/]",
             row["summary"],
             str(len(json.loads(row["subjects"]))),
@@ -132,21 +132,21 @@ def status(
 
 @app.command()
 def audit(
-    site: str = typer.Argument(None, help="Site id. Omit to audit every site."),
-    skill: str = typer.Option(DEFAULT_SKILL, "--skill", help="/seo plugin skill to run."),
+    project: str = typer.Argument(None, help="Project id. Omit to audit every project."),
+    skill: str = typer.Option(DEFAULT_SKILL, "--skill", help="Claude Code skill to run."),
     budget_usd: float = typer.Option(5.0, "--budget", help="Ceiling for this whole invocation."),
     model: str = typer.Option(None, "--model"),
     timeout: int = typer.Option(1800, "--timeout", help="Per-site seconds."),
     registry: Path = typer.Option(None, "--registry", "-r"),
     db: Path = typer.Option(None, "--db"),
 ) -> None:
-    """Escalate to the /seo plugin's agents for judgement the rules can't make.
+    """Escalate to a Claude Code skill for judgement the rules can't make.
 
-    Costs real money — it runs Claude Code per site. Deterministic findings are
-    passed in so the agent skips what the nightly sweep already knows.
+    Costs real money — it runs Claude Code per project. Open deterministic
+    findings are passed in so the agent skips what the sweep already knows.
     """
     reg = load_registry(registry)
-    targets = [reg.get(site)] if site else reg.active
+    targets = [reg.get(project)] if project else reg.active
     budget = Budget(limit_usd=budget_usd)
 
     async def run() -> None:
@@ -155,7 +155,7 @@ def audit(
                 if budget.remaining <= 0:
                     console.print(
                         f"[yellow]Budget of ${budget_usd:.2f} spent; "
-                        f"skipping {len(targets) - targets.index(target)} site(s).[/]"
+                        f"skipping {len(targets) - targets.index(target)} project(s).[/]"
                     )
                     break
                 try:
@@ -183,7 +183,7 @@ def serve(
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """Serve the dashboard. Binds loopback only — it reads a database naming
-    real client sites and has an endpoint that triggers crawls."""
+    real client projects and has an endpoint that triggers crawls."""
     import uvicorn
 
     from .web import create_app
