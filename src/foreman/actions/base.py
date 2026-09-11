@@ -89,12 +89,13 @@ class Op(Protocol):
     def reason(self, params: dict) -> str:
         """The BECAUSE expression asserting the state this op transforms.
 
-        Written fully parenthesised. SAG's grammar currently orders its
-        left-recursive expr alternatives so that `||` binds tightest and `*`
-        loosest — the reverse of the usual ladder — which makes every
-        unparenthesised compound expression mean something other than it reads.
-        Parentheses are correct under either ordering, so they stay regardless
-        of when that is fixed upstream.
+        Written fully parenthesised. SAG once ordered its left-recursive expr
+        alternatives loosest-first, which inverted the precedence ladder and
+        made every unparenthesised compound mean something other than it read;
+        that is fixed upstream now. The parentheses stay anyway — an expression
+        that governs unattended writes should not depend on precedence being
+        what it looks like, and a parser regenerated from an older grammar
+        would otherwise change what a rule means without changing its text.
         """
         ...
 

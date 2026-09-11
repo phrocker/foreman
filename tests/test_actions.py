@@ -123,13 +123,19 @@ def test_the_auto_policy_needs_a_clean_record(project):
     assert action.auto_eligible(approvals=99, rejections=1) is False
 
 
-def test_the_auto_policy_expression_is_parenthesised():
-    """SAG currently orders its expr alternatives so `||` binds tightest and `*`
-    loosest, the reverse of the usual ladder, which makes an unparenthesised
-    compound mean something other than it reads. This is the regression guard:
-    the gate governing unattended writes must not depend on that ordering."""
-    ledger = {"class": {"approvals": 12, "rejections": 0}}
-    assert policy_allows(f"DO x() P:auto:{AUTO_POLICY_EXPR}", ledger) is True
+def test_the_auto_policy_expression_binds_as_written():
+    """Both forms agree now that SAG orders its expr alternatives tightest-first.
 
+    Foreman keeps the parentheses regardless. The rule governing unattended
+    writes should not depend on operator precedence being what it looks like,
+    and a parser regenerated from an older grammar would otherwise change what
+    this gate means without changing a line of it.
+    """
     naive = "class.approvals>=10&&class.rejections==0"
-    assert policy_allows(f"DO x() P:auto:{naive}", ledger) is False  # wrong, as written
+    clean = {"class": {"approvals": 12, "rejections": 0}}
+    assert policy_allows(f"DO x() P:auto:{AUTO_POLICY_EXPR}", clean) is True
+    assert policy_allows(f"DO x() P:auto:{naive}", clean) is True
+
+    rejected_once = {"class": {"approvals": 12, "rejections": 1}}
+    assert policy_allows(f"DO x() P:auto:{AUTO_POLICY_EXPR}", rejected_once) is False
+    assert policy_allows(f"DO x() P:auto:{naive}", rejected_once) is False
