@@ -67,6 +67,44 @@ class ActionProposal:
         return [e.path for e in self.patch.edits if e.changed]
 
 
+def build(
+    project: Project, op: Op, params: dict[str, Any], finding_id: int | None = None
+) -> ActionProposal | None:
+    """Compute one proposal, or None if the op no longer applies here.
+
+    Everything is derived from the repository as it is right now, so calling
+    this again later is how staleness is detected: a different patch digest
+    means the world moved under the proposal.
+    """
+    try:
+        state = op.state(project, params)
+        patch = op.render(project, params)
+    except OpNotApplicable:
+        return None
+    if patch.empty:
+        return None
+    statement = canonical(
+        action_text(
+            op.verb,
+            params,
+            reason=op.reason(params),
+            policy=AUTO_POLICY,
+            policy_expr=AUTO_POLICY_EXPR,
+        )
+    )
+    return ActionProposal(
+        project=project.id,
+        finding_id=finding_id,
+        verb=op.verb,
+        params=params,
+        statement=statement,
+        class_statement=class_statement(op, params),
+        class_key=class_key(op, params),
+        state=state,
+        patch=patch,
+    )
+
+
 def propose(project: Project, findings: Sequence[Any]) -> list[ActionProposal]:
     """Every action the registered ops can offer for these findings.
 
@@ -79,35 +117,9 @@ def propose(project: Project, findings: Sequence[Any]) -> list[ActionProposal]:
         row = dict(finding)
         for op in OPS.values():
             for params in op.propose(project, row):
-                try:
-                    state = op.state(project, params)
-                    patch = op.render(project, params)
-                except OpNotApplicable:
-                    continue
-                if patch.empty:
-                    continue
-                statement = canonical(
-                    action_text(
-                        op.verb,
-                        params,
-                        reason=op.reason(params),
-                        policy=AUTO_POLICY,
-                        policy_expr=AUTO_POLICY_EXPR,
-                    )
-                )
-                proposals.append(
-                    ActionProposal(
-                        project=project.id,
-                        finding_id=row.get("id"),
-                        verb=op.verb,
-                        params=params,
-                        statement=statement,
-                        class_statement=class_statement(op, params),
-                        class_key=class_key(op, params),
-                        state=state,
-                        patch=patch,
-                    )
-                )
+                proposal = build(project, op, params, row.get("id"))
+                if proposal is not None:
+                    proposals.append(proposal)
     return proposals
 
 
@@ -134,8 +146,39 @@ def apply(project: Project, proposal: ActionProposal) -> list[str]:
     return written
 
 
+class Stale(Exception):
+    """The world changed between proposal and application."""
+
+
+def rehydrate(project: Project, row: Any) -> ActionProposal:
+    """Rebuild a stored action against current state, or refuse.
+
+    Deliberately recomputed rather than replayed from a stored patch. A stored
+    patch applied later is a patch applied to a file nobody re-read; recomputing
+    and comparing digests turns "someone else edited this" from a silent
+    overwrite into a refusal.
+    """
+    import json as _json
+
+    op = OPS.get(row["verb"])
+    if op is None:
+        raise Stale(f"no op named {row['verb']!r} is registered any more")
+    fresh = build(project, op, _json.loads(row["params"]), row["finding_id"])
+    if fresh is None:
+        raise Stale("the precondition no longer holds; the finding may already be fixed")
+    if fresh.patch_digest != row["patch_digest"]:
+        raise Stale("the target changed since this was proposed; re-propose it")
+    holds, message = fresh.still_applies(project)
+    if not holds:
+        raise Stale(message or "guardrail failed")
+    return fresh
+
+
 __all__ = [
     "OPS",
+    "Stale",
+    "build",
+    "rehydrate",
     "ActionProposal",
     "FileEdit",
     "Op",

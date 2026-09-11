@@ -11,12 +11,14 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .actions import Stale
+from .actions.sagform import policy_allows
 from .audit import DEFAULT_SKILL, AuditError, run_audit
 from .budget import Budget
 from .collectors import COLLECTORS, DEFAULT_COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
 from .models import Severity
-from .runner import check_all, collect_all
+from .runner import apply_action, check_all, collect_all, propose_actions, reject_action
 from .store import DEFAULT_DB, Store
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
@@ -173,6 +175,131 @@ def audit(
             console.print(f"\n[bold]${budget.spent:.2f}[/] spent of ${budget_usd:.2f}.")
 
     asyncio.run(run())
+
+
+@app.command()
+def actions(
+    project: str = typer.Option(None, "--project", "-P"),
+    propose: bool = typer.Option(False, "--propose", help="Recompute before listing."),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Pending actions, each with the approval record of its class."""
+    reg = load_registry(registry)
+    with Store(db or DEFAULT_DB) as store:
+        if propose:
+            found = propose_actions(reg, store, project=project)
+            console.print(f"[dim]{found} new proposal(s).[/]\n")
+
+        rows = store.pending_actions(project)
+        if not rows:
+            console.print("[green]Nothing pending.[/] Run with --propose to recompute.")
+            return
+
+        for row in rows:
+            stats = store.class_stats(row["class_key"], row["patch_digest"])
+            decided = stats["approvals"] + stats["rejections"]
+            target = reg.get(row["project"])
+            eligible = False
+            if decided:
+                eligible = policy_allows(
+                    row["statement"],
+                    {"class": {"approvals": stats["approvals"], "rejections": stats["rejections"]}},
+                )
+            console.print(f"[bold]#{row['id']}[/] [dim]{row['project']}[/] {row['verb']}")
+            console.print(f"   files    {', '.join(json.loads(row['files']))}")
+            if decided == 0:
+                record = "[dim]no prior decisions — this class is new[/]"
+            else:
+                record = (
+                    f"approved {stats['approvals']}/{decided} "
+                    f"across {stats['projects']} project(s)"
+                )
+                if stats["rejections"]:
+                    record += f", [red]{stats['rejections']} rejected[/]"
+                if stats["identical"]:
+                    record += f" · patch identical to {stats['identical']} of them"
+                if stats["failures"]:
+                    record += f" · [red]{stats['failures']} failed on apply[/]"
+            console.print(f"   record   {record}")
+            console.print(
+                "   auto     "
+                + ("[green]eligible under policy[/]" if eligible else "[dim]needs you[/]")
+            )
+            # Shown verbatim: the statement is the action, and the operator
+            # should be approving the thing that is actually recorded.
+            console.print(f"   [dim]{row['statement']}[/]")
+            holds, why = (True, None)
+            try:
+                _ = _rehydrate_quiet(target, row)
+            except Stale as exc:
+                holds, why = False, str(exc)
+            if not holds:
+                console.print(f"   [yellow]stale:[/] {why}")
+            console.print()
+
+
+def _rehydrate_quiet(target, row):
+    from .actions import rehydrate
+
+    return rehydrate(target, row)
+
+
+@app.command()
+def approve(
+    action_id: int = typer.Argument(..., help="Action id from `foreman actions`."),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Approve and apply one action."""
+    reg = load_registry(registry)
+    with Store(db or DEFAULT_DB) as store:
+        try:
+            written = apply_action(reg, store, action_id)
+        except Stale as exc:
+            console.print(f"[yellow]Not applied — {exc}[/]")
+            raise typer.Exit(1) from None
+        console.print(f"[green]Applied[/] to {', '.join(written)}")
+
+
+@app.command()
+def reject(
+    action_id: int = typer.Argument(..., help="Action id from `foreman actions`."),
+    keep: bool = typer.Option(False, "--keep-finding", help="Do not dismiss the finding."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Reject an action, and by default dismiss the finding behind it."""
+    with Store(db or DEFAULT_DB) as store:
+        reject_action(store, action_id, dismiss_finding=not keep)
+    console.print("[dim]Rejected.[/]")
+
+
+@app.command()
+def precision(db: Path = typer.Option(None, "--db")) -> None:
+    """How often each rule's findings were acted on rather than dismissed."""
+    with Store(db or DEFAULT_DB) as store:
+        rows = store.rule_precision()
+    if not rows:
+        console.print(
+            "[dim]No decided findings yet. Precision is unmeasured until you "
+            "approve or reject some actions.[/]"
+        )
+        return
+    table = Table(box=None, pad_edge=False)
+    for col in ("rule", "source", "acted", "dismissed", "precision"):
+        table.add_column(col)
+    for row in rows:
+        acted, decided = int(row["acted"] or 0), int(row["decided"])
+        rate = acted / decided
+        style = "red" if rate < 0.5 else ("yellow" if rate < 0.8 else "green")
+        table.add_row(
+            row["rule"],
+            row["source"],
+            str(acted),
+            str(int(row["dismissed"] or 0)),
+            f"[{style}]{rate:.0%}[/]",
+        )
+    console.print(table)
 
 
 @app.command()

@@ -59,6 +59,45 @@ CREATE TABLE IF NOT EXISTS findings (
     source      TEXT NOT NULL DEFAULT 'rule'
 );
 CREATE INDEX IF NOT EXISTS idx_find_open ON findings (project, resolved_at);
+
+-- The decision ledger. Every action Foreman proposed, what you decided, and
+-- whether it worked. This is the evidence behind "you have approved this exact
+-- operation 12 times out of 12" — a claim that has to be a query rather than an
+-- impression, or it is not worth acting on.
+CREATE TABLE IF NOT EXISTS actions (
+    id              INTEGER PRIMARY KEY,
+    project         TEXT NOT NULL,
+    finding_id      INTEGER REFERENCES findings(id) ON DELETE SET NULL,
+    verb            TEXT NOT NULL,
+    -- Canonical SAG. Identity, precondition and automation policy all live in
+    -- this one string, which is why it is stored verbatim rather than shredded
+    -- into columns: it is re-parsed and re-evaluated later.
+    statement       TEXT NOT NULL,
+    class_statement TEXT NOT NULL,
+    class_key       TEXT NOT NULL,
+    params          TEXT NOT NULL,
+    -- Content-only digest, so the same edit in two projects matches. This is
+    -- what backs "identical to every one you approved", as distinct from
+    -- "the same kind of action", which is class_key.
+    patch_digest    TEXT NOT NULL,
+    files           TEXT NOT NULL,
+    proposed_at     TEXT NOT NULL,
+    decision        TEXT,              -- approved | rejected
+    decided_at      TEXT,
+    -- How the decision was reached. 'human' or 'policy:<label>' — so an
+    -- automated approval can never be counted as evidence for automating
+    -- further, which would let one mistake bootstrap itself.
+    decided_by      TEXT,
+    applied_at      TEXT,
+    outcome         TEXT,              -- applied | failed | stale
+    error           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_actions_class ON actions (class_key, decision);
+CREATE INDEX IF NOT EXISTS idx_actions_open ON actions (project, decision);
+-- One open proposal per class per project: re-proposing an identical action
+-- every sweep would inflate the ledger and make the counts meaningless.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_pending
+    ON actions (project, class_key, patch_digest) WHERE decision IS NULL;
 """
 
 
@@ -90,6 +129,12 @@ def _additive_migrations(conn: sqlite3.Connection) -> None:
     """
     if "source" not in _columns(conn, "findings"):
         conn.execute("ALTER TABLE findings ADD COLUMN source TEXT NOT NULL DEFAULT 'rule'")
+    # Whether a finding was worth acting on. Without this, rule precision is an
+    # opinion: the false positives this tool has already produced would look
+    # exactly like the true ones in every count.
+    if "outcome" not in _columns(conn, "findings"):
+        conn.execute("ALTER TABLE findings ADD COLUMN outcome TEXT")
+        conn.execute("ALTER TABLE findings ADD COLUMN outcome_at TEXT")
 
 
 class Store:
@@ -205,6 +250,128 @@ class Store:
 
     def finding(self, finding_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+
+    def set_finding_outcome(self, finding_id: int, outcome: str) -> None:
+        """Record whether a finding was worth acting on ('acted' | 'dismissed')."""
+        self.conn.execute(
+            "UPDATE findings SET outcome = ?, outcome_at = ? WHERE id = ?",
+            (outcome, utcnow(), finding_id),
+        )
+        self.conn.commit()
+
+    def rule_precision(self) -> list[sqlite3.Row]:
+        """Per rule: how often it was acted on versus dismissed.
+
+        The number that says which rules deserve attention and which are noise.
+        Rules with no decided findings are excluded rather than shown at 0% —
+        an unmeasured rule and a bad one are different things.
+        """
+        return self.conn.execute("""
+            SELECT rule,
+                   source,
+                   SUM(outcome = 'acted')     AS acted,
+                   SUM(outcome = 'dismissed') AS dismissed,
+                   COUNT(*)                   AS decided
+            FROM findings
+            WHERE outcome IS NOT NULL
+            GROUP BY rule, source
+            ORDER BY dismissed DESC, decided DESC
+            """).fetchall()
+
+    # --- the action ledger -------------------------------------------------
+
+    def record_proposal(
+        self,
+        *,
+        project: str,
+        finding_id: int | None,
+        verb: str,
+        statement: str,
+        class_statement: str,
+        class_key: str,
+        params: dict,
+        patch_digest: str,
+        files: list[str],
+    ) -> int | None:
+        """Store a proposed action. Returns None if an identical one is already
+        pending, which the unique index enforces rather than a read-then-write
+        that could race a concurrent sweep."""
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO actions "
+                "(project, finding_id, verb, statement, class_statement, class_key, "
+                " params, patch_digest, files, proposed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    project,
+                    finding_id,
+                    verb,
+                    statement,
+                    class_statement,
+                    class_key,
+                    json.dumps(params, sort_keys=True),
+                    patch_digest,
+                    json.dumps(files),
+                    utcnow(),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return None
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def action(self, action_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+
+    def pending_actions(self, project: str | None = None) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM actions WHERE decision IS NULL"
+        params: tuple[str, ...] = ()
+        if project:
+            sql += " AND project = ?"
+            params = (project,)
+        return self.conn.execute(sql + " ORDER BY proposed_at", params).fetchall()
+
+    def decide_action(self, action_id: int, decision: str, decided_by: str = "human") -> None:
+        self.conn.execute(
+            "UPDATE actions SET decision = ?, decided_at = ?, decided_by = ? WHERE id = ?",
+            (decision, utcnow(), decided_by, action_id),
+        )
+        self.conn.commit()
+
+    def record_application(self, action_id: int, outcome: str, error: str | None = None) -> None:
+        self.conn.execute(
+            "UPDATE actions SET applied_at = ?, outcome = ?, error = ? WHERE id = ?",
+            (utcnow(), outcome, error, action_id),
+        )
+        self.conn.commit()
+
+    def class_stats(self, class_key: str, patch_digest: str | None = None) -> dict[str, int]:
+        """Approval record for one equivalence class.
+
+        Only human decisions count. A policy-approved action must never become
+        evidence for approving more automatically, or a single bad class
+        bootstraps its own authority.
+        """
+        row = self.conn.execute(
+            """
+            SELECT
+                SUM(decision = 'approved')                   AS approvals,
+                SUM(decision = 'rejected')                   AS rejections,
+                COUNT(DISTINCT project)                      AS projects,
+                SUM(decision = 'approved' AND patch_digest = ?) AS identical,
+                SUM(outcome = 'failed')                      AS failures
+            FROM actions
+            WHERE class_key = ? AND decision IS NOT NULL AND decided_by = 'human'
+            """,
+            (patch_digest, class_key),
+        ).fetchone()
+        return {
+            "approvals": int(row["approvals"] or 0),
+            "rejections": int(row["rejections"] or 0),
+            "projects": int(row["projects"] or 0),
+            "identical": int(row["identical"] or 0),
+            "failures": int(row["failures"] or 0),
+        }
 
     def project_summary(self) -> list[sqlite3.Row]:
         """Per-project rollup: open findings by severity, and when it was last seen."""

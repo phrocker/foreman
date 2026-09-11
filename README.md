@@ -142,6 +142,55 @@ so a nightly sweep cannot wipe results you paid for.
 is recorded whether or not it fits — a ledger that discards an over-ceiling
 charge reports `$0.00` against a real bill and gates nothing.
 
+## Actions, and the evidence for trusting them
+
+Actions are yours to approve. The ledger exists so that, eventually, some of
+them need not be — and so that the case for automating one is arithmetic rather
+than a feeling.
+
+An action is not a patch. It is an instance of a registered operation, written
+in [SAG](https://github.com/phrocker/sag):
+
+```
+DO anchor_asset_disallow(file="public/robots.txt",prefix="/assets")
+   P:auto:(class.approvals>=10)&&(class.rejections==0)
+   BECAUSE (robots.unanchored_disallow==true)&&(robots.prefix=="/assets")
+```
+
+Three deterministic pieces, no model in any of them:
+
+- **Identity** is the canonical minified statement, so "the same action" is
+  string equality over a grammar-defined form.
+- **The precondition** is the `BECAUSE` clause, re-evaluated against fresh state
+  at apply time. An action computed before someone else edited the file fails
+  its own guardrail instead of overwriting them.
+- **The automation rule** is the `P:` clause, evaluated by the same expression
+  evaluator. It is text: auditable, diffable, tightenable without code.
+
+The class statement carries only signature fields — `prefix`, not `file` — so
+the same decision in ten differently-laid-out repositories is ten data points
+for one class rather than ten classes of one.
+
+```bash
+foreman actions --propose     # what could be done, with each class's record
+foreman approve 11            # re-checks the guardrail, then applies
+foreman reject 11             # records the rejection, dismisses the finding
+foreman precision             # which rules earn their findings
+```
+
+```
+#11 p10 anchor_asset_disallow
+   files    public/robots.txt
+   record   approved 10/10 across 10 project(s) · patch identical to 10 of them
+   auto     eligible under policy
+```
+
+Two guards worth knowing about. A policy-approved action is recorded as
+`decided_by='policy:auto'` and **excluded from class statistics**, so automation
+can never become evidence for more automation. And a stale action is recorded as
+`stale` with no decision at all — refusing it is not a rejection, and must not
+enter the ledger as a judgement nobody made.
+
 ## The dashboard
 
 `foreman serve` reads `foreman.db` directly, so the page always shows the last
@@ -157,8 +206,12 @@ never load-bearing.
 ## Next
 
 1. `foreman diff` — compare snapshots, so drift is visible as change over time.
-2. Outcome tracking — record whether a finding was acted on or dismissed, so rule
-   precision and cost-per-finding become measurable rather than assumed.
-3. Data-driven selection — audit the projects that drifted, or whose findings you
-   actually act on, instead of on a blind schedule.
-4. More collectors — Search Console, CrUX, `osv-scanner`, `nuclei`.
+2. More ops. One exists. The ledger is worth little until several classes are
+   accumulating evidence, and each op is small: a precondition, a reason
+   expression, and a deterministic render.
+3. Data-driven selection — audit the projects that drifted, or whose findings
+   you actually act on, instead of on a blind schedule. `foreman precision` is
+   the input; nothing consumes it yet.
+4. Auto-apply, gated on `P:auto` — only once the numbers justify it, which is
+   the whole point of building the ledger first.
+5. More collectors — Search Console, CrUX, `osv-scanner`, `nuclei`.

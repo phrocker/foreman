@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 
+from .actions import Stale, propose, rehydrate
+from .actions import apply as apply_patch
 from .collectors import COLLECTORS, DEFAULT_COLLECTORS
 from .config import Project, Registry
 from .rules import evaluate
@@ -85,3 +87,79 @@ def check_all(
         total += len(findings)
         log(f"{target.id}: {len(findings)} finding(s)")
     return total
+
+
+def propose_actions(
+    registry: Registry,
+    store: Store,
+    project: str | None = None,
+    log: Log = lambda _: None,
+) -> int:
+    """Compute actions for open findings and record them as pending."""
+    targets = [registry.get(project)] if project else registry.active
+    recorded = 0
+    for target in targets:
+        findings = store.open_findings(target.id)
+        for proposal in propose(target, findings):
+            action_id = store.record_proposal(
+                project=proposal.project,
+                finding_id=proposal.finding_id,
+                verb=proposal.verb,
+                statement=proposal.statement,
+                class_statement=proposal.class_statement,
+                class_key=proposal.class_key,
+                params=proposal.params,
+                patch_digest=proposal.patch_digest,
+                files=proposal.files,
+            )
+            if action_id is None:
+                continue  # identical proposal already pending
+            recorded += 1
+            log(f"{target.id}: {proposal.summary} ({', '.join(proposal.files)})")
+    return recorded
+
+
+def apply_action(
+    registry: Registry, store: Store, action_id: int, decided_by: str = "human"
+) -> list[str]:
+    """Approve and apply one pending action.
+
+    The guardrail is re-evaluated and the patch recomputed first, so approval
+    granted a week ago cannot be spent against a file that has since changed.
+    """
+    row = store.action(action_id)
+    if row is None:
+        raise KeyError(f"no action {action_id}")
+    if row["decision"] is not None:
+        raise ValueError(f"action {action_id} was already {row['decision']}")
+
+    target = registry.get(row["project"])
+    try:
+        fresh = rehydrate(target, row)
+    except Stale as exc:
+        # Not a decision: the action was never valid to take. Recording it as a
+        # rejection would poison the class statistics with a judgement the
+        # operator never made.
+        store.record_application(action_id, "stale", str(exc))
+        raise
+
+    written = apply_patch(target, fresh)
+    store.decide_action(action_id, "approved", decided_by)
+    store.record_application(action_id, "applied")
+    if row["finding_id"] is not None:
+        store.set_finding_outcome(row["finding_id"], "acted")
+    return written
+
+
+def reject_action(store: Store, action_id: int, dismiss_finding: bool = True) -> None:
+    """Record a rejection, and by default mark the finding dismissed.
+
+    Both halves matter: the rejection tells the class it is not trusted, and the
+    dismissal tells the rule that produced it that it was not worth surfacing.
+    """
+    row = store.action(action_id)
+    if row is None:
+        raise KeyError(f"no action {action_id}")
+    store.decide_action(action_id, "rejected")
+    if dismiss_finding and row["finding_id"] is not None:
+        store.set_finding_outcome(row["finding_id"], "dismissed")
