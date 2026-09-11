@@ -12,6 +12,7 @@ dependencies = [
     "rich>=13.7",
     "pyyaml>=6.0",
     "fastapi>=0.110",
+    "semantic-action-grammar>=1.2.2",
     "uvicorn>=0.29",
 ]
 
