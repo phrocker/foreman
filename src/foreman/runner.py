@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 
 from .actions import Stale, propose, rehydrate
 from .actions import apply as apply_patch
+from .actions.sagform import policy_allows
 from .collectors import COLLECTORS, DEFAULT_COLLECTORS
 from .config import Project, Registry
 from .rules import evaluate
@@ -163,3 +164,45 @@ def reject_action(store: Store, action_id: int, dismiss_finding: bool = True) ->
     store.decide_action(action_id, "rejected")
     if dismiss_finding and row["finding_id"] is not None:
         store.set_finding_outcome(row["finding_id"], "dismissed")
+
+
+def apply_eligible(
+    registry: Registry,
+    store: Store,
+    project: str | None = None,
+    confirm: bool = False,
+    log: Log = lambda _: None,
+) -> tuple[int, int]:
+    """Apply pending actions whose class has earned it under its own policy.
+
+    Returns (applied, skipped). Without `confirm` nothing is written — this
+    reports what it would do. Unattended writes to a repository should require
+    saying so, not merely omitting a flag.
+
+    Eligibility is read from the ledger and evaluated by the action's own `P:`
+    clause, so the rule permitting this is the text stored alongside the action
+    rather than a threshold buried here.
+    """
+    applied = skipped = 0
+    for row in store.pending_actions(project):
+        stats = store.class_stats(row["class_key"], row["patch_digest"])
+        eligible = policy_allows(
+            row["statement"],
+            {"class": {"approvals": stats["approvals"], "rejections": stats["rejections"]}},
+        )
+        if not eligible:
+            skipped += 1
+            continue
+        if not confirm:
+            log(f"would apply #{row['id']} {row['project']}/{row['verb']}")
+            applied += 1
+            continue
+        try:
+            written = apply_action(registry, store, row["id"], decided_by="policy:auto")
+        except Stale as exc:
+            log(f"skipped #{row['id']} — {exc}")
+            skipped += 1
+            continue
+        applied += 1
+        log(f"applied #{row['id']} {row['project']}/{row['verb']}: {', '.join(written)}")
+    return applied, skipped

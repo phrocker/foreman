@@ -19,10 +19,14 @@ from typing import Any
 
 from ..config import Project
 from .base import FileEdit, Op, OpNotApplicable, Patch, class_key, class_statement
-from .robots import AnchorAssetDisallow
+from .nginx import AddSecurityHeader
+from .robots import AddSitemapReference, AnchorAssetDisallow
 from .sagform import action_text, canonical, policy_allows, precondition_holds
 
-OPS: dict[str, Op] = {op.verb: op for op in (AnchorAssetDisallow(),)}
+OPS: dict[str, Op] = {
+    op.verb: op
+    for op in (AnchorAssetDisallow(), AddSitemapReference(), AddSecurityHeader())
+}
 
 # The condition under which a class stops needing a human. Stored as text and
 # evaluated deterministically, so the rule that governs automation is itself

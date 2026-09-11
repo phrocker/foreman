@@ -173,6 +173,19 @@ def _robots(pages: Pages, add: Add) -> None:
                     "intent was to block one route.",
                 )
 
+        declared = facts.get("sitemap_declared")
+        discovered = facts.get("urls_discovered")
+        if declared == "false" and discovered and int(discovered) > 1:
+            add(
+                "robots_missing_sitemap",
+                Severity.LOW,
+                "robots.txt does not point at the sitemap",
+                [subject],
+                "The sitemap was found at the conventional path and parsed, so it "
+                "exists — it is simply not declared. Crawlers that do not guess the "
+                "location have to discover every URL by following links instead.",
+            )
+
         shells = facts.get("probe_served_homepage_shell")
         if shells is not None and int(shells) > 0:
             add(

@@ -114,6 +114,11 @@ foreman collect --collector render
 | `foreman check` | Evaluate the rules for each project's domains |
 | `foreman status` | Open findings across the portfolio |
 | `foreman audit [project]` | Escalate to a Claude Code skill |
+| `foreman diff` | What changed since the previous snapshot |
+| `foreman actions` | Pending actions, each with its class's record |
+| `foreman approve` / `reject` | Decide one |
+| `foreman apply-eligible` | Apply what a class has earned under its policy |
+| `foreman precision` | Which rules earn their findings |
 | `foreman serve` | Dashboard on loopback (default `:8765`) |
 
 `--project` scopes any of them; `--collector` scopes `collect`.
@@ -191,6 +196,23 @@ can never become evidence for more automation. And a stale action is recorded as
 `stale` with no decision at all — refusing it is not a rejection, and must not
 enter the ledger as a judgement nobody made.
 
+## Drift
+
+```bash
+foreman diff            # decisive changes since the last snapshot
+foreman diff --all      # including measurements below the noise tolerance
+```
+
+A set comparison over `(subject, key, value)` triples, which is exactly why
+collectors emit that shape: one differ covers every collector that exists and
+every one that does not yet.
+
+Measurements are tolerance-tested and everything else compared exactly. LCP
+moving 604ms to 640ms is noise, and a report that fires every night is a report
+you stop reading — that is the failure mode worth designing out, not the missed
+36ms. A certificate counting down one day at a time is likewise not news; a
+renewal is.
+
 ## The dashboard
 
 `foreman serve` reads `foreman.db` directly, so the page always shows the last
@@ -205,13 +227,11 @@ never load-bearing.
 
 ## Next
 
-1. `foreman diff` — compare snapshots, so drift is visible as change over time.
-2. More ops. One exists. The ledger is worth little until several classes are
-   accumulating evidence, and each op is small: a precondition, a reason
-   expression, and a deterministic render.
-3. Data-driven selection — audit the projects that drifted, or whose findings
-   you actually act on, instead of on a blind schedule. `foreman precision` is
-   the input; nothing consumes it yet.
-4. Auto-apply, gated on `P:auto` — only once the numbers justify it, which is
-   the whole point of building the ledger first.
-5. More collectors — Search Console, CrUX, `osv-scanner`, `nuclei`.
+1. More ops. Three exist. Each is small — a precondition, a reason expression,
+   and a deterministic render — and the ledger is only as useful as the number
+   of classes accumulating evidence.
+2. Drift-driven selection: propose and audit where something *changed*, rather
+   than re-deriving the same findings nightly. `foreman diff` and
+   `foreman precision` are the inputs; nothing consumes them yet.
+3. Surface actions in the dashboard, which currently only shows findings.
+4. More collectors — Search Console, CrUX, `osv-scanner`, `nuclei`.

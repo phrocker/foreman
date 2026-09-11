@@ -17,8 +17,16 @@ from .audit import DEFAULT_SKILL, AuditError, run_audit
 from .budget import Budget
 from .collectors import COLLECTORS, DEFAULT_COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
+from .diff import Kind, project_drift
 from .models import Severity
-from .runner import apply_action, check_all, collect_all, propose_actions, reject_action
+from .runner import (
+    apply_action,
+    apply_eligible,
+    check_all,
+    collect_all,
+    propose_actions,
+    reject_action,
+)
 from .store import DEFAULT_DB, Store
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
@@ -178,6 +186,65 @@ def audit(
 
 
 @app.command()
+def diff(
+    project: str = typer.Option(None, "--project", "-P"),
+    collector: str = typer.Option(None, "--collector", "-c"),
+    everything: bool = typer.Option(
+        False, "--all", help="Include changes below the noise tolerance."
+    ),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """What changed since the previous snapshot."""
+    reg = load_registry(registry)
+    targets = [reg.get(project)] if project else reg.active
+    names = [collector] if collector else list(COLLECTORS)
+    quiet = True
+
+    with Store(db or DEFAULT_DB) as store:
+        for target in targets:
+            for name in names:
+                changes, newest, previous = project_drift(store, target.id, name)
+                if newest is None:
+                    continue
+                if previous is None:
+                    console.print(
+                        f"[dim]{target.id}/{name}: first snapshot — nothing to compare.[/]"
+                    )
+                    quiet = False
+                    continue
+                shown = changes if everything else [c for c in changes if c.decisive]
+                if not shown:
+                    continue
+                quiet = False
+                console.print(f"[bold]{target.id}[/]/{name}  [dim]{len(shown)} change(s)[/]")
+                for change in shown[:40]:
+                    mark = {Kind.ADDED: "[green]+[/]", Kind.REMOVED: "[red]-[/]"}.get(
+                        change.kind, "[yellow]~[/]"
+                    )
+                    console.print(f"  {mark} {change.subject}  [dim]{change.key}[/]")
+                    if change.kind is Kind.CHANGED:
+                        console.print(f"      [red]{_clip(change.before)}[/]")
+                        console.print(f"      [green]{_clip(change.after)}[/]")
+                    else:
+                        value = change.after if change.kind is Kind.ADDED else change.before
+                        console.print(f"      {_clip(value)}")
+                if len(shown) > 40:
+                    console.print(f"  [dim]… and {len(shown) - 40} more[/]")
+                console.print()
+
+    if quiet:
+        console.print("[green]No drift.[/]")
+
+
+def _clip(value: str | None, width: int = 100) -> str:
+    if value is None:
+        return "[dim](absent)[/]"
+    flat = " ".join(value.split())
+    return flat if len(flat) <= width else flat[: width - 1] + "…"
+
+
+@app.command()
 def actions(
     project: str = typer.Option(None, "--project", "-P"),
     propose: bool = typer.Option(False, "--propose", help="Recompute before listing."),
@@ -272,6 +339,34 @@ def reject(
     with Store(db or DEFAULT_DB) as store:
         reject_action(store, action_id, dismiss_finding=not keep)
     console.print("[dim]Rejected.[/]")
+
+
+@app.command(name="apply-eligible")
+def apply_eligible_cmd(
+    project: str = typer.Option(None, "--project", "-P"),
+    confirm: bool = typer.Option(False, "--confirm", help="Actually write."),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Apply pending actions whose class has earned it under its own policy.
+
+    Reports without writing unless --confirm is given. Each application is
+    recorded as decided_by='policy:auto' and excluded from class statistics, so
+    automation never becomes evidence for more automation.
+    """
+    reg = load_registry(registry)
+    with Store(db or DEFAULT_DB) as store:
+        applied, skipped = apply_eligible(
+            reg, store, project=project, confirm=confirm,
+            log=lambda m: console.print(f"  {m}"),
+        )
+    if not applied:
+        console.print(f"[dim]Nothing eligible. {skipped} pending action(s) still need you.[/]")
+        return
+    verb = "Applied" if confirm else "Would apply"
+    console.print(f"\n[bold]{verb} {applied}[/], {skipped} still need you.")
+    if not confirm:
+        console.print("[dim]Re-run with --confirm to write.[/]")
 
 
 @app.command()

@@ -28,6 +28,10 @@ def _locate(repo: Path) -> Path | None:
     return None
 
 
+def _declares_sitemap(text: str) -> bool:
+    return any(line.lower().startswith("sitemap:") for line in text.splitlines())
+
+
 def _unanchored(text: str, prefix: str) -> list[str]:
     """Disallow lines that block `prefix` and everything beneath it."""
     hits = []
@@ -117,3 +121,64 @@ class AnchorAssetDisallow:
             else:
                 out.append(line)
         return Patch(edits=(FileEdit(path=params["file"], before=text, after="".join(out)),))
+
+
+class AddSitemapReference:
+    """Declare the sitemap in robots.txt.
+
+    The sitemap is at the conventional path and parses; it is simply not
+    announced. Crawlers that do not guess the location have to discover every
+    URL by following links instead.
+    """
+
+    verb = "add_sitemap_reference"
+    summary = "Point robots.txt at the sitemap"
+    # No signature fields. The sitemap URL differs per project, but "declare the
+    # sitemap" is one decision everywhere — parameterising on the URL would give
+    # every project its own class of one, and a class of one never accumulates
+    # enough evidence to mean anything.
+    signature_fields = ()
+    answers = ("robots_missing_sitemap",)
+
+    def propose(self, project: Project, finding: dict) -> list[dict]:
+        if finding.get("rule") not in self.answers or not project.fixable:
+            return []
+        if project.web is None:
+            return []
+        assert project.repo is not None
+        path = _locate(project.repo)
+        if path is None:
+            return []
+        if _declares_sitemap(path.read_text()):
+            return []
+        return [
+            {
+                "file": str(path.relative_to(project.repo)),
+                "sitemap_url": f"{project.web.url}/sitemap.xml",
+            }
+        ]
+
+    def _read(self, project: Project, params: dict) -> tuple[Path, str]:
+        assert project.repo is not None
+        path = project.repo / params["file"]
+        if not path.is_file():
+            raise OpNotApplicable(f"{params['file']} does not exist in {project.repo}")
+        return path, path.read_text()
+
+    def reason(self, params: dict) -> str:
+        # Invariant across projects, so the class stays one class.
+        return "(robots.sitemap_declared==false)"
+
+    def state(self, project: Project, params: dict) -> dict:
+        _, text = self._read(project, params)
+        return {"robots": {"sitemap_declared": _declares_sitemap(text)}}
+
+    def render(self, project: Project, params: dict) -> Patch:
+        _, text = self._read(project, params)
+        if _declares_sitemap(text):
+            raise OpNotApplicable("robots.txt already declares a sitemap")
+        # Appended, and on its own paragraph: Sitemap is a global directive, so
+        # putting it inside a User-agent group reads as if it were scoped to one.
+        separator = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        after = f"{text}{separator}Sitemap: {params['sitemap_url']}\n"
+        return Patch(edits=(FileEdit(path=params["file"], before=text, after=after),))

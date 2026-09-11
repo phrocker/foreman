@@ -129,6 +129,18 @@ class CrawlCollector:
                         value=r.text[:8000],
                     )
                 )
+                declared = any(
+                    line.lower().startswith("sitemap:") for line in r.text.splitlines()
+                )
+                out.append(
+                    Observation(
+                        project=project.id,
+                        collector=self.name,
+                        subject=project.web.host,
+                        key="sitemap_declared",
+                        value="true" if declared else "false",
+                    )
+                )
         except httpx.HTTPError as exc:
             out.append(
                 Observation(
