@@ -115,10 +115,13 @@ def propose(project: Project, findings: Sequence[Any]) -> list[ActionProposal]:
     the repository, so a finding with no matching op simply yields nothing —
     which is the common case and not an error.
     """
+    from ..domains import ops_for
+
     proposals: list[ActionProposal] = []
+    available = ops_for(project.active_domains)
     for finding in findings:
         row = dict(finding)
-        for op in OPS.values():
+        for op in available:
             for params in op.propose(project, row):
                 proposal = build(project, op, params, row.get("id"))
                 if proposal is not None:

@@ -32,6 +32,7 @@ def _cert_not_after(host: str, port: int = 443) -> str | None:
 
 class TlsCollector:
     name = "tls"
+    surface = "web"
 
     async def collect(self, project: Project) -> list[Observation]:
         # A project without a web surface is still a project; this collector

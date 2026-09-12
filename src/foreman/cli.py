@@ -15,7 +15,7 @@ from .actions import Stale
 from .actions.sagform import policy_allows
 from .audit import DEFAULT_SKILL, AuditError, run_audit
 from .budget import Budget
-from .collectors import COLLECTORS, DEFAULT_COLLECTORS
+from .collectors import COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
 from .diff import Kind, project_drift
 from .models import Severity
@@ -53,14 +53,14 @@ def init() -> None:
 def list_projects(registry: Path = typer.Option(None, "--registry", "-r")) -> None:
     """List the registered projects."""
     table = Table(box=None, pad_edge=False)
-    for col in ("id", "name", "web", "domains", "fixable", "tags"):
+    for col in ("id", "name", "surfaces", "domains", "fixable", "tags"):
         table.add_column(col)
     for project in load_registry(registry).projects:
         table.add_row(
             project.id,
             project.label,
-            project.web.url if project.web else "[dim]—[/]",
-            ",".join(project.domains),
+            ",".join(project.surface_names) or "[dim]—[/]",
+            ",".join(project.active_domains) or "[dim]—[/]",
             "[green]yes[/]" if project.fixable else "[dim]no[/]",
             ",".join(project.tags),
         )
@@ -76,12 +76,11 @@ def collect(
 ) -> None:
     """Run collectors and store a timestamped snapshot."""
     reg = load_registry(registry)
-    # DEFAULT_COLLECTORS, not every registered one: `render` needs Playwright and
-    # costs seconds per page, so it stays opt-in via --collector.
-    names = [collector] if collector else list(DEFAULT_COLLECTORS)
-    for name in names:
-        if name not in COLLECTORS:
-            raise typer.BadParameter(f"unknown collector {name!r} (have: {', '.join(COLLECTORS)})")
+    # None means "whatever each project's domains need", resolved per project in
+    # the runner, since two projects rarely need the same set.
+    names = [collector] if collector else None
+    if collector and collector not in COLLECTORS:
+        raise typer.BadParameter(f"unknown collector {collector!r} (have: {', '.join(COLLECTORS)})")
 
     async def run() -> None:
         with Store(db or DEFAULT_DB) as store:

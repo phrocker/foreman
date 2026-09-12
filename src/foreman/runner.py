@@ -8,8 +8,9 @@ from collections.abc import Callable, Sequence
 from .actions import Stale, propose, rehydrate
 from .actions import apply as apply_patch
 from .actions.sagform import policy_allows
-from .collectors import COLLECTORS, DEFAULT_COLLECTORS
+from .collectors import COLLECTORS, OPTIONAL
 from .config import Project, Registry
+from .domains import collectors_for
 from .rules import evaluate
 from .store import Store
 
@@ -28,9 +29,14 @@ async def collect_project(
     """
     total = 0
     for name in collectors:
+        collector = COLLECTORS[name]
+        # A collector needs its surface. Skipping is not a failure: a library
+        # with no website simply has no pages to crawl.
+        if project.surface(collector.surface) is None:
+            continue
         run_id = store.start_run(project.id, name)
         try:
-            observations = await COLLECTORS[name].collect(project)
+            observations = await collector.collect(project)
         except Exception as exc:  # noqa: BLE001 — one site must not end the sweep
             store.finish_run(run_id, ok=False, error=f"{type(exc).__name__}: {exc}")
             log(f"{project.id}/{name} failed: {exc}")
@@ -49,8 +55,14 @@ async def collect_all(
     log: Log = lambda _: None,
 ) -> int:
     targets = [registry.get(project)] if project else registry.active
-    names = list(collectors) if collectors else list(DEFAULT_COLLECTORS)
-    results = await asyncio.gather(*(collect_project(t, names, store, log) for t in targets))
+
+    def wanted(target: Project) -> list[str]:
+        if collectors:
+            return list(collectors)
+        # Everything this project's live domains need, minus the heavy opt-ins.
+        return [n for n in collectors_for(target.active_domains) if n not in OPTIONAL]
+
+    results = await asyncio.gather(*(collect_project(t, wanted(t), store, log) for t in targets))
     return sum(results)
 
 

@@ -76,6 +76,7 @@ def _canonical(head: str, base: str) -> str | None:
 
 class CrawlCollector:
     name = "crawl"
+    surface = "web"
 
     async def collect(self, project: Project) -> list[Observation]:
         # A project without a web surface is still a project; this collector

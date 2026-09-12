@@ -1,13 +1,15 @@
 """The project registry: what Foreman knows about, and what it may touch.
 
-A project is the unit, not a website. Most of the projects this was built for do
-have a web surface, but that is one *aspect* of a project — alongside its
-repository, its dependencies, its infrastructure, its costs — and not the thing
-itself. A project with no `web:` block is still a project; collectors that need a
-URL skip it.
+A project is the unit. What a project *has* is described by its surfaces — a
+website, a GitHub repository, a cloud account, an ad account — and what Foreman
+*does about it* is described by its domains. Collectors attach to surfaces,
+rules and operations attach to domains, and a project is worked on at the
+intersection of the two.
 
-This distinction is load-bearing. A tool takes the permanent shape of whichever
-aspect it was written for first, and the first aspect here was SEO.
+That separation is the thing that keeps this from being an SEO tool with
+extensions bolted on. A website is one surface among several; search visibility
+is one trade among several. Adding a trade means declaring a domain, not editing
+the core.
 """
 
 from __future__ import annotations
@@ -16,18 +18,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_REGISTRY = Path("foreman.yaml")
 
-# A domain is a family of rules. Collectors attach to surfaces, rules attach to
-# domains, and a project is evaluated on the intersection of what it has and what
-# it opted into.
-ALL_DOMAINS = ("seo", "security", "performance")
-
 
 class WebSurface(BaseModel):
-    """A project's public web presence, if it has one."""
+    """A public web presence."""
 
     url: str
     # spa | wordpress | static | other — decides which rules are meaningful.
@@ -47,6 +44,37 @@ class WebSurface(BaseModel):
         return urlparse(self.url).netloc
 
 
+class GitHubSurface(BaseModel):
+    """A GitHub repository: alerts, workflow runs, releases."""
+
+    owner: str
+    repo: str
+
+    @property
+    def slug(self) -> str:
+        return f"{self.owner}/{self.repo}"
+
+
+class CloudSurface(BaseModel):
+    """A cloud account or project. Declared, not yet collected from."""
+
+    provider: str  # gcp | aws | azure
+    account: str  # project id, account id, subscription id
+    regions: list[str] = Field(default_factory=list)
+
+
+class AdsSurface(BaseModel):
+    """An advertising account. Declared, not yet collected from."""
+
+    platform: str  # google | meta | linkedin
+    account: str
+
+
+# Every surface a project can have. Collectors name one of these keys, so adding
+# a surface type is this table plus a field below.
+SURFACES = ("web", "github", "cloud", "ads")
+
+
 class Project(BaseModel):
     id: str
     name: str | None = None
@@ -56,18 +84,27 @@ class Project(BaseModel):
     # tools are permanently in the second category — this is the whole reason to
     # run Foreman locally.
     repo: Path | None = None
+
     web: WebSurface | None = None
-    domains: list[str] = Field(default_factory=lambda: list(ALL_DOMAINS))
+    github: GitHubSurface | None = None
+    cloud: CloudSurface | None = None
+    ads: AdsSurface | None = None
+
+    # Empty means "every domain whose surfaces this project has", which is
+    # almost always what you want and stops the registry from needing an edit
+    # each time a domain is added.
+    domains: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     enabled: bool = True
 
-    @field_validator("domains")
-    @classmethod
-    def _known_domains(cls, v: list[str]) -> list[str]:
-        unknown = sorted(set(v) - set(ALL_DOMAINS))
+    @model_validator(mode="after")
+    def _check_domains(self) -> Project:
+        from .domains import DOMAINS
+
+        unknown = sorted(set(self.domains) - set(DOMAINS))
         if unknown:
-            raise ValueError(f"unknown domain(s) {unknown}; known: {list(ALL_DOMAINS)}")
-        return v
+            raise ValueError(f"unknown domain(s) {unknown}; known: {sorted(DOMAINS)}")
+        return self
 
     @property
     def label(self) -> str:
@@ -77,8 +114,35 @@ class Project(BaseModel):
     def fixable(self) -> bool:
         return self.repo is not None and self.repo.exists()
 
+    def surface(self, name: str) -> object | None:
+        return getattr(self, name, None)
+
+    @property
+    def surface_names(self) -> tuple[str, ...]:
+        return tuple(n for n in SURFACES if self.surface(n) is not None)
+
     def covers(self, domain: str) -> bool:
-        return domain in self.domains
+        """Whether this domain applies here.
+
+        A domain applies when the project has every surface it needs and either
+        asked for it by name or asked for nothing in particular. Declaring a
+        domain whose surface is missing is not an error — a project simply
+        cannot be audited for something it does not have.
+        """
+        from .domains import DOMAINS
+
+        spec = DOMAINS.get(domain)
+        if spec is None:
+            return False
+        if not all(self.surface(s) is not None for s in spec.surfaces):
+            return False
+        return not self.domains or domain in self.domains
+
+    @property
+    def active_domains(self) -> tuple[str, ...]:
+        from .domains import DOMAINS
+
+        return tuple(name for name in DOMAINS if self.covers(name))
 
 
 class Registry(BaseModel):

@@ -1,24 +1,42 @@
-"""Collectors: deterministic gatherers of fact.
+"""Collectors: deterministic gatherers of fact, attached to surfaces.
 
 No collector calls a language model. Everything here is a crawl, a socket, or an
 API read, so a run is reproducible, costs nothing, and produces the same answer
 twice. The model's job starts afterwards, on the *diff* — which is small.
 
-Today's motivating example: a soft-404 farm, a canonical/redirect mismatch, and
-a robots.txt rule blocking every JS bundle on a production site were all found
-with curl and grep. Nothing about finding them needed intelligence. Explaining
-that they shared one root cause did.
+A collector attaches to a surface rather than a domain, because gathering facts
+depends on what a project has rather than on what you want from it. Rendering a
+page feeds both performance and search visibility; neither owns it.
 """
 
 from __future__ import annotations
 
 from .crawl import CrawlCollector
+from .github import DependabotCollector, GitHubActivityCollector
 from .render import RenderCollector
 from .tls import TlsCollector
 
-# render is not in the default set: it needs the optional Playwright extra and
-# costs seconds per page. Opt in with `foreman collect --collector render`.
-COLLECTORS = {c.name: c for c in (CrawlCollector(), TlsCollector(), RenderCollector())}
-DEFAULT_COLLECTORS = ("crawl", "tls")
+COLLECTORS = {
+    c.name: c
+    for c in (
+        CrawlCollector(),
+        TlsCollector(),
+        RenderCollector(),
+        DependabotCollector(),
+        GitHubActivityCollector(),
+    )
+}
 
-__all__ = ["COLLECTORS", "DEFAULT_COLLECTORS", "CrawlCollector", "RenderCollector", "TlsCollector"]
+# Collectors heavy enough to be opt-in. `render` needs Playwright and costs
+# seconds per page; everything else is a request or two.
+OPTIONAL = ("render",)
+
+__all__ = [
+    "COLLECTORS",
+    "OPTIONAL",
+    "CrawlCollector",
+    "DependabotCollector",
+    "GitHubActivityCollector",
+    "RenderCollector",
+    "TlsCollector",
+]
