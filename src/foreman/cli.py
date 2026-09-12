@@ -26,6 +26,7 @@ from .runner import (
     collect_all,
     propose_actions,
     reject_action,
+    verify_applied,
 )
 from .store import DEFAULT_DB, open_store
 
@@ -268,10 +269,7 @@ def actions(
             target = reg.get(row["project"])
             eligible = False
             if decided:
-                eligible = policy_allows(
-                    row["statement"],
-                    {"class": {"approvals": stats["approvals"], "rejections": stats["rejections"]}},
-                )
+                eligible = policy_allows(row["statement"], {"class": stats})
             console.print(f"[bold]#{row['id']}[/] [dim]{row['project']}[/] {row['verb']}")
             console.print(f"   files    {', '.join(json.loads(row['files']))}")
             if decided == 0:
@@ -285,6 +283,10 @@ def actions(
                     record += f", [red]{stats['rejections']} rejected[/]"
                 if stats["identical"]:
                     record += f" · patch identical to {stats['identical']} of them"
+                if stats["verified"]:
+                    record += f" · [green]{stats['verified']} verified by CI[/]"
+                if stats["broke"]:
+                    record += f" · [red]{stats['broke']} broke the build[/]"
                 if stats["failures"]:
                     record += f" · [red]{stats['failures']} failed on apply[/]"
             console.print(f"   record   {record}")
@@ -369,6 +371,33 @@ def apply_eligible_cmd(
     console.print(f"\n[bold]{verb} {applied}[/], {skipped} still need you.")
     if not confirm:
         console.print("[dim]Re-run with --confirm to write.[/]")
+
+
+@app.command()
+def verify(
+    project: str = typer.Option(None, "--project", "-P"),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Ask each project's checks whether the actions applied to it held up.
+
+    Applying a patch cleanly and the build still passing are different claims.
+    For any operation that can break one, only the second is evidence — so this
+    is what feeds the automation threshold, not the approval count.
+    """
+    reg = load_registry(registry)
+
+    async def run() -> None:
+        with open_store(db or DEFAULT_DB) as store:
+            good, bad = await verify_applied(
+                reg, store, project=project, log=lambda m: console.print(f"  {m}")
+            )
+            if not good and not bad:
+                console.print("[dim]Nothing new to verify. Checks may not have run yet.[/]")
+                return
+            console.print(f"\n[green]{good} verified[/], [red]{bad} broke the build[/].")
+
+    asyncio.run(run())
 
 
 @app.command()

@@ -123,6 +123,7 @@ foreman collect --collector render
 | `foreman actions` | Pending actions, each with its class's record |
 | `foreman approve` / `reject` | Decide one |
 | `foreman apply-eligible` | Apply what a class has earned under its policy |
+| `foreman verify` | Ask each project's checks whether applied actions held up |
 | `foreman precision` | Which rules earn their findings |
 | `foreman serve` | Dashboard on loopback (default `:8765`) |
 
@@ -195,7 +196,15 @@ foreman precision             # which rules earn their findings
    auto     eligible under policy
 ```
 
-Two guards worth knowing about. A policy-approved action is recorded as
+**Applying and verifying are different claims.** An operation declares whether
+it can break a build. Editing a robots.txt cannot, so approvals are evidence
+enough; changing a dependency constraint can, so its policy reads
+`class.verified` instead — and one broken build disqualifies the class however
+many approvals precede it. `foreman verify` asks each project's checks about the
+actions applied to it, and an action whose checks have not run is left
+unjudged rather than counted either way. Absence of evidence is not evidence.
+
+Two further guards worth knowing about. A policy-approved action is recorded as
 `decided_by='policy:auto'` and **excluded from class statistics**, so automation
 can never become evidence for more automation. And a stale action is recorded as
 `stale` with no decision at all — refusing it is not a rejection, and must not

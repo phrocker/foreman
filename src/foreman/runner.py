@@ -190,10 +190,7 @@ def apply_eligible(
     applied = skipped = 0
     for row in store.pending_actions(project):
         stats = store.class_stats(row["class_key"], row["patch_digest"])
-        eligible = policy_allows(
-            row["statement"],
-            {"class": {"approvals": stats["approvals"], "rejections": stats["rejections"]}},
-        )
+        eligible = policy_allows(row["statement"], {"class": stats})
         if not eligible:
             skipped += 1
             continue
@@ -210,3 +207,57 @@ def apply_eligible(
         applied += 1
         log(f"applied #{row['id']} {row['project']}/{row['verb']}: {', '.join(written)}")
     return applied, skipped
+
+
+async def verify_applied(
+    registry: Registry,
+    store: Store,
+    project: str | None = None,
+    log: Log = lambda _: None,
+) -> tuple[int, int]:
+    """Consult each project's checks about the actions applied to it.
+
+    Returns (verified, broke). Actions whose checks have not run yet are left
+    alone rather than recorded either way — absence of evidence is not evidence,
+    and a class must not gain or lose standing because nobody has pushed since.
+    """
+    from datetime import datetime
+
+    from .collectors.github import GitHubError, completed_runs_since
+
+    verified = broke = 0
+    for row in store.unverified_actions(project):
+        try:
+            target = registry.get(row["project"])
+        except KeyError:
+            continue
+        if target.github is None:
+            # Nothing to ask. The action stays unverified, which is the honest
+            # state for a project with no checks rather than a passing grade.
+            continue
+        try:
+            applied_at = datetime.fromisoformat(row["applied_at"])
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            runs = await completed_runs_since(target.github.slug, applied_at)
+        except GitHubError as exc:
+            log(f"{row['project']}: cannot read checks — {exc}")
+            continue
+        if not runs:
+            continue
+
+        first = runs[0]
+        if first["conclusion"] == "success":
+            store.record_verification(row["id"], "verified", first["url"])
+            verified += 1
+            log(f"#{row['id']} {row['project']}/{row['verb']}: verified")
+        else:
+            store.record_verification(row["id"], "broke", first["url"])
+            broke += 1
+            log(
+                f"#{row['id']} {row['project']}/{row['verb']}: "
+                f"broke the build ({first['conclusion']})"
+            )
+    return verified, broke

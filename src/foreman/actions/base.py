@@ -85,6 +85,12 @@ class Op(Protocol):
     # and is deliberately excluded so the equivalence class is broad enough to
     # accumulate evidence.
     signature_fields: tuple[str, ...]
+    # Whether applying this cleanly is enough to count as evidence, or whether
+    # the project's own checks have to agree first. Editing a robots.txt has no
+    # build to break; changing a dependency constraint does, and a class that
+    # accumulates approvals while breaking CI every time must never reach its
+    # automation threshold on those approvals alone.
+    requires_verification: bool = False
 
     def reason(self, params: dict) -> str:
         """The BECAUSE expression asserting the state this op transforms.

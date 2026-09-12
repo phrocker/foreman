@@ -83,6 +83,39 @@ def _age_days(iso: str | None) -> float | None:
     return (datetime.now(UTC) - when).total_seconds() / 86400
 
 
+async def completed_runs_since(slug: str, since: datetime) -> list[dict[str, Any]]:
+    """Completed default-branch runs that finished after `since`, oldest first.
+
+    Used to decide whether a project's own checks agreed with an action after it
+    was applied. Scoped to the default branch because that is where an applied
+    change lands; a run on someone's feature branch says nothing about it.
+    """
+    collector = GitHubActivityCollector()
+    branch = await collector._default_branch(slug)
+    payload = await gh_api(f"repos/{slug}/actions/runs?per_page={RUN_SAMPLE}&branch={branch}")
+    runs = []
+    for run in (payload or {}).get("workflow_runs", []):
+        if run.get("status") != "completed":
+            continue
+        ended = run.get("updated_at")
+        if not ended:
+            continue
+        try:
+            when = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when > since:
+            runs.append(
+                {
+                    "conclusion": run.get("conclusion"),
+                    "url": run.get("html_url"),
+                    "ended": when,
+                    "name": run.get("name"),
+                }
+            )
+    return sorted(runs, key=lambda r: r["ended"])
+
+
 class DependabotCollector:
     name = "dependabot"
     surface = "github"

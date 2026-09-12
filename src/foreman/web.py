@@ -139,18 +139,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         decided = stats["approvals"] + stats["rejections"]
         item["stats"] = stats
         item["decided"] = decided
-        item["eligible"] = bool(
-            decided
-            and policy_allows(
-                row["statement"],
-                {
-                    "class": {
-                        "approvals": stats["approvals"],
-                        "rejections": stats["rejections"],
-                    }
-                },
-            )
-        )
+        item["eligible"] = bool(decided and policy_allows(row["statement"], {"class": stats}))
         # Staleness is a read of the working tree, so it is computed per request
         # rather than stored: an action that was fine a minute ago may not be.
         item["stale"] = None

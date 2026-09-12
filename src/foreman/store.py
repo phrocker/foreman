@@ -73,6 +73,10 @@ class Store(Protocol):
     def record_application(
         self, action_id: int, outcome: str, error: str | None = None
     ) -> None: ...
+    def record_verification(
+        self, action_id: int, verification: str, ref: str | None = None
+    ) -> None: ...
+    def unverified_actions(self, project: str | None = None) -> list[Record]: ...
     def class_stats(self, class_key: str, patch_digest: str | None = None) -> dict[str, int]: ...
 
 
@@ -155,8 +159,15 @@ CREATE TABLE IF NOT EXISTS actions (
     -- further, which would let one mistake bootstrap itself.
     decided_by      TEXT,
     applied_at      TEXT,
-    outcome         TEXT,              -- applied | failed | stale
-    error           TEXT
+    outcome         TEXT,              -- applied | failed | stale | superseded
+    error           TEXT,
+    -- Whether the project's own checks agreed, after the fact. Distinct from
+    -- `outcome`: applying a patch cleanly and the build still passing are two
+    -- different claims, and for anything that can break a build only the second
+    -- is evidence.
+    verification    TEXT,              -- verified | broke
+    verified_at     TEXT,
+    verification_ref TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_actions_class ON actions (class_key, decision);
 CREATE INDEX IF NOT EXISTS idx_actions_open ON actions (project, decision);
@@ -201,6 +212,13 @@ def _additive_migrations(conn: sqlite3.Connection) -> None:
     if "outcome" not in _columns(conn, "findings"):
         conn.execute("ALTER TABLE findings ADD COLUMN outcome TEXT")
         conn.execute("ALTER TABLE findings ADD COLUMN outcome_at TEXT")
+    # Applied and verified are different claims; the ledger counted only the
+    # first, so a class could accumulate ten approvals while breaking the build
+    # every time and still pass its own automation policy.
+    if "verification" not in _columns(conn, "actions"):
+        conn.execute("ALTER TABLE actions ADD COLUMN verification TEXT")
+        conn.execute("ALTER TABLE actions ADD COLUMN verified_at TEXT")
+        conn.execute("ALTER TABLE actions ADD COLUMN verification_ref TEXT")
 
 
 def _one(row: sqlite3.Row | None) -> Record | None:
@@ -455,6 +473,26 @@ class SqliteStore:
         )
         self._db.commit()
 
+    def record_verification(
+        self, action_id: int, verification: str, ref: str | None = None
+    ) -> None:
+        """Record whether the project's checks agreed with an applied action."""
+        self._db.execute(
+            "UPDATE actions SET verification = ?, verified_at = ?, verification_ref = ? "
+            "WHERE id = ?",
+            (verification, utcnow(), ref, action_id),
+        )
+        self._db.commit()
+
+    def unverified_actions(self, project: str | None = None) -> list[Record]:
+        """Applied actions whose checks have not been consulted yet."""
+        sql = "SELECT * FROM actions " "WHERE outcome = 'applied' AND verification IS NULL"
+        params: tuple[str, ...] = ()
+        if project:
+            sql += " AND project = ?"
+            params = (project,)
+        return _many(self._db.execute(sql + " ORDER BY applied_at", params))
+
     def class_stats(self, class_key: str, patch_digest: str | None = None) -> dict[str, int]:
         """Approval record for one equivalence class.
 
@@ -469,7 +507,9 @@ class SqliteStore:
                 SUM(decision = 'rejected')                   AS rejections,
                 COUNT(DISTINCT project)                      AS projects,
                 SUM(decision = 'approved' AND patch_digest = ?) AS identical,
-                SUM(outcome = 'failed')                      AS failures
+                SUM(outcome = 'failed')                      AS failures,
+                SUM(verification = 'verified')               AS verified,
+                SUM(verification = 'broke')                  AS broke
             FROM actions
             WHERE class_key = ? AND decision IS NOT NULL AND decided_by = 'human'
             """,
@@ -481,6 +521,8 @@ class SqliteStore:
             "projects": int(row["projects"] or 0),
             "identical": int(row["identical"] or 0),
             "failures": int(row["failures"] or 0),
+            "verified": int(row["verified"] or 0),
+            "broke": int(row["broke"] or 0),
         }
 
     def project_summary(self) -> list[Record]:

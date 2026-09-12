@@ -64,6 +64,8 @@ class AddSecurityHeader:
     summary = "Add a missing security header to the nginx server block"
     # The header is what makes two of these the same decision. The file is not.
     signature_fields = ("header",)
+    # A response header does not affect a build.
+    requires_verification = False
     answers = ("missing_security_header",)
 
     def propose(self, project: Project, finding: dict) -> list[dict]:

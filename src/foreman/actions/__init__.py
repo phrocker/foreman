@@ -31,7 +31,15 @@ OPS: dict[str, Op] = {
 # evaluated deterministically, so the rule that governs automation is itself
 # auditable — and can be tightened without touching code.
 AUTO_POLICY = "auto"
+# Applying cleanly is the bar where nothing downstream can break.
 AUTO_POLICY_EXPR = "(class.approvals>=10)&&(class.rejections==0)"
+# Where something can, the bar is the project's own checks agreeing — and one
+# broken build disqualifies the class however many approvals precede it.
+VERIFIED_POLICY_EXPR = "(class.verified>=10)&&(class.rejections==0)&&(class.broke==0)"
+
+
+def policy_expr_for(op: Op) -> str:
+    return VERIFIED_POLICY_EXPR if op.requires_verification else AUTO_POLICY_EXPR
 
 
 @dataclass(frozen=True)
@@ -54,10 +62,14 @@ class ActionProposal:
         """Re-evaluate the BECAUSE clause against the world as it is now."""
         return precondition_holds(self.statement, OPS[self.verb].state(project, self.params))
 
-    def auto_eligible(self, approvals: int, rejections: int) -> bool:
-        return policy_allows(
-            self.statement, {"class": {"approvals": approvals, "rejections": rejections}}
-        )
+    def auto_eligible(self, **stats: int) -> bool:
+        """Whether this action's own policy clause is satisfied by its class.
+
+        Takes the whole stats mapping rather than named counts: which of them a
+        policy reads is the policy's business, and hardcoding two here is what
+        would have to change every time a new one is counted.
+        """
+        return policy_allows(self.statement, {"class": dict(stats)})
 
     @property
     def patch_digest(self) -> str:
@@ -92,7 +104,7 @@ def build(
             params,
             reason=op.reason(params),
             policy=AUTO_POLICY,
-            policy_expr=AUTO_POLICY_EXPR,
+            policy_expr=policy_expr_for(op),
         )
     )
     return ActionProposal(
@@ -191,7 +203,9 @@ __all__ = [
     "OpNotApplicable",
     "Patch",
     "apply",
+    "VERIFIED_POLICY_EXPR",
     "class_key",
     "class_statement",
+    "policy_expr_for",
     "propose",
 ]

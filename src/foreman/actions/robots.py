@@ -58,6 +58,8 @@ class AnchorAssetDisallow:
     # is not: the same fix to `public/robots.txt` on one project and
     # `frontend/public/robots.txt` on another is the same decision.
     signature_fields = ("prefix",)
+    # Editing robots.txt has no build to break.
+    requires_verification = False
 
     # Which finding this op answers. Declared rather than inferred, so adding an
     # op never requires a model to work out where it applies.
@@ -138,6 +140,7 @@ class AddSitemapReference:
     # every project its own class of one, and a class of one never accumulates
     # enough evidence to mean anything.
     signature_fields = ()
+    requires_verification = False
     answers = ("robots_missing_sitemap",)
 
     def propose(self, project: Project, finding: dict) -> list[dict]:

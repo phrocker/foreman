@@ -388,8 +388,12 @@ function renderActions() {
       : `Approved ${s.approvals}/${a.decided} across ${s.projects} project(s)` +
         (s.rejections ? ` · <span class="was">${s.rejections} rejected</span>` : "") +
         (s.identical ? ` · patch identical to ${s.identical} of them` : "") +
+        (s.verified ? ` · <span class="now">${s.verified} verified by CI</span>` : "") +
+        (s.broke ? ` · <span class="was">${s.broke} broke the build</span>` : "") +
         (s.failures ? ` · <span class="was">${s.failures} failed on apply</span>` : "");
-    const pct = Math.min(100, (s.approvals / 10) * 100);
+    // Against whichever count this class's policy reads, not always approvals.
+    const counted = a.statement.includes("class.verified") ? s.verified : s.approvals;
+    const pct = Math.min(100, (counted / 10) * 100);
     return `<div class="action" data-id="${a.id}">
       <div class="action-head">
         <span class="verb">${esc(a.verb)}</span>
