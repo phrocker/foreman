@@ -15,6 +15,7 @@ this boundary as plain dicts.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -74,8 +75,9 @@ class Store(Protocol):
     def start_run(self, project: str, collector: str) -> int: ...
     def finish_run(self, run_id: int, ok: bool = True, error: str | None = None) -> None: ...
     def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]: ...
+    def sweep_times(self, project: str, limit: int = 2) -> list[str]: ...
     def record(self, run_id: int, observations: Iterable[Observation]) -> int: ...
-    def run_observations(self, run_id: int) -> list[Record]: ...
+    def latest_observations(self, project: str, as_of: str | None = None) -> list[Record]: ...
 
     # --- decision plane ---
     def record_findings(
@@ -117,9 +119,24 @@ class Store(Protocol):
     def conversations(self, limit: int = 20) -> list[Record]: ...
 
 
+# Where the store lives. `sqlite` (the default, a file beside foreman.yaml) or
+# `shoal://host:port` for a running `shoal-embed serve`.
+STORE_ENV = "FOREMAN_STORE"
+
+
 def open_store(path: Path | None = None) -> Store:
     """Open the configured store. The one place a substrate is chosen."""
-    store = SqliteStore(path)
+    target = os.environ.get(STORE_ENV, "").strip()
+    if target.startswith("shoal://"):
+        from .shoalstore import ShoalStore
+
+        store: Store = ShoalStore(target=target.removeprefix("shoal://"))
+    elif target and target != "sqlite":
+        raise ValueError(
+            f"{STORE_ENV}={target!r} is not a store. Use 'sqlite' or 'shoal://host:port'."
+        )
+    else:
+        store = SqliteStore(path)
     store.connect()
     return store
 
@@ -373,12 +390,43 @@ class SqliteStore:
         self._db.commit()
         return len(rows)
 
-    def run_observations(self, run_id: int) -> list[Record]:
-        return _many(
-            self._db.execute(
-                "SELECT subject, key, value FROM observations WHERE run_id = ?", (run_id,)
-            )
-        )
+    def sweep_times(self, project: str, limit: int = 2) -> list[str]:
+        """When this project was last observed, newest first.
+
+        A sweep is several collector runs, so the boundary is the run's finish
+        time rather than any one collector's.
+        """
+        rows = self._db.execute(
+            "SELECT DISTINCT finished_at FROM runs "
+            "WHERE project = ? AND ok = 1 AND finished_at IS NOT NULL "
+            "ORDER BY finished_at DESC LIMIT ?",
+            (project, limit),
+        ).fetchall()
+        return [r["finished_at"] for r in rows]
+
+    def latest_observations(self, project: str, as_of: str | None = None) -> list[Record]:
+        """The most recent value of every cell, optionally as of a past moment.
+
+        Not "the observations one run recorded", which is the question the
+        run-keyed schema invited and the wrong one: a collector that failed on
+        the latest sweep leaves the previous value as the latest *known* value,
+        and a rule should judge that rather than treat the cell as absent.
+        """
+        sql = """
+            SELECT subject, key, value FROM observations o
+            WHERE project = ? AND observed_at = (
+                SELECT MAX(observed_at) FROM observations i
+                WHERE i.project = o.project AND i.subject = o.subject AND i.key = o.key
+        """
+        params: list[str] = [project]
+        if as_of:
+            sql += " AND i.observed_at <= ?"
+            params.append(as_of)
+        sql += ")"
+        if as_of:
+            sql += " AND observed_at <= ?"
+            params.append(as_of)
+        return _many(self._db.execute(sql, params))
 
     # --- findings ---------------------------------------------------------
 

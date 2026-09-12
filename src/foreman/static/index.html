@@ -600,7 +600,7 @@ function renderDrift() {
       : `<div class="drift-val">${esc(d.kind === "added" ? d.after : d.before)}</div>`;
     return `<div class="drift">
       <div class="drift-head">${mark}
-        <span class="project-cell">${esc(d.project)}/${esc(d.collector)}</span>
+        <span class="project-cell">${esc(d.project)}</span>
         <span class="rule-tag">${esc(d.key)}</span></div>
       <div class="drift-subject">${esc(d.subject)}</div>${body}</div>`;
   }).join("");

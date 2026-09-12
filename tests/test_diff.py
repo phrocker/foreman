@@ -1,3 +1,5 @@
+import time
+
 from foreman.diff import Kind, compare, project_drift
 from foreman.models import Observation
 from foreman.store import SqliteStore
@@ -83,65 +85,48 @@ def test_non_numeric_values_are_never_tolerance_tested():
     assert change.kind is Kind.CHANGED
 
 
+def _sweep(store, value):
+    run_id = store.start_run("p", "crawl")
+    store.record(
+        run_id,
+        [
+            Observation(
+                project="p", collector="crawl", subject="https://p/", key="title", value=value
+            )
+        ],
+    )
+    store.finish_run(run_id, ok=True)
+
+
 def test_a_first_snapshot_has_not_drifted(tmp_path):
     with SqliteStore(tmp_path / "t.db") as store:
-        run_id = store.start_run("p", "crawl")
-        store.record(
-            run_id,
-            [
-                Observation(
-                    project="p", collector="crawl", subject="https://p/", key="title", value="T"
-                )
-            ],
-        )
-        store.finish_run(run_id, ok=True)
-
-        changes, newest, previous = project_drift(store, "p", "crawl")
+        _sweep(store, "T")
+        changes, newest, previous = project_drift(store, "p")
         assert changes == []
-        assert newest == run_id and previous is None
+        assert newest is not None and previous is None
 
 
-def test_drift_between_two_stored_runs(tmp_path):
+def test_drift_between_two_sweeps(tmp_path):
     with SqliteStore(tmp_path / "t.db") as store:
-        for title in ("Before", "After"):
-            run_id = store.start_run("p", "crawl")
-            store.record(
-                run_id,
-                [
-                    Observation(
-                        project="p",
-                        collector="crawl",
-                        subject="https://p/",
-                        key="title",
-                        value=title,
-                    )
-                ],
-            )
-            store.finish_run(run_id, ok=True)
+        _sweep(store, "Before")
+        time.sleep(1.1)  # sweep boundaries are second-resolution
+        _sweep(store, "After")
 
-        changes, newest, previous = project_drift(store, "p", "crawl")
+        changes, newest, previous = project_drift(store, "p")
         assert previous is not None and newest > previous
         assert [(c.before, c.after) for c in changes] == [("Before", "After")]
 
 
-def test_a_failed_run_is_not_compared_against(tmp_path):
-    """A collector that errored stored nothing. Diffing against it would report
-    every page as removed."""
+def test_a_failed_sweep_does_not_look_like_deletion(tmp_path):
+    """A collector that errored stored nothing. Under the old run-keyed model
+    that made every cell it owns look deleted; the latest *known* value is what
+    a rule should still see."""
     with SqliteStore(tmp_path / "t.db") as store:
-        first = store.start_run("p", "crawl")
-        store.record(
-            first,
-            [
-                Observation(
-                    project="p", collector="crawl", subject="https://p/", key="title", value="T"
-                )
-            ],
-        )
-        store.finish_run(first, ok=True)
-
+        _sweep(store, "T")
         failed = store.start_run("p", "crawl")
         store.finish_run(failed, ok=False, error="host unreachable")
 
-        changes, newest, previous = project_drift(store, "p", "crawl")
-        assert newest == first and previous is None
+        changes, newest, previous = project_drift(store, "p")
+        assert previous is None
         assert changes == []
+        assert [c["value"] for c in store.latest_observations("p")] == ["T"]

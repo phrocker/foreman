@@ -76,13 +76,12 @@ def check_all(
     targets = [registry.get(project)] if project else registry.active
     total = 0
     for target in targets:
-        rows: list = []
-        latest_run = None
-        for name in COLLECTORS:
-            runs = store.recent_runs(target.id, name, limit=1)
-            if runs:
-                latest_run = latest_run or runs[0]
-                rows.extend(store.run_observations(runs[0]))
+        # Every cell's latest known value, not one run's output. A collector
+        # that failed on this sweep leaves the previous value standing, and a
+        # rule should judge that rather than treat the cell as absent.
+        rows = store.latest_observations(target.id)
+        latest_run = store.recent_runs(target.id, "crawl", limit=1)
+        latest_run = latest_run[0] if latest_run else None
         if not rows:
             log(f"{target.id}: no snapshot yet")
             continue

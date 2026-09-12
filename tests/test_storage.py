@@ -73,7 +73,11 @@ def test_records_cross_the_boundary_as_plain_dicts(store):
         [Finding(project="p", rule="r", severity=Severity.HIGH, summary="s")],
     )
 
-    for rows in (store.run_observations(run_id), store.open_findings(), store.project_summary()):
+    for rows in (
+        store.latest_observations("p"),
+        store.open_findings(),
+        store.project_summary(),
+    ):
         assert rows, "fixture produced nothing to check"
         for row in rows:
             assert type(row) is dict, f"{type(row).__name__} escaped the store"

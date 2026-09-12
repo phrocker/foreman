@@ -82,8 +82,18 @@ homepage shell. Foreman asks for URLs that should not exist and compares.
   anything that spawns subagents needs a ceiling.
 - **No stealth browser.** Foreman crawls projects you own. If a WAF blocks it,
   allowlist it.
-- **No Postgres.** Single operator, single machine. SQLite in WAL mode — behind
-  a `Store` protocol, because the substrate is not settled. Foreman's
+- **No Postgres.** SQLite in WAL mode by default, behind a `Store` protocol,
+  with a second implementation over shoal:
+
+  ```bash
+  shoal-embed serve --data ~/.shoal/foreman --port 9876
+  FOREMAN_STORE=shoal://127.0.0.1:9876 foreman status
+  ```
+
+  Point it at a server of its own; sharing one with another application means
+  sharing a table. Both implementations are held to the same 38 parity tests,
+  which drive an identical sequence through each and compare what comes back —
+  the only check that catches a divergence nobody thought to test for. Foreman's
   observation model turned out to be a cell store reinvented in SQL (project and
   subject are a row, the collector a column family, the key a column qualifier,
   `observed_at` a cell timestamp), so moving it onto one is a real prospect. The

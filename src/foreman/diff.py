@@ -107,20 +107,27 @@ def compare(before_rows: Sequence[Any], after_rows: Sequence[Any]) -> list[Chang
     return changes
 
 
-def project_drift(
-    store: Store, project: str, collector: str
-) -> tuple[list[Change], int | None, int | None]:
-    """Compare a project's two most recent successful runs of one collector.
+def project_drift(store: Store, project: str) -> tuple[list[Change], str | None, str | None]:
+    """Compare a project against itself at its previous sweep.
 
-    Returns no changes rather than raising when there is only one snapshot: a
-    project observed for the first time has not drifted, it has merely started.
+    Two point-in-time reads rather than a join across two runs: the store keeps
+    every version of a cell, so "what did this look like before" is a question
+    it can answer directly. That also fixes a subtlety the run-based version got
+    wrong — a collector that failed on the latest sweep used to make its cells
+    look deleted, when the previous value is still the latest thing known.
+
+    Returns no changes when there is only one sweep: a project observed for the
+    first time has not drifted, it has merely started.
     """
-    runs = store.recent_runs(project, collector, limit=2)
-    if len(runs) < 2:
-        return [], (runs[0] if runs else None), None
-    newest, previous = runs[0], runs[1]
+    sweeps = store.sweep_times(project, limit=2)
+    if len(sweeps) < 2:
+        return [], (sweeps[0] if sweeps else None), None
+    newest, previous = sweeps[0], sweeps[1]
     return (
-        compare(store.run_observations(previous), store.run_observations(newest)),
+        compare(
+            store.latest_observations(project, as_of=previous),
+            store.latest_observations(project),
+        ),
         newest,
         previous,
     )

@@ -189,7 +189,6 @@ def audit(
 @app.command()
 def diff(
     project: str = typer.Option(None, "--project", "-P"),
-    collector: str = typer.Option(None, "--collector", "-c"),
     everything: bool = typer.Option(
         False, "--all", help="Include changes below the noise tolerance."
     ),
@@ -199,40 +198,36 @@ def diff(
     """What changed since the previous snapshot."""
     reg = load_registry(registry)
     targets = [reg.get(project)] if project else reg.active
-    names = [collector] if collector else list(COLLECTORS)
     quiet = True
 
     with open_store(db or default_db()) as store:
         for target in targets:
-            for name in names:
-                changes, newest, previous = project_drift(store, target.id, name)
-                if newest is None:
-                    continue
-                if previous is None:
-                    console.print(
-                        f"[dim]{target.id}/{name}: first snapshot — nothing to compare.[/]"
-                    )
-                    quiet = False
-                    continue
-                shown = changes if everything else [c for c in changes if c.decisive]
-                if not shown:
-                    continue
+            changes, newest, previous = project_drift(store, target.id)
+            if newest is None:
+                continue
+            if previous is None:
+                console.print(f"[dim]{target.id}: first sweep — nothing to compare.[/]")
                 quiet = False
-                console.print(f"[bold]{target.id}[/]/{name}  [dim]{len(shown)} change(s)[/]")
-                for change in shown[:40]:
-                    mark = {Kind.ADDED: "[green]+[/]", Kind.REMOVED: "[red]-[/]"}.get(
-                        change.kind, "[yellow]~[/]"
-                    )
-                    console.print(f"  {mark} {change.subject}  [dim]{change.key}[/]")
-                    if change.kind is Kind.CHANGED:
-                        console.print(f"      [red]{_clip(change.before)}[/]")
-                        console.print(f"      [green]{_clip(change.after)}[/]")
-                    else:
-                        value = change.after if change.kind is Kind.ADDED else change.before
-                        console.print(f"      {_clip(value)}")
-                if len(shown) > 40:
-                    console.print(f"  [dim]… and {len(shown) - 40} more[/]")
-                console.print()
+                continue
+            shown = changes if everything else [c for c in changes if c.decisive]
+            if not shown:
+                continue
+            quiet = False
+            console.print(f"[bold]{target.id}[/]  [dim]{len(shown)} change(s)[/]")
+            for change in shown[:40]:
+                mark = {Kind.ADDED: "[green]+[/]", Kind.REMOVED: "[red]-[/]"}.get(
+                    change.kind, "[yellow]~[/]"
+                )
+                console.print(f"  {mark} {change.subject}  [dim]{change.key}[/]")
+                if change.kind is Kind.CHANGED:
+                    console.print(f"      [red]{_clip(change.before)}[/]")
+                    console.print(f"      [green]{_clip(change.after)}[/]")
+                else:
+                    value = change.after if change.kind is Kind.ADDED else change.before
+                    console.print(f"      {_clip(value)}")
+            if len(shown) > 40:
+                console.print(f"  [dim]… and {len(shown) - 40} more[/]")
+            console.print()
 
     if quiet:
         console.print("[green]No drift.[/]")

@@ -11,6 +11,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "pyyaml>=6.0",
+    "grpcio>=1.60",
     "fastapi>=0.110",
     "semantic-action-grammar>=1.2.2",
     "uvicorn>=0.29",
@@ -33,11 +34,14 @@ packages = ["src/foreman"]
 [tool.black]
 line-length = 100
 target-version = ["py311"]
+extend-exclude = "src/foreman/shoalpb"
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# Generated from shoal's proto by grpc_tools; regenerated, never edited.
+extend-exclude = ["src/foreman/shoalpb"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

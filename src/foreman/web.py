@@ -19,7 +19,6 @@ from fastapi.responses import FileResponse
 from .actions import Stale
 from .actions.sagform import policy_allows
 from .chat import ChatError, ask
-from .collectors import COLLECTORS
 from .config import load_registry
 from .diff import project_drift
 from .models import utcnow
@@ -219,23 +218,21 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         out: list[dict[str, Any]] = []
         try:
             for target in targets:
-                for name in COLLECTORS:
-                    changes, newest, previous = project_drift(s, target.id, name)
-                    if newest is None or previous is None:
-                        continue
-                    for change in changes:
-                        out.append(
-                            {
-                                "project": target.id,
-                                "collector": name,
-                                "subject": change.subject,
-                                "key": change.key,
-                                "before": change.before,
-                                "after": change.after,
-                                "kind": str(change.kind),
-                                "decisive": change.decisive,
-                            }
-                        )
+                changes, newest, previous = project_drift(s, target.id)
+                if newest is None or previous is None:
+                    continue
+                for change in changes:
+                    out.append(
+                        {
+                            "project": target.id,
+                            "subject": change.subject,
+                            "key": change.key,
+                            "before": change.before,
+                            "after": change.after,
+                            "kind": str(change.kind),
+                            "decisive": change.decisive,
+                        }
+                    )
         finally:
             s.close()
         return out
