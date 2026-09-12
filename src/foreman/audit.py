@@ -112,6 +112,7 @@ async def run_audit(
     budget: Budget | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     connectors: list[Connector] | None = None,
+    siblings: Sequence[str] = (),
     model: str | None = None,
     log=lambda _: None,
 ) -> tuple[int, float]:
@@ -144,7 +145,7 @@ async def run_audit(
                     if project.fixable
                     else "No local checkout — this project is monitored, not owned."
                 ),
-                pack=audit_pack(store, project.id, since=since),
+                pack=audit_pack(store, project.id, siblings=siblings, since=since),
             ),
             schema=AgentReport,
             # An audit reads the live site, runs checks against it and drives an

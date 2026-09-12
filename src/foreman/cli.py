@@ -21,6 +21,7 @@ from .config import DEFAULT_REGISTRY, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import Kind, project_drift
+from .graph import relink as relink_findings
 from .history import ingest_all
 from .migrate import migrate as copy_store
 from .models import Severity
@@ -213,6 +214,9 @@ def audit(
                         budget=budget,
                         timeout_s=timeout,
                         connectors=build_connectors(reg.connectors),
+                        # The rest of the portfolio, so what one agent
+                        # established reaches the next.
+                        siblings=[p.id for p in reg.active],
                         model=model,
                         log=lambda m: console.print(f"  {m}"),
                     )
@@ -620,6 +624,18 @@ def timeline(
             _clip(row["title"] or "", 70),
         )
     console.print(table)
+
+
+@app.command()
+def relink(db: Path = typer.Option(None, "--db")) -> None:
+    """Rebuild the relationships between findings, rules and projects.
+
+    Needed once for anything recorded before the graph existed; harmless after.
+    """
+    with open_store(db) as store:
+        written = relink_findings(store)
+        console.print(f"[bold]{written}[/] edge(s) written.")
+        console.print("[dim]Idempotent — running it again changes nothing.[/]")
 
 
 @app.command(name="connectors")

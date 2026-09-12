@@ -25,9 +25,10 @@ rediscover:
 
 from __future__ import annotations
 
-from collections import Counter
+from collections.abc import Sequence
 
 from .diff import drift_since
+from .graph import FROM_RULE, FROM_SKILL, HAS_FINDING, SEEN_ON, key_of, kind_of, node
 from .precision import label as precision_label
 from .precision import rule_scores
 from .store import Store
@@ -45,24 +46,39 @@ def _known(store: Store, project_id: str) -> str:
     return "\n".join(f"  - [{r['severity']}] {r['rule']}: {r['summary']}" for r in rows)
 
 
-def _siblings(store: Store, project_id: str) -> str:
+def _siblings(store: Store, project_id: str, siblings: Sequence[str]) -> str:
     """What agents have concluded on *other* projects, as rules and counts.
 
+    Walked, not scanned. Two hops out from the sibling projects — project to
+    finding to rule — then one hop back from each rule to every project it has
+    been seen on. The reverse edge exists precisely because the outward walk
+    unions its results: expanding from six projects says which rules turned up,
+    never which project each came from, and attribution is the whole question.
+
     Rules rather than individual findings on purpose. "Three other projects have
-    this problem" is a lead worth following here; the specific finding on
-    another project is not something this agent can act on, and pasting it in
-    would cost tokens to say so.
+    this" is a lead worth following here; another project's specific finding is
+    not something this agent can act on, and pasting it in spends tokens to say
+    so. Rules with no skill behind them are deterministic checks, which fire
+    everywhere they apply and would drown what judgement actually concluded.
     """
-    counts: Counter[str] = Counter()
-    for row in store.open_findings():
-        if row["project"] == project_id or not str(row["source"]).startswith("agent:"):
+    anchors = [node("project", p) for p in siblings if p != project_id]
+    if not anchors:
+        return NOTHING
+
+    here = node("project", project_id)
+    counts: list[tuple[str, int]] = []
+    for reached in store.neighbors(anchors, [HAS_FINDING, FROM_RULE], hops=2):
+        if kind_of(reached) != "rule" or not store.neighbors([reached], [FROM_SKILL]):
             continue
-        counts[row["rule"]] += 1
+        elsewhere = set(store.neighbors([reached], [SEEN_ON])) - {here}
+        if elsewhere:
+            counts.append((key_of(reached), len(elsewhere)))
+
     if not counts:
         return NOTHING
+    counts.sort(key=lambda pair: (-pair[1], pair[0]))
     return "\n".join(
-        f"  - {rule}: found on {n} other project(s)"
-        for rule, n in counts.most_common(SIBLING_RULES)
+        f"  - {rule}: found on {n} other project(s)" for rule, n in counts[:SIBLING_RULES]
     )
 
 
@@ -140,12 +156,22 @@ This is the part worth your time:
 {changed}"""
 
 
-def audit_pack(store: Store, project_id: str, since: str | None = None) -> str:
-    """The shared context handed to an agent dispatched against one project."""
+def audit_pack(
+    store: Store,
+    project_id: str,
+    siblings: Sequence[str] = (),
+    since: str | None = None,
+) -> str:
+    """The shared context handed to an agent dispatched against one project.
+
+    `siblings` is the rest of the portfolio. The dispatcher knows who they are;
+    the graph has no "every project" node to start a walk from, and inventing
+    one would mean a registry kept in two places.
+    """
     return TEMPLATE.format(
         project_id=project_id,
         known=_known(store, project_id),
-        siblings=_siblings(store, project_id),
+        siblings=_siblings(store, project_id, siblings),
         dismissed=_dismissed(store),
         queued=_queued(store, project_id),
         changed=_changed(store, project_id, since),

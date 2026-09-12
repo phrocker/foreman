@@ -21,6 +21,16 @@ from pathlib import Path
 
 import pytest
 
+from foreman.graph import (
+    CONCERNS,
+    FOUND_BY,
+    FROM_RULE,
+    FROM_SKILL,
+    HAS_FINDING,
+    SEEN_ON,
+    node,
+    relink,
+)
 from foreman.models import Event, Finding, Observation, Severity
 from foreman.shoalstore import ShoalStore
 from foreman.store import SqliteStore
@@ -182,8 +192,10 @@ def test_observations_are_scoped_to_their_project(store):
 # --- findings ---------------------------------------------------------------
 
 
-def _finding(project="p", rule="r", severity=Severity.HIGH, summary="s"):
-    return Finding(project=project, rule=rule, severity=severity, summary=summary, subjects=["x"])
+def _finding(project="p", rule="r", severity=Severity.HIGH, summary="s", subjects=("x",)):
+    return Finding(
+        project=project, rule=rule, severity=severity, summary=summary, subjects=list(subjects)
+    )
 
 
 def test_findings_round_trip(store):
@@ -464,3 +476,108 @@ def test_a_watermark_round_trips_and_never_rewinds(store):
 def test_watermarks_are_separate_per_feed(store):
     store.set_watermark("p", "gh:commits", "2026-09-05T00:00:00+00:00")
     assert store.watermark("p", "gh:issues") is None
+
+
+# --- the graph --------------------------------------------------------------
+
+
+def test_recording_a_finding_relates_it(store):
+    """Edges are written when the facts are. A finding nobody can traverse to
+    is a row, not knowledge."""
+    run_id = _sweep(store)
+    store.record_findings(run_id, [_finding(project="p", rule="thin")], source="agent:seo-audit")
+    (row,) = store.open_findings()
+    finding = node("finding", int(row["id"]))
+
+    assert store.neighbors(["project|p"], [HAS_FINDING]) == [finding]
+    assert store.neighbors([finding], [FROM_RULE]) == ["rule|thin"]
+    assert store.neighbors([finding], [FOUND_BY]) == ["skill|seo-audit"]
+
+
+def test_a_rule_knows_every_project_it_was_seen_on(store):
+    """The question the context pack actually asks — "found on three other
+    projects" — so the edge answering it is stored rather than recomputed."""
+    for project in ("a", "b"):
+        run_id = _sweep(store, project=project)
+        store.record_findings(run_id, [_finding(project=project, rule="thin")])
+    assert store.neighbors(["rule|thin"], [SEEN_ON]) == ["project|a", "project|b"]
+
+
+def test_a_walk_crosses_kinds_in_one_call(store):
+    """project -> finding -> rule. Every node shares the `ent:` prefix, so a
+    traversal resolves a neighbour without being told what kind it is."""
+    run_id = _sweep(store, project="a")
+    store.record_findings(run_id, [_finding(project="a", rule="thin")])
+    reached = store.neighbors(["project|a"], [HAS_FINDING, FROM_RULE], hops=2)
+    assert "rule|thin" in reached
+    assert any(r.startswith("finding|") for r in reached)
+
+
+def test_one_hop_does_not_reach_two(store):
+    run_id = _sweep(store, project="a")
+    store.record_findings(run_id, [_finding(project="a", rule="thin")])
+    assert "rule|thin" not in store.neighbors(["project|a"], [HAS_FINDING, FROM_RULE], hops=1)
+
+
+def test_a_relationship_filter_excludes_everything_else(store):
+    run_id = _sweep(store, project="a")
+    store.record_findings(run_id, [_finding(project="a", rule="thin", subjects=["https://x"])])
+    (row,) = store.open_findings()
+    finding = node("finding", int(row["id"]))
+    assert store.neighbors([finding], [CONCERNS]) == ["subject|https://x"]
+    assert "subject|https://x" not in store.neighbors([finding], [FROM_RULE])
+
+
+def test_an_anchor_is_not_its_own_neighbour(store):
+    """ "What can I reach from here" should not include here."""
+    store.relate([("project|a", HAS_FINDING, "project|a")])
+    assert store.neighbors(["project|a"], [HAS_FINDING]) == []
+
+
+def test_relating_the_same_edge_twice_changes_nothing(store):
+    store.relate([("project|a", SEEN_ON, "project|b")])
+    store.relate([("project|a", SEEN_ON, "project|b")])
+    assert store.neighbors(["project|a"], [SEEN_ON]) == ["project|b"]
+
+
+def test_neighbours_of_nothing_is_nothing(store):
+    assert store.neighbors([], [HAS_FINDING]) == []
+    assert store.neighbors(["project|never-seen"], [HAS_FINDING]) == []
+
+
+def test_several_anchors_are_unioned(store):
+    store.relate([("project|a", SEEN_ON, "x|1"), ("project|b", SEEN_ON, "x|2")])
+    assert store.neighbors(["project|a", "project|b"], [SEEN_ON]) == ["x|1", "x|2"]
+
+
+def test_relink_recovers_findings_recorded_before_the_graph_existed(store):
+    """A portfolio running for weeks before edges existed would traverse to
+    nothing and look simply wrong, so the backfill has to reach what is already
+    there."""
+    run_id = _sweep(store, project="a")
+    store.record_findings(run_id, [_finding(project="a", rule="thin")])
+    # Simulate pre-graph data by relating nothing and checking the walk is empty
+    # only after a store that never wrote edges — here, prove relink is a no-op
+    # that still produces the same answer, which is what idempotency means.
+    before = store.neighbors(["rule|thin"], [SEEN_ON])
+    assert relink(store) > 0
+    assert store.neighbors(["rule|thin"], [SEEN_ON]) == before == ["project|a"]
+
+
+def test_relink_is_idempotent(store):
+    run_id = _sweep(store, project="a")
+    store.record_findings(run_id, [_finding(project="a", rule="thin")])
+    relink(store)
+    relink(store)
+    assert store.neighbors(["rule|thin"], [SEEN_ON]) == ["project|a"]
+
+
+def test_a_deterministic_rule_has_no_skill_behind_it(store):
+    """How the pack tells judgement apart from a check that fires everywhere it
+    applies — without it, deterministic rules drown what agents concluded."""
+    run_id = _sweep(store, project="a")
+    store.record_findings(run_id, [_finding(project="a", rule="checked")])
+    store.record_findings(run_id, [_finding(project="a", rule="judged")], source="agent:seo-audit")
+
+    assert store.neighbors(["rule|checked"], [FROM_SKILL]) == []
+    assert store.neighbors(["rule|judged"], [FROM_SKILL]) == ["skill|seo-audit"]

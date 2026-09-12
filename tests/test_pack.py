@@ -47,14 +47,14 @@ def _finding(
 
 def test_the_pack_names_what_is_already_known_so_it_is_not_re_reported(store):
     _finding(store, "p", "soft_404_shell", "nonexistent URLs answer 200", Severity.HIGH)
-    pack = audit_pack(store, "p")
+    pack = audit_pack(store, "p", siblings=("p", "other", "third"))
     assert "soft_404_shell" in pack
     assert "high" in pack
     assert "Do not re-report" in pack
 
 
 def test_a_project_with_nothing_known_still_reads_cleanly(store):
-    assert "(nothing)" in audit_pack(store, "p")
+    assert "(nothing)" in audit_pack(store, "p", siblings=("p", "other", "third"))
 
 
 # --- what siblings established ----------------------------------------------
@@ -65,7 +65,7 @@ def test_what_agents_found_elsewhere_travels_to_the_next_agent(store):
     times for the same discovery."""
     _finding(store, "other", "seo-audit/thin-content", source="agent:seo-audit")
     _finding(store, "third", "seo-audit/thin-content", source="agent:seo-audit")
-    pack = audit_pack(store, "p")
+    pack = audit_pack(store, "p", siblings=("p", "other", "third"))
     assert "seo-audit/thin-content" in pack
     assert "2 other project(s)" in pack
 
@@ -74,7 +74,9 @@ def test_an_agents_own_project_is_not_reported_back_to_it_as_a_sibling(store):
     """It is already in "already known"; saying it twice spends tokens to
     repeat something and invites the agent to treat it as corroboration."""
     _finding(store, "p", "seo-audit/thin", source="agent:seo-audit")
-    section = audit_pack(store, "p").split("## Rules that get dismissed")[0]
+    section = audit_pack(store, "p", siblings=("p", "other", "third")).split(
+        "## Rules that get dismissed"
+    )[0]
     assert "other project(s)" not in section
 
 
@@ -82,7 +84,7 @@ def test_deterministic_findings_elsewhere_are_not_offered_as_agent_knowledge(sto
     """A rule fires on every project it applies to, so counting those would
     drown the actual signal — which is what *judgement* concluded elsewhere."""
     _finding(store, "other", "robots_blocks_assets")
-    assert "robots_blocks_assets" not in audit_pack(store, "p")
+    assert "robots_blocks_assets" not in audit_pack(store, "p", siblings=("p", "other", "third"))
 
 
 # --- rules that get dismissed -----------------------------------------------
@@ -93,21 +95,30 @@ def test_a_rule_that_keeps_being_dismissed_is_named(store):
     for _ in range(3):
         finding_id = _finding(store, "p", "noisy", source="agent:seo-audit")
         store.set_finding_outcome(finding_id, "dismissed")
-    assert "noisy" in audit_pack(store, "p").split("## Rules that get dismissed")[1]
+    assert (
+        "noisy"
+        in audit_pack(store, "p", siblings=("p", "other", "third")).split(
+            "## Rules that get dismissed"
+        )[1]
+    )
 
 
 def test_an_unmeasured_rule_is_never_called_dismissed(store):
     """Unmeasured and poor are different. Telling an agent to stop producing
     something on the strength of no evidence switches off a useful check."""
     _finding(store, "p", "brand-new", source="agent:seo-audit")
-    dismissed = audit_pack(store, "p").split("## Rules that get dismissed")[1]
+    dismissed = audit_pack(store, "p", siblings=("p", "other", "third")).split(
+        "## Rules that get dismissed"
+    )[1]
     assert "brand-new" not in dismissed
 
 
 def test_one_dismissal_is_not_enough_to_condemn_a_rule(store):
     finding_id = _finding(store, "p", "unlucky", source="agent:seo-audit")
     store.set_finding_outcome(finding_id, "dismissed")
-    dismissed = audit_pack(store, "p").split("## Rules that get dismissed")[1]
+    dismissed = audit_pack(store, "p", siblings=("p", "other", "third")).split(
+        "## Rules that get dismissed"
+    )[1]
     assert "unlucky" not in dismissed
 
 
@@ -126,7 +137,7 @@ def test_an_action_already_awaiting_a_decision_is_not_proposed_again(store):
         patch_digest="d",
         files=["nginx.conf"],
     )
-    assert "add_security_header" in audit_pack(store, "p")
+    assert "add_security_header" in audit_pack(store, "p", siblings=("p", "other", "third"))
 
 
 def test_another_projects_queued_action_is_not_this_agents_business(store):
@@ -141,7 +152,9 @@ def test_another_projects_queued_action_is_not_this_agents_business(store):
         patch_digest="d",
         files=["nginx.conf"],
     )
-    queued = audit_pack(store, "p").split("## Changes already queued")[1]
+    queued = audit_pack(store, "p", siblings=("p", "other", "third")).split(
+        "## Changes already queued"
+    )[1]
     assert "add_security_header" not in queued
 
 
@@ -151,7 +164,7 @@ def test_another_projects_queued_action_is_not_this_agents_business(store):
 def test_a_first_look_says_so_rather_than_claiming_nothing_changed(store):
     """Nothing-changed and never-looked are different, and the second is not a
     reason to skim."""
-    assert "first look" in audit_pack(store, "p", since=None)
+    assert "first look" in audit_pack(store, "p", siblings=("p",), since=None)
 
 
 def test_only_decisive_changes_are_worth_an_agents_attention(store):
@@ -189,6 +202,6 @@ def test_only_decisive_changes_are_worth_an_agents_attention(store):
     )
     store.finish_run(run_id, ok=True)
 
-    changed = audit_pack(store, "p", since=boundary).split("## What changed")[1]
+    changed = audit_pack(store, "p", siblings=("p",), since=boundary).split("## What changed")[1]
     assert "title" in changed
     assert "lcp_ms" not in changed

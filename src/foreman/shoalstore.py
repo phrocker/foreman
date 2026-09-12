@@ -28,6 +28,19 @@ else is an entity with fields: one row per record, one cell per field.
     ent:msg|<conv>|<seq>          cf=message      cq=<field>
     ent:seq|<kind>                cf=seq          cq=n
     ent:wm|<project>|<feed>       cf=watermark    cq=at
+    ent:<kind>|<key>              cf=edge         cq=<rel>NUL<target node>
+    ent:<kind>|<key>              cf=node         cq=kind
+
+Edges are cells on the source's own row, which is what lets shoal walk them
+server-side: EdgeExpand takes the anchor rows, the family edges live in, and
+how to split a relationship from a neighbour id, and bakes in no vocabulary of
+its own — graph.py is that vocabulary. Every node id is `<kind>|<key>` and every
+row is `ent:` + that, so one traversal crosses kinds without being told which.
+
+Both endpoints are materialised with a `node` cell when an edge is written. A
+row with no cells does not exist to expand to, so without it a neighbour that
+carries no fields of its own — a rule, a skill — would be reachable in SQLite
+and invisible here.
 
 History rows put `at` ahead of kind and ref, which the issue that asked for
 them did not. Two reasons. It makes the moment part of the row identity, so a
@@ -44,12 +57,13 @@ small integers because `#5` in a dashboard is worth more than a UUID.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any
 
 import grpc
 
+from .graph import EDGE_CF, ID_WIDTH, SEP, edges_for, kind_of
 from .models import Event, Finding, Observation, utcnow
 from .shoalpb import embed_pb2 as pb
 from .shoalpb import embed_pb2_grpc as rpc
@@ -101,7 +115,6 @@ FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 TABLE = "graph"
-ID_WIDTH = 12
 # Retries for a contended counter. Contention needs two writers, which a
 # single-operator tool does not have; this is here so a race fails loudly
 # rather than silently reusing an id.
@@ -391,8 +404,10 @@ class ShoalStore:
         self, run_id: int, findings: Iterable[Finding], source: str = "rule"
     ) -> int:
         mutations = []
+        recorded: list[tuple[int, Finding]] = []
         for finding in findings:
             finding_id = self._next_id("finding")
+            recorded.append((finding_id, finding))
             mutations.append(
                 self._put(
                     _rid("finding", _pad(finding_id)),
@@ -411,6 +426,7 @@ class ShoalStore:
                 )
             )
         self._write(mutations)
+        self.relate(edges_for(recorded, source))
         return len(mutations)
 
     def retire_rule_findings(self, project: str) -> int:
@@ -734,6 +750,65 @@ class ShoalStore:
             reverse=True,
         )
         return rows[:limit]
+
+    # --- graph -------------------------------------------------------------
+
+    def relate(self, edges: Iterable[tuple[str, str, str]]) -> int:
+        by_row: dict[bytes, list[pb.Entry]] = {}
+        count = 0
+        for source, relationship, target in edges:
+            count += 1
+            by_row.setdefault(f"ent:{source}".encode(), []).append(
+                pb.Entry(
+                    column_family=EDGE_CF.encode(),
+                    column_qualifier=f"{relationship}{SEP}{target}".encode(),
+                    value=b"",
+                )
+            )
+            for node_id in (source, target):
+                by_row.setdefault(f"ent:{node_id}".encode(), []).append(
+                    pb.Entry(
+                        column_family=b"node",
+                        column_qualifier=b"kind",
+                        value=kind_of(node_id).encode(),
+                    )
+                )
+        self._write([pb.Mutation(row=row, entries=e) for row, e in by_row.items()])
+        return count
+
+    def neighbors(
+        self,
+        sources: Sequence[str],
+        relationships: Sequence[str] | None = None,
+        hops: int = 1,
+    ) -> list[str]:
+        """Node ids reachable from `sources`, walked by the engine.
+
+        One round trip regardless of depth: EdgeExpand resolves each neighbour
+        id to its row itself, rather than this scanning edges and then looking
+        every neighbour up. Anchors are excluded — "what can I reach from here"
+        should not include here.
+        """
+        if not sources or hops < 1:
+            return []
+        request = pb.ScanRequest(
+            table=self.table,
+            edge_expand=pb.EdgeExpand(
+                anchor_rows=[f"ent:{s}".encode() for s in sources],
+                edge_cf=EDGE_CF.encode(),
+                edge_field="qualifier",
+                field_sep=SEP.encode(),
+                relationships=list(relationships or []),
+                primary_prefix=b"ent:",
+                max_hops=hops,
+            ),
+        )
+        reached = {
+            cell.row.decode().removeprefix("ent:")
+            for resp in self._stub.Scan(request)
+            for cell in resp.cells
+        }
+        return sorted(reached - set(sources))
 
     # --- history -----------------------------------------------------------
 

@@ -17,10 +17,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from .graph import edges_for
 from .models import Event, Finding, Observation, utcnow
 
 DB_NAME = "foreman.db"
@@ -118,6 +119,15 @@ class Store(Protocol):
     ) -> int: ...
     def conversation(self, conversation_id: int) -> list[Record]: ...
     def conversations(self, limit: int = 20) -> list[Record]: ...
+
+    # --- graph ---
+    def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
+    def neighbors(
+        self,
+        sources: Sequence[str],
+        relationships: Sequence[str] | None = None,
+        hops: int = 1,
+    ) -> list[str]: ...
 
     # --- history ---
     def record_events(self, events: Iterable[Event]) -> int: ...
@@ -281,6 +291,17 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages (conversation_id, created_at);
+
+-- Relationships between entities, written when the facts are so they can be
+-- walked rather than rediscovered. Node ids are "<kind>|<key>"; the shoal
+-- implementation stores the same edges as cells and expands them server-side.
+CREATE TABLE IF NOT EXISTS edges (
+    source       TEXT NOT NULL,
+    relationship TEXT NOT NULL,
+    target       TEXT NOT NULL,
+    PRIMARY KEY (source, relationship, target)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges (target, relationship);
 
 -- Repository history, kept so that questions about it cost a range scan rather
 -- than a fan-out of API calls. Append-only: an event is never updated, because
@@ -507,28 +528,31 @@ class SqliteStore:
         self, run_id: int, findings: Iterable[Finding], source: str = "rule"
     ) -> int:
         now = utcnow()
-        rows = [
-            (
-                run_id,
-                f.project,
-                f.rule,
-                f.severity.value,
-                f.summary,
-                json.dumps(f.subjects),
-                f.detail,
-                now,
-                source,
+        # One at a time rather than executemany, because each finding's id is
+        # needed to relate it — a finding nobody can traverse to is a row, not
+        # knowledge.
+        recorded: list[tuple[int, Finding]] = []
+        for f in findings:
+            cursor = self._db.execute(
+                "INSERT INTO findings "
+                "(run_id, project, rule, severity, summary, subjects, detail, found_at, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    f.project,
+                    f.rule,
+                    f.severity.value,
+                    f.summary,
+                    json.dumps(f.subjects),
+                    f.detail,
+                    now,
+                    source,
+                ),
             )
-            for f in findings
-        ]
-        self._db.executemany(
-            "INSERT INTO findings "
-            "(run_id, project, rule, severity, summary, subjects, detail, found_at, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
+            recorded.append((int(cursor.lastrowid), f))
         self._db.commit()
-        return len(rows)
+        self.relate(edges_for(recorded, source))
+        return len(recorded)
 
     def retire_rule_findings(self, project: str) -> int:
         """Drop a project's open rule findings so a sweep can re-derive them.
@@ -803,6 +827,52 @@ class SqliteStore:
             "ELSE 2 END, found_at, id"
         )
         return _many(self._db.execute(sql, params))
+
+    # --- graph ------------------------------------------------------------
+
+    def relate(self, edges: Iterable[tuple[str, str, str]]) -> int:
+        rows = list(edges)
+        if not rows:
+            return 0
+        self._db.executemany(
+            "INSERT OR IGNORE INTO edges (source, relationship, target) VALUES (?, ?, ?)",
+            rows,
+        )
+        self._db.commit()
+        return len(rows)
+
+    def neighbors(
+        self,
+        sources: Sequence[str],
+        relationships: Sequence[str] | None = None,
+        hops: int = 1,
+    ) -> list[str]:
+        """Node ids reachable from `sources`, sorted.
+
+        Expanded a hop at a time rather than with a recursive CTE, because the
+        shoal implementation unions and de-duplicates across all anchors at each
+        hop and the two have to agree. Anchors are excluded from the result:
+        "what can I reach from here" should not include here.
+        """
+        seen: set[str] = set(sources)
+        frontier = list(sources)
+        found: set[str] = set()
+        for _ in range(max(0, hops)):
+            if not frontier:
+                break
+            sql = (
+                "SELECT DISTINCT target FROM edges WHERE source IN "
+                f"({','.join('?' * len(frontier))})"
+            )
+            params = list(frontier)
+            if relationships:
+                sql += f" AND relationship IN ({','.join('?' * len(relationships))})"
+                params += list(relationships)
+            reached = {r["target"] for r in self._db.execute(sql, params)}
+            frontier = sorted(reached - seen)
+            seen |= reached
+            found |= reached
+        return sorted(found - set(sources))
 
     # --- history ----------------------------------------------------------
 
