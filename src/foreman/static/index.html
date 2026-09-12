@@ -160,6 +160,13 @@
     padding: 1px 7px; text-align: center; }
   /* What a rule has earned, shown beside its finding so the order can be
      argued with. Muted: it explains the position, it is not the content. */
+  /* A blinking caret while an answer is being written, so a long pause reads
+     as work in progress rather than as a stall. */
+  .caret { display: inline-block; width: 7px; height: 14px; vertical-align: -2px;
+    background: var(--text-3); animation: blink 1.1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
+
   .earned { color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums;
     white-space: nowrap; margin-left: 8px; }
   /* The same rule open elsewhere: a problem on six projects is a portfolio
@@ -1144,6 +1151,10 @@ runBtn.addEventListener("click", async () => {
 let conversationId = null;
 const turns = [];
 
+// What has arrived so far this turn. The final answer replaces it — the stream
+// is the model writing, and `reply` is what it decided to say.
+let partial = "";
+
 function renderChat(pending) {
   const log = $("chatLog");
   if (!turns.length && !pending) {
@@ -1166,7 +1177,11 @@ function renderChat(pending) {
       ${refs ? `<div class="turn-refs">${refs}</div>` : ""}
       ${suggests ? `<div class="suggests">${suggests}</div>` : ""}
     </div>`;
-  }).join("") + (pending ? '<div class="turn"><div class="turn-role">foreman</div><div class="turn-body">…</div></div>' : "");
+  }).join("") + (pending
+    ? `<div class="turn"><div class="turn-role">foreman</div><div class="turn-body">${
+        partial ? md(partial) + '<span class="caret"></span>' : '<span class="caret"></span>'
+      }</div></div>`
+    : "");
   log.scrollTop = log.scrollHeight;
 
   // A suggestion is a button, never a write. The model proposes; you dispose.
@@ -1186,19 +1201,54 @@ $("chatForm").addEventListener("submit", async (e) => {
   $("chatSend").disabled = true;
   renderChat(true);
 
+  partial = "";
   try {
-    const res = await fetch("/api/chat", {
+    const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, conversation_id: conversationId }),
     });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.detail || `failed with ${res.status}`);
-    conversationId = body.conversation_id;
-    turns.push({ role: "assistant", content: body.reply, refs: body.refs, suggest: body.suggest });
+    if (!res.ok) throw new Error(`failed with ${res.status}`);
+
+    // Server-sent events over fetch rather than EventSource, which only does
+    // GET and could not carry the question.
+    const reader = res.body.getReader();
+    const decode = new TextDecoder();
+    let buffer = "";
+    let done = null;
+    let failed = null;
+
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decode.decode(chunk.value, { stream: true });
+      // Frames are separated by a blank line; a partial frame stays buffered.
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop();
+      for (const frame of frames) {
+        const kind = (frame.match(/^event: (.*)$/m) || [])[1];
+        const raw = (frame.match(/^data: ([\s\S]*)$/m) || [])[1];
+        if (!kind || raw === undefined) continue;
+        const data = JSON.parse(raw);
+        if (kind === "text") {
+          partial += data;
+          renderChat(true);
+        } else if (kind === "done") {
+          done = data;
+        } else if (kind === "error") {
+          failed = data;
+        }
+      }
+    }
+
+    if (failed) throw new Error(failed);
+    if (!done) throw new Error("the answer ended without arriving");
+    conversationId = done.conversation_id;
+    turns.push({ role: "assistant", content: done.reply, refs: done.refs, suggest: done.suggest });
   } catch (err) {
     turns.push({ role: "assistant", content: `Could not answer: ${err.message}` });
   } finally {
+    partial = "";
     $("chatSend").disabled = false;
     renderChat(false);
   }

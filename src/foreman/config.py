@@ -200,14 +200,19 @@ class Registry(BaseModel):
         raise KeyError(f"no project {project_id!r} in registry (known: {known})")
 
 
-def configured_store() -> str:
+def configured_store(path: Path | None = None) -> str:
     """The store this registry asks for, without loading the whole thing.
 
     Read from the registry file rather than an environment variable so the
     choice travels with the projects it describes; the variable stays as an
     override for trying the other one.
+
+    An explicit path is obeyed. Ignoring it meant `foreman serve --registry
+    somewhere/foreman.yaml` read that file for its projects and then went
+    looking in the working directory for a store — finding none, and failing
+    with a message about a file the caller had just named.
     """
-    path = find_registry()
+    path = path or find_registry()
     if path is None:
         return "sqlite"
     try:

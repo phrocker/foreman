@@ -23,6 +23,7 @@ the output protocol and the task owns only the schema.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -82,6 +83,11 @@ class Task:
     # given, which is the portable case — an API connector cannot read anything.
     read_dirs: tuple[Path, ...] = ()
     model: str | None = None
+    # Which field of `schema` carries the human-readable answer. With a schema
+    # in play a model often writes straight into the structured output and
+    # narrates nothing, so there is no prose to stream — naming the field is
+    # what lets the answer itself be streamed as it is written.
+    stream_field: str | None = None
     # Free-form and connector-specific: a skill name, a temperature. A
     # connector ignores what it does not understand rather than failing, so
     # that one task can be offered to several.
@@ -113,7 +119,15 @@ class Connector(Protocol):
         """Whether this could run right now — binary installed, key present."""
         ...
 
-    async def run(self, task: Task) -> Result: ...
+    async def run(self, task: Task, on_text: Callable[[str], None] | None = None) -> Result:
+        """Run the task. If `on_text` is given, call it with text as it arrives.
+
+        Optional on purpose: a backend that cannot stream simply never calls it,
+        and the caller gets the same Result either way. Nothing downstream may
+        depend on having seen the partial text — it is a view of the work in
+        progress, and `Result.value` is the answer.
+        """
+        ...
 
 
 def can_serve(connector: Connector, task: Task) -> bool:

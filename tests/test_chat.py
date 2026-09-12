@@ -109,7 +109,7 @@ async def test_answering_a_question_asks_for_no_capability_at_all(world):
         def available(self):
             return True
 
-        async def run(self, task):
+        async def run(self, task, on_text=None):
             seen.append(task)
             return Result(value=Reply(reply="ok"), cost_usd=0.0, connector=self.name)
 

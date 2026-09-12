@@ -20,7 +20,7 @@ turns these conversations into edges once the store is a graph.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -184,6 +184,7 @@ async def ask(
     conversation_id: int | None = None,
     model: str | None = None,
     connectors: list[Connector] | None = None,
+    on_text: Callable[[str], None] | None = None,
 ) -> tuple[int, Reply, float]:
     """Put a question to Foreman. Returns (conversation id, reply, USD spent)."""
     if connectors is None:
@@ -208,9 +209,11 @@ async def ask(
         needs=frozenset(),
         timeout_s=TIMEOUT_S,
         model=model,
+        # The answer is `reply`; stream that as it is written.
+        stream_field="reply",
     )
     try:
-        result = await choose(connectors, task).run(task)
+        result = await choose(connectors, task).run(task, on_text=on_text)
     except ConnectorError as exc:
         raise ChatError(str(exc)) from exc
     reply, cost = result.value, result.cost_usd

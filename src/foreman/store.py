@@ -148,7 +148,7 @@ class Store(Protocol):
 STORE_ENV = "FOREMAN_STORE"
 
 
-def open_store(path: Path | None = None) -> Store:
+def open_store(path: Path | None = None, registry: Path | None = None) -> Store:
     """Open the configured store. The one place a substrate is chosen.
 
     An explicit `path` names a SQLite file and settles it. Letting ambient
@@ -162,7 +162,7 @@ def open_store(path: Path | None = None) -> Store:
         store.connect()
         return store
 
-    target = (os.environ.get(STORE_ENV) or "").strip() or configured_store()
+    target = (os.environ.get(STORE_ENV) or "").strip() or configured_store(registry)
     if target.startswith("shoal://"):
         from .shoalstore import ShoalStore
 

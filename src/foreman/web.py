@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from .actions import Stale
 from .actions.sagform import policy_allows
@@ -72,7 +72,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     job = Job()
 
     def store() -> Store:
-        return open_store(db)
+        return open_store(db, registry=registry_path)
 
     @app.get("/")
     def index() -> FileResponse:
@@ -394,6 +394,78 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "suggest": [sg.model_dump() for sg in reply.suggest],
             "cost_usd": cost,
         }
+
+    @app.post("/api/chat/stream")
+    async def chat_stream(payload: dict[str, Any]) -> StreamingResponse:
+        """The same answer, arriving as it is written.
+
+        A real question takes twenty seconds or more, almost all of it
+        generation — the portfolio state assembles in ten milliseconds. Nothing
+        finishes sooner for streaming it, but a pane showing an answer appear is
+        a different experience from one showing an ellipsis, and the difference
+        is the whole complaint.
+
+        Server-sent events rather than a socket: this is one-way, short-lived,
+        and reconnects are meaningless for a question already being answered.
+        """
+        question = (payload.get("message") or "").strip()
+        if not question:
+            raise HTTPException(400, "ask something")
+
+        async def events():
+            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+            def on_text(text: str) -> None:
+                queue.put_nowait(("text", text))
+
+            async def run() -> None:
+                s = store()
+                try:
+                    registry = load_registry(registry_path)
+                    conversation_id, reply, cost = await ask(
+                        s,
+                        registry,
+                        question,
+                        payload.get("conversation_id"),
+                        connectors=build_connectors(registry.connectors),
+                        on_text=on_text,
+                    )
+                    await queue.put(
+                        (
+                            "done",
+                            {
+                                "conversation_id": conversation_id,
+                                "reply": reply.reply,
+                                "refs": reply.refs,
+                                "suggest": [su.model_dump() for su in reply.suggest],
+                                "cost_usd": cost,
+                            },
+                        )
+                    )
+                except ChatError as exc:
+                    await queue.put(("error", str(exc)))
+                except Exception as exc:  # noqa: BLE001 - the browser gets one chance
+                    await queue.put(("error", f"{type(exc).__name__}: {exc}"))
+                finally:
+                    s.close()
+                    await queue.put(("end", None))
+
+            task = asyncio.create_task(run())
+            try:
+                while True:
+                    kind, data = await queue.get()
+                    if kind == "end":
+                        break
+                    yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+            finally:
+                task.cancel()
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            # Buffering a stream defeats it; some proxies do so by default.
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/run")
     def run_status() -> dict[str, Any]:

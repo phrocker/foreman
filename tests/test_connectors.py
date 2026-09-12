@@ -28,7 +28,12 @@ from foreman.connectors import (
     choose,
     describe,
 )
-from foreman.connectors.claudecode import ClaudeCodeConnector, _cost, _envelope
+from foreman.connectors.claudecode import (
+    ClaudeCodeConnector,
+    _cost,
+    _envelope,
+    _partial_string,
+)
 from foreman.store import SqliteStore
 
 
@@ -46,8 +51,11 @@ class Fake:
     def available(self) -> bool:
         return self.up
 
-    async def run(self, task: Task) -> Result:
+    async def run(self, task: Task, on_text=None) -> Result:
         self.seen.append(task)
+        # A backend that cannot stream simply never calls it.
+        if on_text:
+            on_text("…")
         return Result(value=self.value, cost_usd=self.cost, connector=self.name)
 
 
@@ -240,10 +248,145 @@ async def test_the_chat_pane_runs_on_a_backend_with_no_tools(tmp_path):
 @pytest.mark.asyncio
 async def test_a_backend_failure_reaches_the_caller_as_a_chat_error(tmp_path):
     class Broken(Fake):
-        async def run(self, task):
+        async def run(self, task, on_text=None):
             raise ConnectorError("the backend fell over", 0.4)
 
     registry = Registry(projects=[Project(id="p", name="P")])
     with SqliteStore(tmp_path / "t.db") as store:
         with pytest.raises(ChatError, match="fell over"):
             await ask(store, registry, "hi", connectors=[Broken()])
+
+
+# --- streaming --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_text_arrives_before_the_answer_does(tmp_path):
+    """A real question takes twenty seconds, almost all of it generation. The
+    answer is no sooner for streaming it; the pane just stops looking stalled."""
+    seen: list[str] = []
+
+    class Streaming(Fake):
+        async def run(self, task, on_text=None):
+            for piece in ("Two things ", "need ", "you."):
+                on_text(piece)
+            return Result(value=Reply(reply="Two things need you."), cost_usd=0.0, connector="s")
+
+    registry = Registry(projects=[Project(id="p", name="P")])
+    with SqliteStore(tmp_path / "t.db") as store:
+        _, reply, _ = await ask(
+            store, registry, "what needs me?", connectors=[Streaming()], on_text=seen.append
+        )
+    assert "".join(seen) == "Two things need you."
+    assert reply.reply == "Two things need you."
+
+
+@pytest.mark.asyncio
+async def test_the_structured_answer_wins_over_whatever_was_streamed(tmp_path):
+    """The stream is the model writing; `reply` is what it decided to say. Only
+    the second is validated against the schema, so only the second is stored."""
+
+    class Rambling(Fake):
+        async def run(self, task, on_text=None):
+            on_text("hmm, let me look at the findings first…")
+            return Result(value=Reply(reply="The stale key."), cost_usd=0.0, connector="s")
+
+    registry = Registry(projects=[Project(id="p", name="P")])
+    with SqliteStore(tmp_path / "t.db") as store:
+        conversation_id, reply, _ = await ask(
+            store, registry, "what first?", connectors=[Rambling()], on_text=lambda _: None
+        )
+        assert reply.reply == "The stale key."
+        assert store.conversation(conversation_id)[1]["content"] == "The stale key."
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_cannot_stream_still_answers(tmp_path):
+    """`on_text` is optional on both sides: nothing downstream may depend on
+    having seen partial text."""
+    registry = Registry(projects=[Project(id="p", name="P")])
+    with SqliteStore(tmp_path / "t.db") as store:
+        _, reply, _ = await ask(
+            store,
+            registry,
+            "hi",
+            connectors=[Fake(value=Reply(reply="fine"))],
+            on_text=lambda _: None,
+        )
+    assert reply.reply == "fine"
+
+
+def test_streaming_asks_the_cli_for_partial_messages():
+    cmd = ClaudeCodeConnector()._command(_task(), streaming=True)
+    assert "stream-json" in cmd
+    assert "--include-partial-messages" in cmd
+    # The schema contract survives streaming: the result envelope is unchanged.
+    assert "--json-schema" in cmd
+
+
+def test_not_streaming_leaves_the_command_as_it_was():
+    cmd = ClaudeCodeConnector()._command(_task())
+    assert "json" in cmd and "stream-json" not in cmd
+
+
+# --- streaming the answer out of half-written JSON --------------------------
+
+
+def test_a_field_that_has_not_started_yet_streams_nothing():
+    assert _partial_string('{"refs": {}}', "reply") == ""
+    assert _partial_string("{", "reply") == ""
+
+
+def test_a_growing_field_streams_as_far_as_it_has_got():
+    assert _partial_string('{"reply": "Two thi', "reply") == "Two thi"
+    assert _partial_string('{"reply": "done", "refs": {}}', "reply") == "done"
+
+
+def test_escapes_are_decoded_rather_than_shown():
+    assert _partial_string(r'{"reply": "Line one\nLine two', "reply") == "Line one\nLine two"
+    assert _partial_string(r'{"reply": "a \"quote\"", "x": 1}', "reply") == 'a "quote"'
+    assert _partial_string(r'{"reply": "é"', "reply") == "é"
+
+
+def test_half_an_escape_is_held_back_rather_than_guessed():
+    """The second half has not arrived. Emitting the backslash would put a
+    stray character on screen that the next frame cannot take back."""
+    assert _partial_string('{"reply": "a\\', "reply") == "a"
+    assert _partial_string(r'{"reply": "a\u00', "reply") == "a"
+
+
+@pytest.mark.asyncio
+async def test_the_answer_streams_even_when_the_model_narrates_nothing(tmp_path):
+    """With a schema in play a model often writes straight into the structured
+    output and says nothing else — which meant a long answer streamed not one
+    character, and the pane sat on an ellipsis exactly as before."""
+    seen: list[str] = []
+
+    class WritesOnlyJson(Fake):
+        async def run(self, task, on_text=None):
+            # No text_delta at all; the answer appears in the tool input.
+            document = ""
+            sent = 0
+            for piece in ('{"repl', 'y": "Two thi', "ngs need you", '."}'):
+                document += piece
+                grown = _partial_string(document, task.stream_field or "reply")
+                if len(grown) > sent:
+                    on_text(grown[sent:])
+                    sent = len(grown)
+            return Result(value=Reply(reply="Two things need you."), cost_usd=0.0, connector="j")
+
+    registry = Registry(projects=[Project(id="p", name="P")])
+    with SqliteStore(tmp_path / "t.db") as store:
+        _, reply, _ = await ask(
+            store, registry, "what needs me?", connectors=[WritesOnlyJson()], on_text=seen.append
+        )
+    assert "".join(seen) == "Two things need you."
+    assert reply.reply == "Two things need you."
+
+
+def test_the_chat_task_names_the_field_that_carries_the_answer():
+    """Without it the connector has no idea which part of a structured reply a
+    person is waiting to read."""
+    from foreman.chat import PROMPT  # noqa: F401  - imported for the module's side of the contract
+
+    assert Task(instructions="x", schema=Reply, stream_field="reply").stream_field == "reply"
