@@ -24,8 +24,7 @@ from .robots import AddSitemapReference, AnchorAssetDisallow
 from .sagform import action_text, canonical, policy_allows, precondition_holds
 
 OPS: dict[str, Op] = {
-    op.verb: op
-    for op in (AnchorAssetDisallow(), AddSitemapReference(), AddSecurityHeader())
+    op.verb: op for op in (AnchorAssetDisallow(), AddSitemapReference(), AddSecurityHeader())
 }
 
 # The condition under which a class stops needing a human. Stored as text and

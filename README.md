@@ -219,8 +219,17 @@ renewal is.
 run. It binds loopback only: the database names real client projects and one
 endpoint triggers crawls.
 
-Filter by severity, project, or free text; click a finding for every affected
-subject; hit "Run sweep" for a live log. Severity is encoded as **shape + label +
+Four tabs over the same data the CLI reads: **Findings**, **Actions**,
+**Drift** and **Rules**. Filter by severity, project or free text; click a
+finding for every affected subject; hit "Run sweep" for a live log.
+
+The Actions tab is the trust ladder made visible — each pending action shows its
+class's record, its canonical SAG statement verbatim, and whether it has earned
+its policy. Approving asks first, because it writes to a working tree. "Apply
+earned" dry-runs before confirming: a prompt that cannot say how many files it
+will touch is not a confirmation. An action whose target moved since it was
+computed is marked stale with its Approve button disabled, rather than quietly
+applying to a file nobody re-read. Severity is encoded as **shape + label +
 colour** — the status palette's medium and low steps measure 13.6 ΔE apart, below
 the threshold at which full-colour vision separates them reliably, so colour is
 never load-bearing.
@@ -233,5 +242,4 @@ never load-bearing.
 2. Drift-driven selection: propose and audit where something *changed*, rather
    than re-deriving the same findings nightly. `foreman diff` and
    `foreman precision` are the inputs; nothing consumes them yet.
-3. Surface actions in the dashboard, which currently only shows findings.
-4. More collectors — Search Console, CrUX, `osv-scanner`, `nuclei`.
+3. More collectors — Search Console, CrUX, `osv-scanner`, `nuclei`.

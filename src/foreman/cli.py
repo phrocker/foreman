@@ -357,7 +357,10 @@ def apply_eligible_cmd(
     reg = load_registry(registry)
     with Store(db or DEFAULT_DB) as store:
         applied, skipped = apply_eligible(
-            reg, store, project=project, confirm=confirm,
+            reg,
+            store,
+            project=project,
+            confirm=confirm,
             log=lambda m: console.print(f"  {m}"),
         )
     if not applied:

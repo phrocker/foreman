@@ -16,9 +16,20 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 
+from .actions import Stale
+from .actions.sagform import policy_allows
+from .collectors import COLLECTORS
 from .config import load_registry
+from .diff import project_drift
 from .models import utcnow
-from .runner import check_all, collect_all
+from .runner import (
+    apply_action,
+    apply_eligible,
+    check_all,
+    collect_all,
+    propose_actions,
+    reject_action,
+)
 from .store import DEFAULT_DB, Store
 
 STATIC = Path(__file__).parent / "static"
@@ -120,6 +131,134 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         item = dict(row)
         item["subjects"] = json.loads(row["subjects"])
         return item
+
+    def _decorate(store: Store, row: Any, registry) -> dict[str, Any]:
+        """An action plus the evidence for trusting it."""
+        item = dict(row)
+        item["params"] = json.loads(row["params"])
+        item["files"] = json.loads(row["files"])
+        stats = store.class_stats(row["class_key"], row["patch_digest"])
+        decided = stats["approvals"] + stats["rejections"]
+        item["stats"] = stats
+        item["decided"] = decided
+        item["eligible"] = bool(
+            decided
+            and policy_allows(
+                row["statement"],
+                {
+                    "class": {
+                        "approvals": stats["approvals"],
+                        "rejections": stats["rejections"],
+                    }
+                },
+            )
+        )
+        # Staleness is a read of the working tree, so it is computed per request
+        # rather than stored: an action that was fine a minute ago may not be.
+        item["stale"] = None
+        try:
+            from .actions import rehydrate
+
+            rehydrate(registry.get(row["project"]), row)
+        except Stale as exc:
+            item["stale"] = str(exc)
+        except KeyError:
+            item["stale"] = "project is no longer in the registry"
+        return item
+
+    @app.get("/api/actions")
+    def list_actions(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            return [_decorate(s, row, registry) for row in s.pending_actions(project)]
+        finally:
+            s.close()
+
+    @app.post("/api/actions/propose")
+    def propose(project: str | None = Query(None)) -> dict[str, Any]:
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            return {"proposed": propose_actions(registry, s, project=project)}
+        finally:
+            s.close()
+
+    @app.post("/api/actions/{action_id}/approve")
+    def approve(action_id: int) -> dict[str, Any]:
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            written = apply_action(registry, s, action_id)
+        except Stale as exc:
+            # 409, not 500: the request was well formed and the refusal is the
+            # guardrail working. The page shows it as a reason, not an error.
+            raise HTTPException(409, str(exc)) from None
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from None
+        finally:
+            s.close()
+        return {"applied": written}
+
+    @app.post("/api/actions/{action_id}/reject")
+    def reject(action_id: int) -> dict[str, Any]:
+        s = store()
+        try:
+            reject_action(s, action_id)
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from None
+        finally:
+            s.close()
+        return {"rejected": action_id}
+
+    @app.post("/api/actions/apply-eligible")
+    def apply_earned(
+        project: str | None = Query(None), confirm: bool = Query(False)
+    ) -> dict[str, Any]:
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            applied, skipped = apply_eligible(registry, s, project=project, confirm=confirm)
+        finally:
+            s.close()
+        return {"applied": applied, "skipped": skipped, "confirmed": confirm}
+
+    @app.get("/api/drift")
+    def drift(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        registry = load_registry(registry_path)
+        targets = [registry.get(project)] if project else registry.active
+        s = store()
+        out: list[dict[str, Any]] = []
+        try:
+            for target in targets:
+                for name in COLLECTORS:
+                    changes, newest, previous = project_drift(s, target.id, name)
+                    if newest is None or previous is None:
+                        continue
+                    for change in changes:
+                        out.append(
+                            {
+                                "project": target.id,
+                                "collector": name,
+                                "subject": change.subject,
+                                "key": change.key,
+                                "before": change.before,
+                                "after": change.after,
+                                "kind": str(change.kind),
+                                "decisive": change.decisive,
+                            }
+                        )
+        finally:
+            s.close()
+        return out
+
+    @app.get("/api/precision")
+    def precision() -> list[dict[str, Any]]:
+        s = store()
+        try:
+            return [dict(row) for row in s.rule_precision()]
+        finally:
+            s.close()
 
     @app.get("/api/run")
     def run_status() -> dict[str, Any]:

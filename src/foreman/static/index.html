@@ -178,6 +178,61 @@
          color: var(--text-2); max-height: 190px; overflow-y: auto; white-space: pre-wrap; }
   .err { color: var(--high); }
   section { margin-bottom: 30px; }
+  /* Tabs */
+  .tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border); }
+  .tab {
+    border: none; background: none; border-radius: 0; padding: 9px 14px;
+    color: var(--text-2); border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tab:hover { background: var(--surface-alt); color: var(--text); }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 550; }
+  .count { font-variant-numeric: tabular-nums; color: var(--text-3); font-size: 12px; margin-left: 3px; }
+  .hint { color: var(--text-3); font-size: 12.5px; }
+
+  /* Actions */
+  .action {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 15px 17px; margin-bottom: 12px;
+  }
+  .action-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .verb { font-weight: 600; }
+  .action-files { font: 12.5px ui-monospace, Menlo, monospace; color: var(--text-2); }
+  .evidence { margin: 10px 0; }
+  .evidence-text { font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
+  /* Track is a lighter step of the fill's own ramp so the bar reads as one
+     object at any fill level, rather than two unrelated colours meeting. */
+  .meter { height: 5px; border-radius: 3px; background: var(--surface-alt); overflow: hidden; }
+  .meter > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .meter.earned > span { background: var(--good); }
+  .statement {
+    font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--text-3);
+    background: var(--surface-alt); border-radius: 6px; padding: 9px 11px;
+    margin: 10px 0; word-break: break-word; white-space: pre-wrap;
+  }
+  .action-buttons { display: flex; gap: 8px; align-items: center; }
+  .badge {
+    font-size: 11.5px; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid var(--border-firm); color: var(--text-3);
+  }
+  .badge.earned { color: var(--good); border-color: var(--good); }
+  .stale { color: var(--medium); font-size: 13px; margin-top: 8px; }
+
+  /* Drift */
+  .drift { padding: 11px 16px; border-bottom: 1px solid var(--border); }
+  .drift:last-child { border-bottom: none; }
+  .drift-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
+  .drift-subject { font: 12.5px ui-monospace, Menlo, monospace; word-break: break-all; }
+  .drift-val { font: 12.5px/1.6 ui-monospace, Menlo, monospace; word-break: break-all; }
+  .was { color: var(--high); }
+  .now { color: var(--good); }
+
+  /* Precision */
+  .rule-row { padding: 11px 16px; border-bottom: 1px solid var(--border); }
+  .rule-row:last-child { border-bottom: none; }
+  .rule-head { display: flex; gap: 10px; align-items: baseline; }
+  .rule-name { font: 12.5px ui-monospace, Menlo, monospace; }
+  .rule-pct { margin-left: auto; font-variant-numeric: tabular-nums; }
+
   @media (max-width: 620px) {
     .hero-figure { font-size: 42px; }
     .hero-note { margin-left: 0; width: 100%; }
@@ -203,7 +258,18 @@
   <div id="log" class="log" hidden></div>
 
   <section>
-    <h2>Findings</h2>
+    <h2>Projects</h2>
+    <div class="panel" id="projectRows"></div>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab" data-tab="findings" role="tab" aria-selected="true">Findings <span class="count" id="countFindings"></span></button>
+    <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
+    <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
+    <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
+  </nav>
+
+  <section id="panel-findings" role="tabpanel">
     <div class="filters">
       <button class="chip" data-sev="high"   aria-pressed="false"><span class="glyph sev-high">▲</span> High</button>
       <button class="chip" data-sev="medium" aria-pressed="false"><span class="glyph sev-medium">◆</span> Medium</button>
@@ -219,9 +285,24 @@
     </div>
   </section>
 
-  <section>
-    <h2>Projects</h2>
-    <div class="panel" id="projectRows"></div>
+  <section id="panel-actions" role="tabpanel" hidden>
+    <div class="filters">
+      <button id="proposeBtn">Recompute proposals</button>
+      <button id="eligibleBtn" title="Apply only what a class has earned under its own policy">Apply earned</button>
+    </div>
+    <div id="actionList"></div>
+  </section>
+
+  <section id="panel-drift" role="tabpanel" hidden>
+    <div class="filters">
+      <button class="chip" id="decisiveOnly" aria-pressed="true">Decisive only</button>
+      <span class="hint">Measurements are tolerance-tested, so routine wobble never appears here.</span>
+    </div>
+    <div class="panel scroll"><div id="driftList"></div></div>
+  </section>
+
+  <section id="panel-rules" role="tabpanel" hidden>
+    <div class="panel scroll"><div id="precisionList"></div></div>
   </section>
 </div>
 
@@ -231,7 +312,11 @@ const SEV = {
   medium: { glyph: "◆", label: "Medium" },
   low:    { glyph: "●", label: "Low" },
 };
-const state = { findings: [], overview: null, sevs: new Set(), site: "", q: "", open: new Set() };
+const state = {
+  findings: [], overview: null, actions: [], drift: [], precision: [],
+  sevs: new Set(), project: "", q: "", open: new Set(),
+  tab: "findings", decisiveOnly: true,
+};
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -247,15 +332,138 @@ function ago(iso) {
 }
 
 async function load() {
-  const [overview, findings] = await Promise.all([
+  const [overview, findings, actions, drift, precision] = await Promise.all([
     fetch("/api/overview").then((r) => r.json()),
     fetch("/api/findings").then((r) => r.json()),
+    fetch("/api/actions").then((r) => r.json()),
+    fetch("/api/drift").then((r) => r.json()),
+    fetch("/api/precision").then((r) => r.json()),
   ]);
-  state.overview = overview;
-  state.findings = findings;
+  Object.assign(state, { overview, findings, actions, drift, precision });
   renderOverview();
   renderSites();
   renderFindings();
+  renderActions();
+  renderDrift();
+  renderPrecision();
+  renderCounts();
+}
+
+function renderCounts() {
+  $("countFindings").textContent = state.findings.length || "";
+  $("countActions").textContent = state.actions.length || "";
+  const drift = state.decisiveOnly ? state.drift.filter((d) => d.decisive) : state.drift;
+  $("countDrift").textContent = drift.length || "";
+}
+
+// --- actions ---------------------------------------------------------------
+
+function renderActions() {
+  const list = $("actionList");
+  if (!state.actions.length) {
+    list.innerHTML =
+      '<div class="panel"><div class="empty">Nothing pending. Recompute proposals after a sweep.</div></div>';
+    return;
+  }
+  list.innerHTML = state.actions.map((a) => {
+    const s = a.stats;
+    // Both claims, kept apart: class_key counts "the same kind of action",
+    // patch_digest counts "byte-identical to what you approved".
+    const record = a.decided === 0
+      ? "No prior decisions — this class is new."
+      : `Approved ${s.approvals}/${a.decided} across ${s.projects} project(s)` +
+        (s.rejections ? ` · <span class="was">${s.rejections} rejected</span>` : "") +
+        (s.identical ? ` · patch identical to ${s.identical} of them` : "") +
+        (s.failures ? ` · <span class="was">${s.failures} failed on apply</span>` : "");
+    const pct = Math.min(100, (s.approvals / 10) * 100);
+    return `<div class="action" data-id="${a.id}">
+      <div class="action-head">
+        <span class="verb">${esc(a.verb)}</span>
+        <span class="project-cell">${esc(a.project)}</span>
+        <span class="action-files">${a.files.map(esc).join(", ")}</span>
+        <span style="margin-left:auto" class="badge${a.eligible ? " earned" : ""}">
+          ${a.eligible ? "earned under policy" : "needs you"}</span>
+      </div>
+      <div class="evidence">
+        <div class="evidence-text">${record}</div>
+        <div class="meter${a.eligible ? " earned" : ""}"><span style="width:${pct}%"></span></div>
+      </div>
+      <div class="statement">${esc(a.statement)}</div>
+      ${a.stale ? `<div class="stale">⚠ stale — ${esc(a.stale)}</div>` : ""}
+      <div class="action-buttons">
+        <button class="primary approve" ${a.stale ? "disabled" : ""}>Approve &amp; apply</button>
+        <button class="reject">Reject</button>
+      </div>
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll(".approve").forEach((b) =>
+    b.addEventListener("click", () => decide(b.closest(".action").dataset.id, "approve")));
+  list.querySelectorAll(".reject").forEach((b) =>
+    b.addEventListener("click", () => decide(b.closest(".action").dataset.id, "reject")));
+}
+
+async function decide(id, verb) {
+  // Approving writes to a repository, so it asks. Rejecting is reversible and
+  // does not.
+  if (verb === "approve" && !confirm("Apply this change to the working tree?")) return;
+  const res = await fetch(`/api/actions/${id}/${verb}`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+  }
+  load();
+}
+
+// --- drift -----------------------------------------------------------------
+
+function renderDrift() {
+  const rows = state.decisiveOnly ? state.drift.filter((d) => d.decisive) : state.drift;
+  const list = $("driftList");
+  if (!rows.length) {
+    list.innerHTML = `<div class="empty">${
+      state.drift.length ? "No decisive changes. Untick to see measurements." : "No drift since the previous snapshot."
+    }</div>`;
+    return;
+  }
+  list.innerHTML = rows.slice(0, 200).map((d) => {
+    const mark = d.kind === "added" ? '<span class="now">+</span>'
+      : d.kind === "removed" ? '<span class="was">−</span>' : '<span class="sev-low">~</span>';
+    const body = d.kind === "changed"
+      ? `<div class="drift-val was">${esc(d.before)}</div><div class="drift-val now">${esc(d.after)}</div>`
+      : `<div class="drift-val">${esc(d.kind === "added" ? d.after : d.before)}</div>`;
+    return `<div class="drift">
+      <div class="drift-head">${mark}
+        <span class="project-cell">${esc(d.project)}/${esc(d.collector)}</span>
+        <span class="rule-tag">${esc(d.key)}</span></div>
+      <div class="drift-subject">${esc(d.subject)}</div>${body}</div>`;
+  }).join("");
+}
+
+// --- rule precision --------------------------------------------------------
+
+function renderPrecision() {
+  const list = $("precisionList");
+  if (!state.precision.length) {
+    list.innerHTML =
+      '<div class="empty">No decided findings yet. Precision stays unmeasured until you approve or reject actions.</div>';
+    return;
+  }
+  list.innerHTML = state.precision.map((r) => {
+    const acted = r.acted || 0, decided = r.decided;
+    const rate = acted / decided;
+    // Status colour, but the percentage is right there — colour is never the
+    // only thing saying whether a rule is any good.
+    const tone = rate < 0.5 ? "var(--high)" : rate < 0.8 ? "var(--medium)" : "var(--good)";
+    return `<div class="rule-row">
+      <div class="rule-head">
+        <span class="rule-name">${esc(r.rule)}</span>
+        <span class="src">${esc(r.source)}</span>
+        <span class="rule-pct">${(rate * 100).toFixed(0)}% acted on · ${acted}/${decided}</span>
+      </div>
+      <div class="meter" style="margin-top:7px"><span style="width:${rate * 100}%;background:${tone}"></span></div>
+    </div>`;
+  }).join("");
 }
 
 function renderOverview() {
@@ -393,6 +601,55 @@ runBtn.addEventListener("click", async () => {
   await fetch("/api/run", { method: "POST" });
   poll();
 });
+
+// --- tabs ------------------------------------------------------------------
+
+function showTab(name) {
+  state.tab = name;
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.setAttribute("aria-selected", String(t.dataset.tab === name)));
+  for (const panel of ["findings", "actions", "drift", "rules"]) {
+    $("panel-" + panel).hidden = panel !== name;
+  }
+  try { localStorage.setItem("foreman-tab", name); } catch {}
+}
+
+document.querySelectorAll(".tab").forEach((t) =>
+  t.addEventListener("click", () => showTab(t.dataset.tab)));
+
+$("decisiveOnly").addEventListener("click", () => {
+  state.decisiveOnly = !state.decisiveOnly;
+  $("decisiveOnly").setAttribute("aria-pressed", String(state.decisiveOnly));
+  renderDrift();
+  renderCounts();
+});
+
+$("proposeBtn").addEventListener("click", async () => {
+  const btn = $("proposeBtn");
+  btn.disabled = true;
+  await fetch("/api/actions/propose", { method: "POST" });
+  await load();
+  btn.disabled = false;
+  showTab("actions");
+});
+
+$("eligibleBtn").addEventListener("click", async () => {
+  // Dry run first, always. The count is what the confirmation is about — a
+  // prompt that cannot say how many files it will touch is not a confirmation.
+  const preview = await fetch("/api/actions/apply-eligible", { method: "POST" }).then((r) => r.json());
+  if (!preview.applied) {
+    alert(`Nothing has earned it yet. ${preview.skipped} action(s) still need you.`);
+    return;
+  }
+  if (!confirm(`Apply ${preview.applied} action(s) that their class has earned?`)) return;
+  await fetch("/api/actions/apply-eligible?confirm=true", { method: "POST" });
+  load();
+});
+
+try {
+  const saved = localStorage.getItem("foreman-tab");
+  if (saved) showTab(saved);
+} catch {}
 
 load();
 poll();
