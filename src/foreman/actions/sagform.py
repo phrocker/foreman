@@ -98,3 +98,14 @@ def policy_allows(statement: str, ledger: dict[str, Any]) -> bool:
     if not action.policy_expr:
         return False
     return bool(ExpressionEvaluator.evaluate(action.policy_expr, MapContext(ledger)))
+
+
+def automatable(statement: str) -> bool:
+    """Whether this action's policy clause could ever permit unattended action.
+
+    A clause with no expression behind it — `P:never` — cannot, at any approval
+    count. Worth asking separately from `policy_allows`, because a list that
+    shows progress towards a threshold should not draw a bar for a class that
+    has no threshold to reach.
+    """
+    return parse_action(statement).policy_expr is not None

@@ -11,8 +11,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .actions import Stale
-from .actions.sagform import policy_allows
+from .actions import Stale, target_label
+from .actions.sagform import automatable, policy_allows
 from .audit import DEFAULT_SKILL, STALE_AFTER_DAYS, AuditError, run_audit, select_for_audit
 from .budget import Budget
 from .chat import ChatError, ask
@@ -330,7 +330,10 @@ def actions(
             if decided:
                 eligible = policy_allows(row["statement"], {"class": stats})
             console.print(f"[bold]#{row['id']}[/] [dim]{row['project']}[/] {row['verb']}")
-            console.print(f"   files    {', '.join(json.loads(row['files']))}")
+            # What it touches rather than which files: an action whose effect is
+            # a merge has no files, and an empty line there reads as a no-op.
+            touches = target_label(row["verb"], json.loads(row["params"]), json.loads(row["files"]))
+            console.print(f"   target   {touches}")
             if decided == 0:
                 record = "[dim]no prior decisions — this class is new[/]"
             else:
@@ -349,10 +352,17 @@ def actions(
                 if stats["failures"]:
                     record += f" · [red]{stats['failures']} failed on apply[/]"
             console.print(f"   record   {record}")
-            console.print(
-                "   auto     "
-                + ("[green]eligible under policy[/]" if eligible else "[dim]needs you[/]")
-            )
+            if not automatable(row["statement"]):
+                # Said plainly, and every time. A class whose effect cannot be
+                # undone never earns its way out of this line, however long its
+                # record gets, and an operator should not have to infer that
+                # from the absence of the word "eligible".
+                auto = "[dim]never — this effect cannot be undone[/]"
+            elif eligible:
+                auto = "[green]eligible under policy[/]"
+            else:
+                auto = "[dim]needs you[/]"
+            console.print(f"   auto     {auto}")
             # Shown verbatim: the statement is the action, and the operator
             # should be approving the thing that is actually recorded.
             console.print(f"   [dim]{row['statement']}[/]")

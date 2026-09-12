@@ -40,12 +40,48 @@ class FileEdit:
 
 
 @dataclass(frozen=True)
+class Merge:
+    """One pull request to merge.
+
+    FileEdit's counterpart for an effect that is not a file. The bytes belong to
+    GitHub rather than to us, so there is nothing to write and no `before` text
+    to compare against; `head` stands in for it. It is the exact commit the
+    operator is agreeing to, and a branch that moves between proposal and
+    approval makes what they agreed to no longer the thing in front of them.
+
+    Deliberately not reduced to a diff fetched from GitHub. A diff would be a
+    copy of somebody else's bytes, going stale the moment the branch is rebased
+    and inviting the belief that Foreman computed it. The commit id is the
+    honest handle: short, exact, and checkable at merge time.
+    """
+
+    repo: str
+    number: int
+    head: str
+    title: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.repo}#{self.number}"
+
+
+@dataclass(frozen=True)
 class Patch:
-    edits: tuple[FileEdit, ...]
+    """Everything one action does.
+
+    Two kinds of effect, not one, because the second kind was going to arrive
+    whatever shape this started in: some fixes are an edit to a file you have
+    checked out, and some are a decision taken on a service. Both still have to
+    be identified, digested and re-checked the same way, so they share a
+    container rather than growing a parallel ledger.
+    """
+
+    edits: tuple[FileEdit, ...] = ()
+    merges: tuple[Merge, ...] = ()
 
     @property
     def empty(self) -> bool:
-        return not any(e.changed for e in self.edits)
+        return not self.merges and not any(e.changed for e in self.edits)
 
     def digest(self, *, anchored: bool = False) -> str:
         """Content hash of the change.
@@ -55,6 +91,16 @@ class Patch:
         which is what supports the claim "byte-for-byte what you approved
         before". `anchored=True` includes the paths, identifying this exact
         edit to this exact file.
+
+        A merge contributes its head commit, and only that. Nothing else about
+        a pull request is both stable and meaningful: the number is an accident
+        of the repository, the title is prose Dependabot may reword, and the
+        diff changes under a rebase that changes nothing about the decision. The
+        head commit changes exactly when what would land changes, which is what
+        the digest is asked to detect. The cost is honest and worth naming: two
+        bumps are never byte-identical, so "identical to N of them" is always
+        one for this kind of action. The evidence that accumulates is the class,
+        not the bytes.
         """
         h = hashlib.sha256()
         for edit in sorted(self.edits, key=lambda e: e.path):
@@ -64,6 +110,12 @@ class Patch:
             h.update(edit.before.encode())
             h.update(b"\x00")
             h.update(edit.after.encode())
+            h.update(b"\x00")
+        for merge in sorted(self.merges, key=lambda m: (m.repo, m.number)):
+            if anchored:
+                h.update(merge.label.encode())
+            h.update(b"\x00")
+            h.update(merge.head.encode())
             h.update(b"\x00")
         return h.hexdigest()
 
@@ -91,6 +143,13 @@ class Op(Protocol):
     # accumulates approvals while breaking CI every time must never reach its
     # automation threshold on those approvals alone.
     requires_verification: bool = False
+    # Whether re-running Foreman can put the world back. A file edit can be
+    # recomputed, reverted or simply overwritten; a merged pull request is
+    # somebody else's commits on your default branch and is undone by a human
+    # with a revert, if at all. The ledger still records what an irreversible
+    # class has earned — that record is how you learn which bumps are boring —
+    # but it never converts into permission to act unattended.
+    reversible: bool = True
 
     def reason(self, params: dict) -> str:
         """The BECAUSE expression asserting the state this op transforms.
@@ -126,6 +185,18 @@ class Op(Protocol):
         """Compute the patch. Must be deterministic: identical inputs must
         produce identical bytes, every time, with no clock, no randomness and
         no model call."""
+        ...
+
+    def target(self, params: dict) -> str:
+        """One line naming what this action acts on.
+
+        Optional, and only worth implementing for an op whose effect is not a
+        file. A list of pending actions has to say what each one will touch
+        before anybody agrees to it, and the file paths answer that for every op
+        that edits a working tree. An op with no paths that says nothing instead
+        renders as a blank, which reads as "this changes nothing" — the opposite
+        of the truth for a merge.
+        """
         ...
 
 

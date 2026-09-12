@@ -590,6 +590,10 @@ class ShoalStore:
             ):
                 if record.get("patch_digest") == patch_digest:
                     return None  # identical proposal already pending
+                if not files:
+                    # Nothing was written, so nothing was invalidated. See the
+                    # same guard in SqliteStore.record_proposal.
+                    continue
                 # Superseded: the target moved, so the stored patch is against
                 # contents nobody would apply to now.
                 self._write(

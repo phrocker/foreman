@@ -676,12 +676,21 @@ class SqliteStore:
         # computed against the old contents now has a different patch. Those are
         # superseded, not rejected — left alone they accumulate every sweep and
         # the pending list stops meaning anything.
-        self._db.execute(
-            "UPDATE actions SET outcome = 'superseded' "
-            "WHERE project = ? AND class_key = ? AND decision IS NULL "
-            "AND outcome IS NULL AND patch_digest != ?",
-            (project, class_key, patch_digest),
-        )
+        #
+        # Only for actions that write files, because that premise is what makes
+        # it true. An action with no file edits invalidates none of its
+        # siblings: two dependency bumps in one class are two separate pull
+        # requests against two separate packages, and retiring one because the
+        # other was proposed would quietly drop a decision nobody was asked to
+        # make. Every member of a class shares its verb, so this is never a
+        # mixture — the class either writes files or it does not.
+        if files:
+            self._db.execute(
+                "UPDATE actions SET outcome = 'superseded' "
+                "WHERE project = ? AND class_key = ? AND decision IS NULL "
+                "AND outcome IS NULL AND patch_digest != ?",
+                (project, class_key, patch_digest),
+            )
         try:
             cur = self._db.execute(
                 "INSERT INTO actions "

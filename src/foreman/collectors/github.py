@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,8 +33,8 @@ class GitHubError(RuntimeError):
     pass
 
 
-async def gh_api(path: str, *, paginate: bool = False) -> Any:
-    """One `gh api` call, parsed. Raises GitHubError rather than returning junk.
+def _api_command(path: str, *, paginate: bool) -> list[str]:
+    """The argv for one `gh api` read.
 
     Paginated list endpoints are read as JSONL via `--jq '.[]'` rather than
     `--slurp`, which is absent from older `gh` builds — and which failed by
@@ -43,9 +44,33 @@ async def gh_api(path: str, *, paginate: bool = False) -> Any:
     cmd = ["gh", "api", path, "--cache", "60s"]
     if paginate:
         cmd += ["--paginate", "--jq", ".[]"]
+    return cmd
+
+
+def _api_parse(text: str, path: str, *, paginate: bool) -> Any:
+    if not paginate:
+        try:
+            return json.loads(text or "null")
+        except json.JSONDecodeError as exc:
+            raise GitHubError(f"gh api {path} returned unparseable output") from exc
+    items = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            items.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise GitHubError(f"gh api {path} returned unparseable output") from exc
+    return items
+
+
+async def gh_api(path: str, *, paginate: bool = False) -> Any:
+    """One `gh api` call, parsed. Raises GitHubError rather than returning junk."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *_api_command(path, paginate=paginate),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         raise GitHubError("the gh CLI is not installed") from exc
@@ -56,21 +81,71 @@ async def gh_api(path: str, *, paginate: bool = False) -> Any:
         raise GitHubError(f"gh api {path} timed out") from None
     if proc.returncode != 0:
         raise GitHubError(err.decode("utf-8", "replace").strip()[:200] or "gh api failed")
-    text = out.decode("utf-8", "replace").strip()
-    if paginate:
-        items = []
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                items.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                raise GitHubError(f"gh api {path} returned unparseable output") from exc
-        return items
+    return _api_parse(out.decode("utf-8", "replace").strip(), path, paginate=paginate)
+
+
+def gh_api_blocking(path: str, *, paginate: bool = False) -> Any:
+    """The same read, synchronously.
+
+    Proposing an action is not an async path — ops are called from a plain loop
+    over findings — and an op whose target lives on GitHub still has to read the
+    world before it can describe what it would do. Sharing the argv and the
+    parse with the async version keeps this from becoming a second place for the
+    `--slurp` mistake to come back. `gh` caches on disk, so the repeated reads a
+    sweep makes cost one request between them.
+    """
     try:
-        return json.loads(text or "null")
-    except json.JSONDecodeError as exc:
-        raise GitHubError(f"gh api {path} returned unparseable output") from exc
+        proc = subprocess.run(
+            _api_command(path, paginate=paginate),
+            capture_output=True,
+            timeout=TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitHubError("the gh CLI is not installed") from exc
+    except subprocess.TimeoutExpired:
+        raise GitHubError(f"gh api {path} timed out") from None
+    if proc.returncode != 0:
+        raise GitHubError(proc.stderr.decode("utf-8", "replace").strip()[:200] or "gh api failed")
+    return _api_parse(proc.stdout.decode("utf-8", "replace").strip(), path, paginate=paginate)
+
+
+def merge_pull_request(slug: str, number: int, head: str) -> str:
+    """Merge one pull request, refusing if its head commit has moved.
+
+    `--match-head-commit` is the same check FileEdit carries as `before`, except
+    that GitHub enforces it rather than us: if Dependabot force-pushed a rebase
+    between the operator reading the change and agreeing to it, the merge is
+    refused instead of landing something nobody looked at. Doing the comparison
+    here as well would leave a window between the read and the merge, which is
+    precisely the window that matters.
+
+    Squashed, because a dependency bump landing as one commit is what makes the
+    default branch's history readable and a revert a single command — which is
+    the only undo this operation has.
+    """
+    cmd = [
+        "gh",
+        "pr",
+        "merge",
+        str(number),
+        "--repo",
+        slug,
+        "--squash",
+        "--match-head-commit",
+        head,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=TIMEOUT_S, check=False)
+    except FileNotFoundError as exc:
+        raise GitHubError("the gh CLI is not installed") from exc
+    except subprocess.TimeoutExpired:
+        raise GitHubError(f"merging {slug}#{number} timed out") from None
+    if proc.returncode != 0:
+        raise GitHubError(
+            proc.stderr.decode("utf-8", "replace").strip()[:200] or "gh pr merge failed"
+        )
+    return f"https://github.com/{slug}/pull/{number}"
 
 
 def _age_days(iso: str | None) -> float | None:

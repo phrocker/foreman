@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import Project
-from .base import FileEdit, Op, OpNotApplicable, Patch, class_key, class_statement
+from .base import FileEdit, Merge, Op, OpNotApplicable, Patch, class_key, class_statement
 from .sagform import action_text, canonical, policy_allows, precondition_holds
 
 
@@ -51,10 +51,29 @@ AUTO_POLICY_EXPR = "(class.approvals>=10)&&(class.rejections==0)"
 # Where something can, the bar is the project's own checks agreeing — and one
 # broken build disqualifies the class however many approvals precede it.
 VERIFIED_POLICY_EXPR = "(class.verified>=10)&&(class.rejections==0)&&(class.broke==0)"
+# And where the effect cannot be taken back, there is no bar. A policy clause
+# with no expression behind it is refused by `policy_allows` for want of
+# anything to evaluate, so automation is declined by construction rather than by
+# a threshold set high enough that nobody expects to reach it. The difference
+# matters: a threshold is a number somebody can raise, and this is not a number.
+#
+# The class still accrues its record. "Approved 40 times, verified 40, broke 0"
+# is worth knowing about a patch bump — it is how an operator learns the class
+# is boring — and it stays a fact rather than becoming a permission.
+NEVER_POLICY = "never"
 
 
-def policy_expr_for(op: Op) -> str:
+def policy_expr_for(op: Op) -> str | None:
+    """The policy expression an op's actions carry, or None for `P:never`."""
+    if not getattr(op, "reversible", True):
+        return None
     return VERIFIED_POLICY_EXPR if op.requires_verification else AUTO_POLICY_EXPR
+
+
+def policy_for(op: Op) -> tuple[str, str | None]:
+    """The whole policy clause: its label and its expression."""
+    expression = policy_expr_for(op)
+    return (AUTO_POLICY if expression else NEVER_POLICY), expression
 
 
 @dataclass(frozen=True)
@@ -96,6 +115,25 @@ class ActionProposal:
     def files(self) -> list[str]:
         return [e.path for e in self.patch.edits if e.changed]
 
+    @property
+    def target(self) -> str:
+        """What this action will touch, in one line, for a list to show."""
+        return target_label(self.verb, self.params, self.files)
+
+
+def target_label(verb: str, params: dict[str, Any], files: Sequence[str]) -> str:
+    """What a pending action will touch, named in one line.
+
+    The file paths, for everything that edits a working tree. An op whose effect
+    is not a file says so itself — a blank where the paths go reads as "this
+    changes nothing", which for a merge is the opposite of the truth.
+    """
+    op = _ops().get(verb)
+    describe = getattr(op, "target", None)
+    if describe is not None:
+        return describe(params)
+    return ", ".join(files)
+
 
 def build(
     project: Project, op: Op, params: dict[str, Any], finding_id: int | None = None
@@ -113,13 +151,14 @@ def build(
         return None
     if patch.empty:
         return None
+    policy, policy_expr = policy_for(op)
     statement = canonical(
         action_text(
             op.verb,
             params,
             reason=op.reason(params),
-            policy=AUTO_POLICY,
-            policy_expr=policy_expr_for(op),
+            policy=policy,
+            policy_expr=policy_expr,
         )
     )
     return ActionProposal(
@@ -157,17 +196,27 @@ def propose(project: Project, findings: Sequence[Any]) -> list[ActionProposal]:
 
 
 def apply(project: Project, proposal: ActionProposal) -> list[str]:
-    """Write a proposal's patch to disk.
+    """Carry out a proposal's patch, and say what it did.
 
     Each edit is verified against the `before` text the patch was computed from.
     A file that has changed since means the proposal is stale, and applying it
-    would silently overwrite whatever happened in between.
+    would silently overwrite whatever happened in between. A merge carries the
+    same check as its head commit, except that GitHub performs it: the window
+    between reading a branch and merging it is exactly the window worth closing.
+
+    This is only ever reached because somebody approved — either a person, or a
+    policy clause that a person's approvals satisfied. Nothing here decides.
     """
-    assert project.repo is not None
-    written = []
+    written: list[str] = []
+    # A working tree is needed to edit one, and not otherwise. Skipping the
+    # assertion when there is nothing to write is what lets an op whose effect
+    # lives on a service act on a project Foreman has no checkout of.
+    if any(e.changed for e in proposal.patch.edits):
+        assert project.repo is not None
     for edit in proposal.patch.edits:
         if not edit.changed:
             continue
+        assert project.repo is not None
         path = project.repo / edit.path
         # An empty `before` is a creation. Reading a missing file as "" keeps the
         # same check honest in both directions: a file that appeared in the
@@ -180,7 +229,27 @@ def apply(project: Project, proposal: ActionProposal) -> list[str]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(edit.after)
         written.append(edit.path)
-    return written
+    # Merges last, deliberately. Should an action ever carry both kinds of
+    # effect, the recoverable half goes first: a half-applied action that wrote
+    # a file is fixed by re-running, and one that merged is not.
+    return written + _merge_all(proposal)
+
+
+def _merge_all(proposal: ActionProposal) -> list[str]:
+    """Merge the pull requests a proposal names, pinned to the commits it was
+    computed against."""
+    from ..collectors.github import GitHubError, merge_pull_request
+
+    merged = []
+    for merge in proposal.patch.merges:
+        try:
+            merged.append(merge_pull_request(merge.repo, merge.number, merge.head))
+        except GitHubError as exc:
+            # Refused rather than failed, in the same sense a changed file is:
+            # the commonest reason is that the branch moved, which means the
+            # thing approved is not the thing that would land.
+            raise OpNotApplicable(f"{merge.label} could not be merged — {exc}") from None
+    return merged
 
 
 class Stale(Exception):
@@ -213,11 +282,13 @@ def rehydrate(project: Project, row: Any) -> ActionProposal:
 
 __all__ = [
     "OPS",
+    "NEVER_POLICY",
     "Stale",
     "build",
     "rehydrate",
     "ActionProposal",
     "FileEdit",
+    "Merge",
     "Op",
     "OpNotApplicable",
     "Patch",
@@ -226,5 +297,7 @@ __all__ = [
     "class_key",
     "class_statement",
     "policy_expr_for",
+    "policy_for",
     "propose",
+    "target_label",
 ]

@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from foreman.actions import AUTO_POLICY_EXPR, OPS, VERIFIED_POLICY_EXPR, policy_expr_for
+from foreman.actions import (
+    AUTO_POLICY_EXPR,
+    NEVER_POLICY,
+    OPS,
+    VERIFIED_POLICY_EXPR,
+    policy_expr_for,
+    policy_for,
+)
 from foreman.actions.sagform import policy_allows
 from foreman.config import Project, Registry
 from foreman.runner import verify_applied
@@ -45,8 +52,9 @@ def _applied(store, *, project="p", class_key="k", digest="d", by="human"):
 
 
 def test_ops_that_cannot_break_a_build_use_the_approval_policy():
-    for op in OPS.values():
-        assert op.requires_verification is False
+    plain = [op for op in OPS.values() if not op.requires_verification]
+    assert plain, "every registered op now requires verification, which is suspicious"
+    for op in plain:
         assert policy_expr_for(op) == AUTO_POLICY_EXPR
 
 
@@ -58,6 +66,21 @@ def test_an_op_requiring_verification_gets_the_stricter_policy():
         requires_verification = True
 
     assert policy_expr_for(Risky()) == VERIFIED_POLICY_EXPR
+
+
+def test_an_op_whose_effect_cannot_be_undone_gets_no_expression_at_all():
+    """Not a higher threshold — no threshold. A number somebody could raise is
+    a different promise from an operation that is never taken unattended."""
+
+    class Irreversible:
+        verb = "irreversible"
+        summary = ""
+        signature_fields = ()
+        requires_verification = True
+        reversible = False
+
+    assert policy_expr_for(Irreversible()) is None
+    assert policy_for(Irreversible()) == (NEVER_POLICY, None)
 
 
 def test_approvals_alone_never_satisfy_the_verified_policy():

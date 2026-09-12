@@ -250,7 +250,7 @@
   }
   .action-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
   .verb { font-weight: 600; }
-  .action-files { font: 12.5px ui-monospace, Menlo, monospace; color: var(--text-2); }
+  .action-target { font: 12.5px ui-monospace, Menlo, monospace; color: var(--text-2); }
   .evidence { margin: 10px 0; }
   .evidence-text { font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
   /* Track is a lighter step of the fill's own ramp so the bar reads as one
@@ -764,7 +764,15 @@ function actionCard(group, index) {
   // Against whichever count this class's policy reads, not always approvals.
   const counted = first.statement.includes("class.verified") ? s.verified : s.approvals;
   const pct = Math.min(100, (counted / 10) * 100);
-  const badge = earned.length === members.length ? "earned under policy"
+  // Some effects cannot be undone by re-running Foreman, and those classes
+  // carry a policy no ledger satisfies. Saying so is not the same as saying
+  // "needs you" — one is a class that has not earned it yet, the other is a
+  // class that never will — and a meter implying progress towards a threshold
+  // that does not exist is the page making a promise on Foreman's behalf.
+  const automatable = first.automatable !== false;
+  const earnable = automatable && earned.length === members.length;
+  const badge = !automatable ? "always needs you"
+    : earned.length === members.length ? "earned under policy"
     : earned.length ? `${earned.length} of ${members.length} earned under policy`
     : "needs you";
   const mixed = earned.length && earned.length !== members.length;
@@ -774,12 +782,12 @@ function actionCard(group, index) {
   // one class — the path is said once in the head and the projects collapse to a
   // wrapped row. When the paths differ, each one is named, because "which file
   // in which project" is then part of what you are approving.
-  const sameFiles = new Set(members.map((m) => m.files.join(", "))).size === 1;
+  const sameTarget = new Set(members.map((m) => m.target)).size === 1;
   const head = one
     ? `<span class="project-cell">${esc(first.project)}</span>
-       <span class="action-files">${first.files.map(esc).join(", ")}</span>`
+       <span class="action-target">${esc(first.target)}</span>`
     : `<span class="class-count">${members.length} projects</span>
-       ${sameFiles ? `<span class="action-files">${first.files.map(esc).join(", ")}</span>` : ""}`;
+       ${sameTarget ? `<span class="action-target">${esc(first.target)}</span>` : ""}`;
 
   // What you are deciding. For a class of one that is the instance statement,
   // verbatim, as before; for several it is the class statement, which is the
@@ -789,14 +797,14 @@ function actionCard(group, index) {
   const mark = (m) =>
     (mixed && m.eligible ? '<span class="badge earned">earned</span>' : "") +
     (m.stale ? '<span class="stale">⚠ stale</span>' : "");
-  const rows = one ? "" : sameFiles
+  const rows = one ? "" : sameTarget
     ? `<ul class="members compact">${members.map((m) => `
         <li${m.stale ? ' class="is-stale"' : ""}>
           <span class="project-cell">${esc(m.project)}</span>${mark(m)}</li>`).join("")}</ul>`
     : `<ul class="members">${members.map((m) => `
         <li>
           <span class="project-cell">${esc(m.project)}</span>
-          <span class="action-files">${m.files.map(esc).join(", ")}</span>
+          <span class="action-target">${esc(m.target)}</span>
           ${mark(m)}
         </li>`).join("")}</ul>`;
 
@@ -823,22 +831,25 @@ function actionCard(group, index) {
     `<div class="stale">⚠ ${projects.map(esc).join(", ")} — ${esc(reason)}</div>`).join("");
 
   // "…to 0 projects" is not a label anyone needs: when nothing is approvable the
-  // button is disabled and the note beside it says why.
-  const approveLabel = one || !fresh.length ? "Approve &amp; apply"
-    : `Approve &amp; apply to ${fresh.length} project${fresh.length === 1 ? "" : "s"}`;
+  // button is disabled and the note beside it says why. The verb follows the
+  // effect: "apply" is what happens to a working tree, and calling a merge an
+  // apply understates what the button does.
+  const doing = members.some((m) => m.files.length) ? "apply" : "merge";
+  const approveLabel = one || !fresh.length ? `Approve &amp; ${doing}`
+    : `Approve &amp; ${doing} for ${fresh.length} project${fresh.length === 1 ? "" : "s"}`;
   const rejectLabel = one ? "Reject" : `Reject for ${members.length} projects`;
 
   return `<div class="action" data-group="${index}">
     <div class="action-head">
       <span class="verb">${esc(group.verb)}</span>
       ${head}
-      <span style="margin-left:auto" class="badge${earned.length === members.length ? " earned" : ""}">
+      <span style="margin-left:auto" class="badge${earnable ? " earned" : ""}">
         ${badge}</span>
     </div>
     <div class="evidence">
       <div class="evidence-text">${classRecord(group)}</div>
-      ${first.decided === 0 ? "" :
-        `<div class="meter${earned.length === members.length ? " earned" : ""}"><span style="width:${pct}%"></span></div>`}
+      ${first.decided === 0 || !automatable ? "" :
+        `<div class="meter${earnable ? " earned" : ""}"><span style="width:${pct}%"></span></div>`}
     </div>
     <div class="statement">${statement}</div>
     ${rows}
@@ -883,13 +894,21 @@ function approveGroup(group) {
   const fresh = group.members.filter((m) => !m.stale);
   const stale = group.members.filter((m) => m.stale);
   if (!fresh.length) return;
-  // Approving writes to working trees, so it asks first — and a prompt that
-  // cannot say how many trees it will touch, or whose, is not a confirmation.
-  const lines = [
+  // Approving acts, so it asks first — and a prompt that cannot say what it
+  // will touch, or whose, is not a confirmation. What it will touch differs in
+  // kind: a file edit lands in a working tree and can be reverted from one, a
+  // merge lands on a default branch and cannot. The prompt says which.
+  const writes = fresh.some((m) => m.files.length);
+  const lines = writes ? [
     `Apply ${fresh.length} action${fresh.length === 1 ? "" : "s"} to ` +
       `${fresh.length === 1 ? "this working tree" : "these working trees"}?`,
     "",
     fresh.map((m) => m.project).join(", "),
+  ] : [
+    `Merge ${fresh.length} pull request${fresh.length === 1 ? "" : "s"}? ` +
+      `This lands on the default branch and Foreman cannot undo it.`,
+    "",
+    fresh.map((m) => `${m.project} — ${m.target}`).join("\n"),
   ];
   if (stale.length) {
     lines.push("", `Excluded as stale: ${stale.map((m) => m.project).join(", ")}`);
@@ -936,9 +955,15 @@ async function decideMany(ids, verb) {
 }
 
 async function decide(id, verb) {
-  // Approving writes to a repository, so it asks. Rejecting is reversible and
-  // does not. Used by the chat's suggestion buttons, which name one action.
-  if (verb === "approve" && !confirm("Apply this change to the working tree?")) return;
+  // Approving acts on a repository, so it asks. Rejecting is reversible and
+  // does not. Used by the chat's suggestion buttons, which name one action — so
+  // the action is looked up rather than described generically, because "apply
+  // to the working tree" is the wrong sentence for a merge.
+  const action = state.actions.find((a) => a.id === id);
+  const question = action && !action.files.length
+    ? `Merge ${action.target}? This lands on the default branch and Foreman cannot undo it.`
+    : "Apply this change to the working tree?";
+  if (verb === "approve" && !confirm(question)) return;
   const res = await fetch(`/api/actions/${id}/${verb}`, { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

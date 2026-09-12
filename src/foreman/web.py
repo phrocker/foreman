@@ -16,8 +16,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
-from .actions import Stale
-from .actions.sagform import policy_allows
+from .actions import Stale, target_label
+from .actions.sagform import automatable, policy_allows
 from .chat import ChatError, ask
 from .config import load_registry
 from .connectors import build as build_connectors
@@ -159,11 +159,19 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         item = dict(row)
         item["params"] = json.loads(row["params"])
         item["files"] = json.loads(row["files"])
+        # What this will touch, said in one line. Not the file list: an action
+        # whose effect is a merge has no files, and a blank cell there reads as
+        # "this changes nothing".
+        item["target"] = target_label(row["verb"], item["params"], item["files"])
         stats = store.class_stats(row["class_key"], row["patch_digest"])
         decided = stats["approvals"] + stats["rejections"]
         item["stats"] = stats
         item["decided"] = decided
         item["eligible"] = bool(decided and policy_allows(row["statement"], {"class": stats}))
+        # Whether any number of approvals could ever make this unattended. A
+        # progress bar towards a threshold that does not exist is a promise the
+        # page has no business making.
+        item["automatable"] = automatable(row["statement"])
         # Staleness is a read of the working tree, so it is computed per request
         # rather than stored: an action that was fine a minute ago may not be.
         item["stale"] = None

@@ -281,6 +281,35 @@ def test_an_identical_proposal_is_refused(store):
     assert [r["id"] for r in store.pending_actions()] == [first]
 
 
+def test_an_action_that_writes_no_files_supersedes_nothing(store):
+    """Superseding rests on one action rewriting a file the others were computed
+    against. Two pull requests in one class rewrite nothing of each other's, and
+    retiring one because the other arrived would drop a decision nobody made."""
+    first = store.record_proposal(
+        project="p",
+        finding_id=None,
+        verb="v",
+        statement="DO v()",
+        class_statement="DO v()",
+        class_key="k",
+        params={"a": 1},
+        patch_digest="d1",
+        files=[],
+    )
+    second = store.record_proposal(
+        project="p",
+        finding_id=None,
+        verb="v",
+        statement="DO v()",
+        class_statement="DO v()",
+        class_key="k",
+        params={"a": 2},
+        patch_digest="d2",
+        files=[],
+    )
+    assert sorted(r["id"] for r in store.pending_actions()) == sorted([first, second])
+
+
 def test_a_changed_patch_supersedes_the_pending_one(store):
     first = _propose(store, digest="d1")
     second = _propose(store, digest="d2")

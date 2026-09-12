@@ -239,7 +239,17 @@ for one class rather than ten classes of one.
 Operations prefer turning on a system that already exists over reimplementing
 it. `enable_dependabot` writes the config that starts dependency updates rather
 than editing manifests itself, because Dependabot already regenerates lockfiles
-correctly per ecosystem and already runs CI on what it proposes.
+correctly per ecosystem and already runs CI on what it proposes. `bump_dependency`
+finishes the same thought and merges the pull request that comes out, so a
+vulnerable package is fixed rather than reported every night.
+
+**Not every action is a file.** A bump's effect is on GitHub, so its patch is a
+merge rather than a diff and its digest is the head commit — the one thing that
+is exact and that changes when what would land changes. That is also why it
+does not need a checkout: the first operation Foreman can take on a project it
+has never cloned. It signs on ecosystem, semver distance and scope and not on
+the package, because "a patch-level runtime bump in pip" is a decision you could
+mean fifty times and "a patch-level bump of cryptography" is a class of one.
 
 ```bash
 foreman actions --propose     # what could be done, with each class's record
@@ -250,9 +260,14 @@ foreman precision             # which rules earn their findings
 
 ```
 #11 p10 anchor_asset_disallow
-   files    public/robots.txt
+   target   public/robots.txt
    record   approved 10/10 across 10 project(s) · patch identical to 10 of them
    auto     eligible under policy
+
+#12 p10 bump_dependency
+   target   cryptography 48.0.0 → 48.0.1
+   record   approved 40/40 across 9 project(s) · 40 verified by CI
+   auto     never — this effect cannot be undone
 ```
 
 **Applying and verifying are different claims.** An operation declares whether
@@ -262,6 +277,16 @@ enough; changing a dependency constraint can, so its policy reads
 many approvals precede it. `foreman verify` asks each project's checks about the
 actions applied to it, and an action whose checks have not run is left
 unjudged rather than counted either way. Absence of evidence is not evidence.
+
+**And some effects are never automated at all.** Everything else here is
+recoverable by re-running: the op recomputes, the file is overwritten, the world
+converges. A merge puts somebody else's commits on your default branch and the
+undo is a human writing a revert, so `bump_dependency` carries `P:never` — a
+policy clause with no expression behind it, refused by construction rather than
+by a threshold set high enough that nobody expects to reach it. The class still
+keeps its record. Learning that a pip patch bump has been approved forty times
+and broken the build zero times is the useful part; the leap from that to
+merging without being asked is not Foreman's to take.
 
 Two further guards worth knowing about. A policy-approved action is recorded as
 `decided_by='policy:auto'` and **excluded from class statistics**, so automation

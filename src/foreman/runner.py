@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 
-from .actions import Stale, propose, rehydrate
+from .actions import OpNotApplicable, Stale, propose, rehydrate
 from .actions import apply as apply_patch
 from .actions.sagform import policy_allows
 from .collectors import COLLECTORS, OPTIONAL
@@ -119,7 +119,7 @@ def propose_actions(
             if action_id is None:
                 continue  # identical proposal already pending
             recorded += 1
-            log(f"{target.id}: {proposal.summary} ({', '.join(proposal.files)})")
+            log(f"{target.id}: {proposal.summary} ({proposal.target})")
     return recorded
 
 
@@ -147,7 +147,15 @@ def apply_action(
         store.record_application(action_id, "stale", str(exc))
         raise
 
-    written = apply_patch(target, fresh)
+    try:
+        written = apply_patch(target, fresh)
+    except OpNotApplicable as exc:
+        # The world moved between the guardrail passing and the effect landing —
+        # a file rewritten, or a branch force-pushed after GitHub was asked to
+        # merge it. Same category as a stale rehydrate and recorded the same
+        # way: refusing to act is not a rejection, and nobody decided anything.
+        store.record_application(action_id, "stale", str(exc))
+        raise Stale(str(exc)) from None
     store.decide_action(action_id, "approved", decided_by)
     store.record_application(action_id, "applied")
     if row["finding_id"] is not None:

@@ -25,6 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .actions import target_label
 from .config import Registry
 from .connectors import Connector, ConnectorError, Task, choose
 from .graph import FROM_SKILL, SEEN_ON, key_of, node
@@ -119,10 +120,11 @@ def portfolio_state(store: Store, registry: Registry) -> str:
             f"{stats['projects']} project(s), {stats['verified']} verified, "
             f"{stats['broke']} broke the build"
         )
-        lines.append(
-            f"- #{row['id']} {row['project']} {row['verb']} "
-            f"files={','.join(json.loads(row['files']))} — {record}"
-        )
+        # What it touches, rather than which files. The context a model is given
+        # should not say "files=" and then nothing for an action whose effect is
+        # a merge — an empty field reads as an action that changes nothing.
+        touches = target_label(row["verb"], json.loads(row["params"]), json.loads(row["files"]))
+        lines.append(f"- #{row['id']} {row['project']} {row['verb']} on {touches} — {record}")
 
     precision = store.rule_precision()
     if precision:
