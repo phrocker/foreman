@@ -26,6 +26,7 @@ else is an entity with fields: one row per record, one cell per field.
     ent:action|<id>               cf=action       cq=<field>
     ent:conv|<id>                 cf=conversation cq=<field>
     ent:msg|<conv>|<seq>          cf=message      cq=<field>
+    ent:memory|<id>               cf=memory       cq=<field>
     ent:seq|<kind>                cf=seq          cq=n
     ent:wm|<project>|<feed>       cf=watermark    cq=at
     ent:<kind>|<key>              cf=edge         cq=<rel>NUL<target node>
@@ -63,7 +64,7 @@ from typing import Any
 
 import grpc
 
-from .graph import EDGE_CF, ID_WIDTH, SEP, edges_for, kind_of
+from .graph import EDGE_CF, ID_WIDTH, SEP, SUPERSEDES, edges_for, kind_of, memory_edges, node
 from .models import Event, Finding, Observation, utcnow
 from .shoalpb import embed_pb2 as pb
 from .shoalpb import embed_pb2_grpc as rpc
@@ -120,6 +121,7 @@ FIELDS: dict[str, tuple[str, ...]] = {
         "verification_ref",
     ),
     "conv": ("title", "started_at"),
+    "memory": ("statement", "created_at", "retired_at", "retired_because"),
     "msg": ("conversation_id", "role", "content", "created_at", "refs", "cost_usd"),
 }
 
@@ -802,6 +804,60 @@ class ShoalStore:
             reverse=True,
         )
         return rows[:limit]
+
+    # --- memory ------------------------------------------------------------
+
+    def remember(
+        self,
+        statement: str,
+        about: Sequence[str] = (),
+        conversation_id: int | None = None,
+    ) -> int:
+        memory_id = self._next_id("memory")
+        self._write(
+            [
+                self._put(
+                    _rid("memory", _pad(memory_id)),
+                    "memory",
+                    {"statement": statement, "created_at": utcnow()},
+                )
+            ]
+        )
+        self.relate(memory_edges(memory_id, about, conversation_id))
+        return memory_id
+
+    def memory(self, memory_id: int) -> Record | None:
+        found = self._entities(f"ent:memory|{_pad(memory_id)}")
+        return next(iter(found.values()), None)
+
+    def memories(self, include_retired: bool = False) -> list[Record]:
+        # A row materialised only as the endpoint of an edge carries a kind and
+        # nothing else. It is not a memory anybody wrote, and SQLite has no way
+        # to produce one, so `created_at` is what tells the two apart.
+        rows = [
+            r
+            for r in self._entities("ent:memory|").values()
+            if r.get("created_at") and (include_retired or not r.get("retired_at"))
+        ]
+        rows.sort(key=lambda r: (r.get("created_at") or "", int(r["id"])), reverse=True)
+        return rows
+
+    def retire_memory(self, memory_id: int, because: str, superseded_by: int | None = None) -> None:
+        """Stop believing something, on the record. The first reason stands."""
+        row = self.memory(memory_id)
+        if row is None or not row.get("created_at") or row.get("retired_at"):
+            return
+        self._write(
+            [
+                self._put(
+                    _rid("memory", _pad(memory_id)),
+                    "memory",
+                    {"retired_at": utcnow(), "retired_because": because},
+                )
+            ]
+        )
+        if superseded_by is not None:
+            self.relate([(node("memory", superseded_by), SUPERSEDES, node("memory", memory_id))])
 
     # --- graph -------------------------------------------------------------
 

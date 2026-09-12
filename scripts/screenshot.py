@@ -16,7 +16,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-TABS = ("findings", "actions", "drift", "history", "rules")
+TABS = ("findings", "actions", "drift", "history", "memory", "rules")
 
 
 async def shoot(port: int, out: Path) -> int:

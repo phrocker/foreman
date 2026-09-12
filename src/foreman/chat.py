@@ -6,11 +6,14 @@ Asking it a question is a better interface to that than four tabs.
 
 Two constraints shape this, and both come from the rest of the system.
 
-It never approves anything. Actions are the operator's, and the whole ledger
-exists to make that decision well-founded rather than to delegate it. The model
-may *suggest* an approval and say why; the suggestion arrives as a button, and a
-human presses it. An assistant that could approve its own suggestions would make
-the approval record measure its own confidence instead of yours.
+It never approves anything, and it never writes anything down as settled.
+Actions are the operator's, and the whole ledger exists to make that decision
+well-founded rather than to delegate it. The model may *suggest* an approval and
+say why, and it may *propose* a memory when something durable has just been
+decided; both arrive as buttons, and a human presses them. An assistant that
+could approve its own suggestions would make the approval record measure its own
+confidence instead of yours, and one that could promote its own guesses to
+durable facts would be worse, because nothing later would mark them as guesses.
 
 And every turn records what it was grounded in. An answer with no references is
 an opinion, and the difference has to survive into storage — which is also what
@@ -29,6 +32,7 @@ from .actions import target_label
 from .config import Registry
 from .connectors import Connector, ConnectorError, Task, choose
 from .graph import FROM_SKILL, SEEN_ON, key_of, node
+from .memory import describe
 from .store import Store
 
 TIMEOUT_S = 180
@@ -40,8 +44,9 @@ Ground every claim in the state you are given. If something is not in it, say
 so rather than inferring — "no data on that" is a useful answer and a guess is
 not. Be brief; this is a chat panel, not a report.
 
-You cannot approve or reject anything. If an action should be taken, put it in
-`suggest` with a short reason and the operator will decide.
+You cannot approve or reject anything, and you cannot record anything as
+settled. If an action should be taken, put it in `suggest` with a short reason
+and the operator will decide.
 
 ## Portfolio state
 
@@ -63,7 +68,16 @@ You cannot approve or reject anything. If an action should be taken, put it in
 used. Leave a list empty rather than padding it.
 
 `suggest` is usually empty. Offer an approval or rejection only when the state
-plainly supports it, with one sentence saying why."""
+plainly supports it, with one sentence saying why.
+
+`remember` is emptier still. Propose a memory only when this conversation has
+settled something durable — a rule the operator has just called noise for a
+class of project, a decision not to fix something, a constraint that will still
+hold next month. Never a summary of what was said, and never a restatement of a
+finding: a finding is a problem and a memory is a judgement about how this
+portfolio works. Name what it bears on in `about` as `project|<id>`,
+`rule|<name>` or `finding|<id>`. You cannot write one; it is offered to the
+operator, who decides."""
 
 
 class Suggestion(BaseModel):
@@ -72,10 +86,24 @@ class Suggestion(BaseModel):
     why: str = ""
 
 
+class Memory(BaseModel):
+    """A durable judgement the model thinks was just established.
+
+    A proposal, never a write. `about` carries node ids — `project|mfa`,
+    `rule|missing_security_header` — which is how it lands in the graph related
+    to the thing it bears on instead of in a list nobody can traverse.
+    """
+
+    statement: str
+    about: list[str] = Field(default_factory=list)
+    why: str = ""
+
+
 class Reply(BaseModel):
     reply: str
     refs: dict[str, list[Any]] = Field(default_factory=dict)
     suggest: list[Suggestion] = Field(default_factory=list)
+    remember: list[Memory] = Field(default_factory=list)
 
 
 class ChatError(RuntimeError):
@@ -89,7 +117,8 @@ def portfolio_state(store: Store, registry: Registry) -> str:
     this size the whole state is a few thousand tokens, so handing it over costs
     one round trip and removes every question about what it actually looked at.
     """
-    lines: list[str] = ["### Projects"]
+    lines: list[str] = _standing(store)
+    lines.append("### Projects")
     for project in registry.active:
         surfaces = ",".join(project.surface_names) or "none"
         lines.append(
@@ -139,6 +168,29 @@ def portfolio_state(store: Store, registry: Registry) -> str:
     return "\n".join(lines)
 
 
+def _standing(store: Store) -> list[str]:
+    """What has been decided, ahead of what is merely true today.
+
+    First in the state on purpose. Everything below it is current state whose
+    answer expires; these do not, and a model that reads them last has already
+    formed its answer from the part that was going to change anyway.
+    """
+    memories = describe(store, store.memories())
+    if not memories:
+        return []
+    lines = [
+        "### Standing judgements",
+        "Durable decisions the operator recorded. They outrank current state: a",
+        "rule called noise here is noise. They authorise nothing — approval is",
+        "counted from the ledger, never from one of these.",
+    ]
+    for row in memories:
+        about = f" [about {', '.join(row['about'])}]" if row["about"] else ""
+        lines.append(f"- #{row['id']} {row['statement']}{about}")
+    lines.append("")
+    return lines
+
+
 def _graph(store: Store, findings: Sequence[Any]) -> str:
     """What the graph relates, so Foreman can answer questions about itself.
 
@@ -152,7 +204,11 @@ def _graph(store: Store, findings: Sequence[Any]) -> str:
         "\n### The graph",
         "State is stored as a graph: project -has_finding-> finding -from_rule-> rule,",
         "with rule -seen_on-> project back the other way, finding -found_by-> skill,",
-        "and rule -from_skill-> skill. Dispatched agents are given the same relationships.",
+        "and rule -from_skill-> skill. Durable memories hang off it too: memory",
+        "-about-> project, rule or finding, with project -remembers-> memory back the",
+        "other way, memory -formed_in-> conversation for provenance, and",
+        "memory -supersedes-> memory when one retires another. Dispatched agents are",
+        "given the same relationships.",
     ]
     recurring: list[tuple[str, list[str], bool]] = []
     for rule in sorted({row["rule"] for row in findings}):

@@ -23,6 +23,7 @@ from .connectors import describe as describe_connectors
 from .diff import Kind, project_drift
 from .graph import relink as relink_findings
 from .history import ingest_all
+from .memory import about_nodes, describe, label
 from .migrate import migrate as copy_store
 from .models import Severity
 from .precision import label as precision_label
@@ -710,6 +711,84 @@ def connectors_cmd(registry: Path = typer.Option(None, "--registry", "-r")) -> N
     console.print(table)
     if not any(r["available"] for r in rows):
         console.print("\n[yellow]Nothing is available.[/] Audits and chat will fail until one is.")
+
+
+@app.command()
+def remember(
+    statement: str = typer.Argument(..., help="What was decided, in one sentence."),
+    project: list[str] = typer.Option(None, "--project", "-p", help="A project it bears on."),
+    rule: list[str] = typer.Option(None, "--rule", help="A rule it bears on."),
+    finding: list[int] = typer.Option(None, "--finding", help="A finding it was formed from."),
+    conversation: int = typer.Option(None, "--conversation", "-c", help="Where it came from."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Record something learned, so it outlives the conversation that produced it.
+
+    A finding is a problem and expires when it is fixed; this is a judgement and
+    expires when you retire it. Relate it to what it bears on — `foreman ask`
+    and every dispatched agent reach it by walking from there.
+    """
+    about = about_nodes(project or [], rule or [], finding or [])
+    with open_store(db) as store:
+        memory_id = store.remember(statement, about, conversation)
+    console.print(f"[green]Remembered[/] #{memory_id}.")
+    if not about:
+        console.print(
+            "[dim]Attached to nothing, so it reaches every project. Name a project "
+            "or rule to narrow it.[/]"
+        )
+
+
+@app.command()
+def memories(
+    all_: bool = typer.Option(False, "--all", help="Include retired memories."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """What Foreman has been told to remember."""
+    with open_store(db) as store:
+        rows = describe(store, store.memories(include_retired=all_))
+    if not rows:
+        console.print(
+            '[dim]Nothing remembered yet. `foreman remember "…"` records a judgement '
+            "that should outlive one conversation.[/]"
+        )
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("id", "state", "memory", "about"):
+        table.add_column(column)
+    for row in rows:
+        # A word, not a colour: "retired" has to survive a monochrome terminal,
+        # and the reason is the part worth reading anyway.
+        state = "retired" if row["retired_at"] else "held"
+        statement = row["statement"]
+        if row["retired_at"]:
+            statement += f"\n[dim]retired — {row['retired_because']}[/]"
+            if row["replaced_by"]:
+                statement += f" [dim](see #{row['replaced_by']})[/]"
+        about = ", ".join(label(n) for n in row["about"])
+        table.add_row(str(row["id"]), state, statement, about or "the whole portfolio")
+    console.print(table)
+
+
+@app.command(name="retire-memory")
+def retire_memory_cmd(
+    memory_id: int = typer.Argument(..., help="Which memory stopped being true."),
+    because: str = typer.Option(..., "--because", help="Why it stopped being true."),
+    superseded_by: int = typer.Option(None, "--superseded-by", help="The memory replacing it."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Retire a memory. It is kept, not deleted — the retraction is the record.
+
+    A wrong memory is worse than none, so this has to be as easy as writing one.
+    But "we thought X until Y" is more useful to the next reader than a gap
+    where X was, which is why a reason is required.
+    """
+    with open_store(db) as store:
+        if store.memory(memory_id) is None:
+            console.print(f"[red]No memory #{memory_id}.[/]")
+            raise typer.Exit(1)
+        store.retire_memory(memory_id, because, superseded_by)
+    console.print(f"[green]Retired[/] #{memory_id}. It stays readable, with the reason attached.")
 
 
 @app.command()

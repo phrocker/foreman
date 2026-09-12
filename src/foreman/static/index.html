@@ -309,6 +309,28 @@
   .was { color: var(--high); }
   .now { color: var(--good); }
 
+  /* Memory. A judgement, not a problem, so these read as sentences rather than
+     rank in a table. Retired state is the WORD "retired", a dashed rule down
+     the side and the reason it was retired; the muted colour only agrees with
+     what the text already says. */
+  .memo { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex;
+          gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .memo:last-child { border-bottom: none; }
+  .memo-main { flex: 1; min-width: 260px; }
+  .memo-statement { max-width: 78ch; }
+  .memo.is-retired { border-left: 3px dashed var(--text-3); }
+  .memo.is-retired .memo-statement { color: var(--text-3); }
+  .memo-meta { display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; margin-top: 8px; }
+  .memo-state { font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+                color: var(--text-2); border: 1px solid var(--border-firm);
+                border-radius: 999px; padding: 1px 8px; }
+  .memo-why { color: var(--text-2); font-size: 12.5px; max-width: 78ch; margin-top: 7px; }
+  .memo-form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .memo-form input[type="text"] {
+    flex: 1; min-width: 260px; font: inherit; padding: 7px 11px; border-radius: 8px;
+    border: 1px solid var(--border-firm); background: var(--surface); color: var(--text);
+  }
+
   /* Chat pane */
   html, body { height: 100%; }
   .shell { display: flex; height: 100vh; overflow: hidden; }
@@ -445,6 +467,7 @@
     <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
     <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
     <button class="tab" data-tab="history"  role="tab" aria-selected="false">History <span class="count" id="countHistory"></span></button>
+    <button class="tab" data-tab="memory"   role="tab" aria-selected="false">Memory <span class="count" id="countMemory"></span></button>
     <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
   </nav>
 
@@ -493,6 +516,22 @@
     <div class="panel scroll"><div id="historyList"></div></div>
   </section>
 
+  <section id="panel-memory" role="tabpanel" hidden>
+    <form class="memo-form" id="memoForm">
+      <input type="text" id="memoStatement" aria-label="What was decided"
+             placeholder="What was decided? e.g. missing_security_header is noise on the static marketing sites">
+      <select id="memoProject" aria-label="Project this bears on"><option value="">Whole portfolio</option></select>
+      <select id="memoRule" aria-label="Rule this bears on"><option value="">Any rule</option></select>
+      <button class="primary" type="submit">Remember</button>
+    </form>
+    <div class="hint" style="margin-bottom:16px">A finding is a problem and stops existing when it is fixed. A memory is a judgement: it outlives the conversation that produced it, travels to every dispatched agent, and lasts until you retire it. It can say a rule is noise; it can never approve anything.</div>
+    <div class="filters">
+      <button class="chip" id="retiredToggle" aria-pressed="true">Show retired</button>
+      <span class="hint">Retired memories are kept, with the reason — "we thought X until Y" is worth more than a gap where X was.</span>
+    </div>
+    <div class="panel"><div id="memoryList"></div></div>
+  </section>
+
   <section id="panel-rules" role="tabpanel" hidden>
     <div class="panel" style="margin-bottom:12px">
       <div class="section-head">Connectors — what can run an agent</div>
@@ -519,9 +558,9 @@ const SEV = {
 };
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
-  connectors: [], skills: [],
+  connectors: [], skills: [], memories: [],
   sevs: new Set(), project: "", q: "", open: new Set(),
-  tab: "findings", decisiveOnly: true, kind: "",
+  tab: "findings", decisiveOnly: true, kind: "", showRetired: true,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -587,7 +626,7 @@ function ago(iso) {
 }
 
 async function load() {
-  const [overview, findings, actions, drift, precision, history, connectors, skills] =
+  const [overview, findings, actions, drift, precision, history, connectors, skills, memories] =
     await Promise.all([
     fetch("/api/overview").then((r) => r.json()),
     fetch("/api/findings").then((r) => r.json()),
@@ -597,8 +636,10 @@ async function load() {
     fetch("/api/history").then((r) => r.json()),
     fetch("/api/connectors").then((r) => r.json()),
     fetch("/api/skills").then((r) => r.json()),
+    fetch("/api/memories").then((r) => r.json()),
   ]);
-  Object.assign(state, { overview, findings, actions, drift, precision, history, connectors, skills });
+  Object.assign(state,
+    { overview, findings, actions, drift, precision, history, connectors, skills, memories });
   // Each panel renders independently. One throwing used to abort the rest of
   // load(), so a single bad reference blanked the whole page instead of one
   // section — a failure mode that is much harder to notice than an empty panel.
@@ -607,7 +648,7 @@ async function load() {
     ["findings", renderFindings], ["actions", renderActions],
     ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
-    ["rules", renderPrecision], ["counts", renderCounts],
+    ["rules", renderPrecision], ["memory", renderMemory], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -623,6 +664,8 @@ function renderCounts() {
   $("countActions").textContent = visibleActions().length || "";
   $("countDrift").textContent = visibleDrift().length || "";
   $("countHistory").textContent = visibleHistory().length || "";
+  // Held, not held-plus-retired: the count is what Foreman currently believes.
+  $("countMemory").textContent = state.memories.filter((m) => !m.retired_at).length || "";
 }
 
 /** One filter, every panel. Re-rendering only findings is what made clicking a
@@ -632,6 +675,7 @@ function applyFilters() {
   renderActions();
   renderDrift();
   renderHistory();
+  renderMemory();
   renderCounts();
 }
 
@@ -1005,6 +1049,133 @@ function renderDrift() {
   }).join("");
 }
 
+// --- memory ----------------------------------------------------------------
+
+/** `finding|000000000003` is not a sentence. The padding is a storage concern —
+ *  it makes a lexical row scan numeric order — and has no business on a page. */
+function nodeLabel(id) {
+  const cut = String(id).indexOf("|");
+  const kind = String(id).slice(0, cut), key = String(id).slice(cut + 1);
+  return /^\d+$/.test(key) ? `${kind} #${Number(key)}` : `${kind} ${key}`;
+}
+
+function visibleMemories() {
+  return state.memories.filter((m) =>
+    (state.showRetired || !m.retired_at) &&
+    (!state.project || !m.about.length || m.about.includes("project|" + state.project)));
+}
+
+function renderMemory() {
+  // The two things a memory is usually about, offered from what exists rather
+  // than typed: a memory attached to a rule nobody has ever seen fire would
+  // never surface at the moment it mattered.
+  const projects = state.overview ? state.overview.projects.map((p) => p.project) : [];
+  const rules = [...new Set(state.findings.map((f) => f.rule))].sort();
+  for (const [el, label, values] of [
+    [$("memoProject"), "Whole portfolio", projects],
+    [$("memoRule"), "Any rule", rules],
+  ]) {
+    const keep = el.value;
+    el.innerHTML = `<option value="">${label}</option>` +
+      values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+    el.value = keep;
+  }
+
+  const rows = visibleMemories();
+  const list = $("memoryList");
+  if (!rows.length) {
+    list.innerHTML = `<div class="empty">${
+      state.memories.length
+        ? "Nothing held under these filters."
+        : "Nothing remembered yet. Record a judgement that should outlive one conversation — which rules are noise here, what was decided not to fix, what is pinned on purpose."
+    }</div>`;
+    return;
+  }
+  list.innerHTML = rows.map((m) => {
+    const about = m.about.length
+      ? m.about.map((a) => `<span class="pill">${esc(nodeLabel(a))}</span>`).join("")
+      : '<span class="pill">the whole portfolio</span>';
+    const provenance = m.conversation
+      ? `<span class="memo-state">from conversation #${m.conversation}</span>` : "";
+    // State is a word first. The dashed rule and the muted text only agree with
+    // it; neither is load-bearing on its own.
+    const state_ = m.retired_at
+      ? `<span class="memo-state">retired ${esc(ago(m.retired_at))}</span>`
+      : `<span class="memo-state">held since ${esc(ago(m.created_at))}</span>`;
+    const why = m.retired_at
+      ? `<div class="memo-why">Retired because: ${esc(m.retired_because || "no reason recorded")}${
+          m.replaced_by ? ` · replaced by #${m.replaced_by}` : ""}</div>`
+      : "";
+    const replaces = m.replaces.length
+      ? `<div class="memo-why">Replaces ${m.replaces.map((r) => "#" + r).join(", ")} — what we thought before.</div>`
+      : "";
+    return `<div class="memo ${m.retired_at ? "is-retired" : ""}">
+      <div class="memo-main">
+        <div class="memo-statement">${esc(m.statement)}</div>
+        <div class="memo-meta">${state_}${about}${provenance}</div>
+        ${why}${replaces}
+      </div>
+      ${m.retired_at ? "" : `<button class="memo-retire" data-id="${m.id}">Retire</button>`}
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll(".memo-retire").forEach((b) =>
+    b.addEventListener("click", () => retireMemory(Number(b.dataset.id))));
+}
+
+/** Retiring asks for the reason rather than offering to skip it: a memory that
+ *  vanished takes its reasons with it, and the next reader cannot tell whether
+ *  it was wrong or merely inconvenient. */
+async function retireMemory(id) {
+  const because = prompt("Why did this stop being true? It is kept, with the reason attached.");
+  if (because === null || !because.trim()) return;
+  const res = await fetch(`/api/memories/${id}/retire`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ because }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(`Could not retire it: ${body.detail || res.status}`);
+    return;
+  }
+  await load();
+}
+
+async function remember(statement, about, conversation_id) {
+  const res = await fetch("/api/memories", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ statement, about, conversation_id }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(`Could not record that: ${body.detail || res.status}`);
+    return false;
+  }
+  await load();
+  return true;
+}
+
+$("memoForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const statement = $("memoStatement").value.trim();
+  if (!statement) return;
+  const about = [];
+  if ($("memoProject").value) about.push("project|" + $("memoProject").value);
+  if ($("memoRule").value) about.push("rule|" + $("memoRule").value);
+  if (await remember(statement, about, null)) {
+    $("memoStatement").value = "";
+    showTab("memory");
+  }
+});
+
+$("retiredToggle").addEventListener("click", () => {
+  state.showRetired = !state.showRetired;
+  $("retiredToggle").setAttribute("aria-pressed", String(state.showRetired));
+  renderMemory();
+});
+
 // --- connectors ------------------------------------------------------------
 
 function renderConnectors() {
@@ -1210,6 +1381,10 @@ function renderFindings() {
 
 document.querySelectorAll(".chip").forEach((chip) =>
   chip.addEventListener("click", () => {
+    // Only the severity chips. Every other panel's chips share the class, and
+    // without this one of them filed `undefined` as a severity and emptied the
+    // findings table on a click that had nothing to do with it.
+    if (!chip.dataset.sev) return;
     const sev = chip.dataset.sev;
     state.sevs.has(sev) ? state.sevs.delete(sev) : state.sevs.add(sev);
     chip.setAttribute("aria-pressed", String(state.sevs.has(sev)));
@@ -1279,7 +1454,7 @@ function renderChat(pending) {
       '<div class="empty">Ask about findings, drift, which rules earn their keep, or what is worth approving.</div>';
     return;
   }
-  log.innerHTML = turns.map((t) => {
+  log.innerHTML = turns.map((t, ti) => {
     const refs = Object.entries(t.refs || {})
       .filter(([, v]) => v && v.length)
       .map(([k, v]) => `<span class="ref">${esc(k)}: ${v.map(esc).join(", ")}</span>`)
@@ -1288,11 +1463,19 @@ function renderChat(pending) {
       `<div class="suggest"><span>#${sg.action_id} — ${esc(sg.why || sg.decision)}</span>
         <button class="primary sg-approve" data-id="${sg.action_id}">Approve &amp; apply</button>
         <button class="sg-reject" data-id="${sg.action_id}">Reject</button></div>`).join("");
+    // A proposed memory, which is a proposal for exactly the same reason an
+    // approval is: durable state is yours. It is written when you press this.
+    const proposed = (t.remember || []).map((m, mi) =>
+      `<div class="suggest"><span>Remember: “${esc(m.statement)}”${
+        m.why ? ` — ${esc(m.why)}` : ""}${
+        m.about && m.about.length ? ` [${m.about.map((a) => esc(nodeLabel(a))).join(", ")}]` : ""}</span>
+        <button class="primary sg-remember" data-turn="${ti}" data-i="${mi}">Remember</button></div>`).join("");
     return `<div class="turn ${esc(t.role)}">
       <div class="turn-role">${t.role === "user" ? "you" : "foreman"}</div>
       <div class="turn-body">${md(t.content)}</div>
       ${refs ? `<div class="turn-refs">${refs}</div>` : ""}
       ${suggests ? `<div class="suggests">${suggests}</div>` : ""}
+      ${proposed ? `<div class="suggests">${proposed}</div>` : ""}
     </div>`;
   }).join("") + (pending
     ? `<div class="turn"><div class="turn-role">foreman</div><div class="turn-body">${
@@ -1306,6 +1489,15 @@ function renderChat(pending) {
     b.addEventListener("click", () => decide(b.dataset.id, "approve")));
   log.querySelectorAll(".sg-reject").forEach((b) =>
     b.addEventListener("click", () => decide(b.dataset.id, "reject")));
+  log.querySelectorAll(".sg-remember").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const m = turns[b.dataset.turn].remember[b.dataset.i];
+      b.disabled = true;
+      // The conversation it came out of travels with it, so "why do we believe
+      // this" stays answerable after everyone has forgotten the exchange.
+      if (await remember(m.statement, m.about || [], conversationId)) b.textContent = "Remembered";
+      else b.disabled = false;
+    }));
 }
 
 $("chatForm").addEventListener("submit", async (e) => {
@@ -1361,7 +1553,8 @@ $("chatForm").addEventListener("submit", async (e) => {
     if (failed) throw new Error(failed);
     if (!done) throw new Error("the answer ended without arriving");
     conversationId = done.conversation_id;
-    turns.push({ role: "assistant", content: done.reply, refs: done.refs, suggest: done.suggest });
+    turns.push({ role: "assistant", content: done.reply, refs: done.refs,
+                 suggest: done.suggest, remember: done.remember });
   } catch (err) {
     turns.push({ role: "assistant", content: `Could not answer: ${err.message}` });
   } finally {
@@ -1401,7 +1594,7 @@ function showTab(name) {
   state.tab = name;
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute("aria-selected", String(t.dataset.tab === name)));
-  for (const panel of ["findings", "actions", "drift", "history", "rules"]) {
+  for (const panel of ["findings", "actions", "drift", "history", "memory", "rules"]) {
     $("panel-" + panel).hidden = panel !== name;
   }
   try { localStorage.setItem("foreman-tab", name); } catch {}

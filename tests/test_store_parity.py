@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from foreman.graph import (
+    ABOUT,
     AUDITED,
     CONCERNS,
     FOUND_BY,
@@ -30,7 +31,9 @@ from foreman.graph import (
     HAS_FINDING,
     RAN,
     RAN_VIA,
+    REMEMBERS,
     SEEN_ON,
+    SUPERSEDES,
     YIELDED,
     node,
     relink,
@@ -747,3 +750,97 @@ def test_relink_reaches_the_run_a_finding_came_from(store):
     relink(store)
     (row,) = store.open_findings()
     assert store.neighbors([node("run", run_id)], [YIELDED]) == [node("finding", int(row["id"]))]
+
+
+# --- memory -----------------------------------------------------------------
+
+
+def test_a_memory_outlives_the_sweep_that_was_running_when_it_was_written(store):
+    """The difference from a finding, held at the storage layer: rule findings
+    are thrown away and re-derived, and nothing about a sweep touches this."""
+    run_id = _sweep(store)
+    store.record_findings(run_id, [_finding(rule="noisy")])
+    memory_id = store.remember("noisy is noise on the static marketing sites")
+
+    store.retire_rule_findings("p")
+
+    assert store.open_findings() == []
+    (row,) = store.memories()
+    assert row["id"] == memory_id
+    assert row["statement"] == "noisy is noise on the static marketing sites"
+    assert row["created_at"]
+    assert row["retired_at"] is None
+
+
+def test_a_memory_is_reachable_from_what_it_is_about_and_back(store):
+    """Both directions, because it is read from both ends — and the reverse is
+    the one a forward-only traversal cannot answer."""
+    memory_id = store.remember("majors are pinned deliberately here", ["project|a", "rule|bump"])
+    memory = node("memory", memory_id)
+
+    assert store.neighbors([memory], [ABOUT]) == ["project|a", "rule|bump"]
+    assert store.neighbors(["project|a"], [REMEMBERS]) == [memory]
+    assert store.neighbors(["rule|bump"], [REMEMBERS]) == [memory]
+
+
+def test_where_a_memory_came_from_survives_the_exchange(store):
+    conversation_id = store.start_conversation("is that rule worth keeping?")
+    memory_id = store.remember("it is not", (), conversation_id)
+    assert store.neighbors([node("memory", memory_id)], ["formed_in"]) == [
+        node("conv", conversation_id)
+    ]
+
+
+def test_memories_come_back_newest_first(store):
+    first = store.remember("older")
+    second = store.remember("newer")
+    assert [m["id"] for m in store.memories()] == [second, first]
+
+
+def test_memories_written_in_the_same_second_still_order_deterministically(store):
+    """created_at is second-resolution, so a handful written in one breath tie.
+    The two stores ordered findings differently under exactly this condition
+    once already."""
+    ids = [store.remember(f"m{n}") for n in range(5)]
+    once = [m["id"] for m in store.memories()]
+    assert once == list(reversed(ids))
+    assert once == [m["id"] for m in store.memories()]
+
+
+def test_a_retired_memory_is_kept_with_its_reason(store):
+    memory_id = store.remember("the redirects are not worth fixing")
+    store.retire_memory(memory_id, "traffic changed the arithmetic")
+
+    assert store.memories() == []
+    (row,) = store.memories(include_retired=True)
+    assert row["id"] == memory_id
+    assert row["retired_at"]
+    assert row["retired_because"] == "traffic changed the arithmetic"
+
+
+def test_the_first_reason_for_retiring_a_memory_stands(store):
+    memory_id = store.remember("a thing we believed")
+    store.retire_memory(memory_id, "the first reason")
+    store.retire_memory(memory_id, "a later, vaguer reason")
+    assert store.memory(memory_id)["retired_because"] == "the first reason"
+
+
+def test_a_replacement_points_at_what_it_replaced(store):
+    """The retraction, remembered: "we thought X until Y" is worth more to the
+    next reader than a gap where X was."""
+    old = store.remember("the redirects are not worth fixing")
+    new = store.remember("the redirects cost us crawl budget now")
+    store.retire_memory(old, "traffic changed the arithmetic", superseded_by=new)
+
+    assert store.neighbors([node("memory", new)], [SUPERSEDES]) == [node("memory", old)]
+
+
+def test_retiring_a_memory_nobody_wrote_changes_nothing(store):
+    store.retire_memory(999, "for a reason that applies to nothing")
+    assert store.memories(include_retired=True) == []
+    assert store.memory(999) is None
+
+
+def test_a_memory_can_only_be_about_something_foreman_reasons_with(store):
+    with pytest.raises(ValueError, match="cannot be about"):
+        store.remember("a thought", ["skill|seo-audit"])

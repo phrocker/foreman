@@ -54,6 +54,30 @@ RAN = "ran"
 AUDITED = "audited"
 RAN_VIA = "ran_via"
 YIELDED = "yielded"
+# A memory and what it bears on, written both ways round. Forward reads as a
+# sentence — memory about rule — and the reverse is the whole point: "what do we
+# know about this project" has to be a walk from the project, not a scan of
+# every memory ever written. Same reasoning as SEEN_ON, which exists because the
+# outward walk cannot be run backwards.
+#
+# Deliberately not CONCERNS. That one points at the subjects a finding was
+# observed on — where it was seen — and a judgement bears on an entity rather
+# than being sighted at a URL. One relationship meaning both would make the kind
+# of a target the only way to tell which question was being asked.
+ABOUT = "about"
+REMEMBERS = "remembers"
+# Provenance: the exchange a memory was written out of, so "why do we believe
+# this" is a hop rather than an archaeology expedition through conversations.
+FORMED_IN = "formed_in"
+# The retraction, remembered. A memory that was simply deleted takes its reasons
+# with it; "we thought X until Y" is more useful than a silent gap, so the
+# replacement points at what it replaced.
+SUPERSEDES = "supersedes"
+
+# What a memory may be about. Narrow on purpose: these are the things Foreman
+# reasons about when it decides what to say, so a memory attached to anything
+# else could never surface at the moment it mattered.
+MEMORY_ABOUT = ("project", "rule", "finding")
 
 Edge = tuple[str, str, str]
 
@@ -113,6 +137,36 @@ def finding_edges(
         edges.append((finding_node, FOUND_BY, skill_node))
         edges.append((rule_node, FROM_SKILL, skill_node))
     edges.extend((finding_node, CONCERNS, node("subject", s)) for s in finding.subjects)
+    return edges
+
+
+def memory_edges(
+    memory_id: int, about: Iterable[str], conversation_id: int | None = None
+) -> list[Edge]:
+    """Everything a memory relates to, written when the memory is.
+
+    Both directions, because a memory is read from either end: from the memory
+    when you are looking at one, and from the project or rule when Foreman is
+    about to say something and needs to know what has already been decided about
+    it. Only the second is on a hot path, and it is the one a forward-only
+    traversal cannot answer.
+
+    A conversation node is `conv|<id>` rather than `conversation|<id>` because
+    the node id *is* the row id in the shoal store — spelling it the long way
+    would hang the edge off a row that holds no conversation.
+    """
+    memory = node("memory", memory_id)
+    edges: list[Edge] = []
+    for target in about:
+        if kind_of(target) not in MEMORY_ABOUT:
+            raise ValueError(
+                f"a memory cannot be about {target!r}: "
+                f"expected one of {', '.join(MEMORY_ABOUT)}"
+            )
+        edges.append((memory, ABOUT, target))
+        edges.append((target, REMEMBERS, memory))
+    if conversation_id is not None:
+        edges.append((memory, FORMED_IN, node("conv", conversation_id)))
     return edges
 
 

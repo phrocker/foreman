@@ -101,7 +101,7 @@ homepage shell. Foreman asks for URLs that should not exist and compares.
   Point it at a server of its own — sharing one with another application means
   sharing a table.
 
-  Both implementations are held to the same 42 parity tests, which drive an
+  Both implementations are held to the same 65 parity tests, which drive an
   identical sequence through each and compare what comes back. `foreman migrate`
   moves between them and speaks only the protocol, so it runs in either
   direction — being able to copy back is what makes the move reversible. It
@@ -151,6 +151,9 @@ foreman collect --collector render
 | `foreman approve` / `reject` | Decide one |
 | `foreman apply-eligible` | Apply what a class has earned under its policy |
 | `foreman ask "…"` | Ask about the portfolio; read-only |
+| `foreman remember "…"` | Record a judgement that should outlive one conversation |
+| `foreman memories` | What Foreman has been told to remember |
+| `foreman retire-memory` | Retire one that stopped being true, with the reason |
 | `foreman migrate shoal://…` | Copy this store into another one |
 | `foreman verify` | Ask each project's checks whether applied actions held up |
 | `foreman precision` | Which rules earn their findings |
@@ -334,15 +337,52 @@ ids the answer used. An answer with no references is an opinion, and the
 difference has to survive into storage. Those references are also the edges
 these conversations become once the store is a graph.
 
+## What it remembers
+
+A finding is a problem: derived from observation, re-derived every sweep, gone
+when it is fixed. A memory is a judgement that nothing observed can recompute —
+"`missing_security_header` is noise on the static marketing sites", "the
+anthropic majors are pinned deliberately, do not propose that bump again" —
+established once, at cost, in a conversation nobody is going to re-read.
+
+```bash
+foreman remember "missing_security_header is noise on the static marketing sites" \
+  --rule missing_security_header
+foreman memories
+foreman retire-memory 3 --because "it caught a real problem in September"
+```
+
+**They live in the graph, not in a list.** A memory is related to the projects,
+rules and findings it bears on — `memory -about-> rule`, with
+`rule -remembers-> memory` back the other way — so "what do we know that bears
+on this" is a walk from the thing itself. A judgement about a rule reaches a
+project that was never mentioned by name, which is the case worth having. It
+also keeps its provenance (`memory -formed_in-> conversation`), and every
+dispatched agent is handed the ones that bear on its project, at the top of its
+context pack, ahead of anything that expires.
+
+**Only you write one.** Chat may *propose* a memory the way it proposes an
+approval — as a button with a reason on it — for the same reason: an assistant
+that can quietly promote its own guesses to facts ends up measuring its own
+confidence. And a memory authorises nothing. It can say a rule is noise; it
+cannot raise a class past its approval threshold, because the trust ladder stays
+arithmetic over human decisions and a sentence is not a decision.
+
+**Retired, never deleted.** A wrong memory is worse than none, so retiring takes
+one line — but it takes a reason, and the replacement points back at what it
+replaced. "We thought X until Y" is worth more to the next reader than a gap
+where X used to be.
+
 ## The dashboard
 
 `foreman serve` reads `foreman.db` directly, so the page always shows the last
 run. It binds loopback only: the database names real client projects and one
 endpoint triggers crawls.
 
-Four tabs over the same data the CLI reads: **Findings**, **Actions**,
-**Drift** and **Rules**. Filter by severity, project or free text; click a
-finding for every affected subject; hit "Run sweep" for a live log.
+Six tabs over the same data the CLI reads: **Findings**, **Actions**,
+**Drift**, **History**, **Memory** and **Rules**. Filter by severity, project or
+free text; click a finding for every affected subject; hit "Run sweep" for a
+live log.
 
 The Rules tab carries the three ledgers behind an expensive decision: which
 backends can run an agent, what each skill has cost and returned, and how often

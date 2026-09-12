@@ -21,7 +21,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .graph import edges_for
+from .graph import SUPERSEDES, edges_for, memory_edges, node
 from .models import Event, Finding, Observation, utcnow
 
 DB_NAME = "foreman.db"
@@ -127,6 +127,19 @@ class Store(Protocol):
     ) -> int: ...
     def conversation(self, conversation_id: int) -> list[Record]: ...
     def conversations(self, limit: int = 20) -> list[Record]: ...
+
+    # --- memory ---
+    def remember(
+        self,
+        statement: str,
+        about: Sequence[str] = (),
+        conversation_id: int | None = None,
+    ) -> int: ...
+    def memory(self, memory_id: int) -> Record | None: ...
+    def memories(self, include_retired: bool = False) -> list[Record]: ...
+    def retire_memory(
+        self, memory_id: int, because: str, superseded_by: int | None = None
+    ) -> None: ...
 
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
@@ -306,6 +319,25 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages (conversation_id, created_at);
+
+-- Durable judgements: what was learned, as against what is wrong. A finding is
+-- derived from observation and stops existing when the thing is fixed; nothing
+-- observed makes a memory true and no sweep can recompute one, so it lasts until
+-- somebody retires it. Retired rather than deleted, with a reason, because a
+-- memory that vanished takes its reasons with it.
+--
+-- The row holds only the statement. What a memory is *about* — the projects,
+-- rules and findings it bears on, and the conversation it came out of — is
+-- edges, so "what do we know about this project" is a walk rather than a search
+-- through text nobody can traverse.
+CREATE TABLE IF NOT EXISTS memories (
+    id              INTEGER PRIMARY KEY,
+    statement       TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    retired_at      TEXT,
+    retired_because TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memories_open ON memories (retired_at, created_at);
 
 -- Relationships between entities, written when the facts are so they can be
 -- walked rather than rediscovered. Node ids are "<kind>|<key>"; the shoal
@@ -888,6 +920,57 @@ class SqliteStore:
             "ELSE 2 END, found_at, id"
         )
         return _many(self._db.execute(sql, params))
+
+    # --- memory -----------------------------------------------------------
+
+    def remember(
+        self,
+        statement: str,
+        about: Sequence[str] = (),
+        conversation_id: int | None = None,
+    ) -> int:
+        """Record a durable judgement and relate it to what it bears on."""
+        cur = self._db.execute(
+            "INSERT INTO memories (statement, created_at) VALUES (?, ?)",
+            (statement, utcnow()),
+        )
+        self._db.commit()
+        memory_id = int(cur.lastrowid)
+        self.relate(memory_edges(memory_id, about, conversation_id))
+        return memory_id
+
+    def memory(self, memory_id: int) -> Record | None:
+        return _one(
+            self._db.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        )
+
+    def memories(self, include_retired: bool = False) -> list[Record]:
+        """Newest first: a memory list reads as the decisions in the order taken."""
+        sql = "SELECT * FROM memories"
+        if not include_retired:
+            sql += " WHERE retired_at IS NULL"
+        # id last, always: created_at is second-resolution, so two memories
+        # written in one breath would otherwise order arbitrarily.
+        return _many(self._db.execute(sql + " ORDER BY created_at DESC, id DESC"))
+
+    def retire_memory(self, memory_id: int, because: str, superseded_by: int | None = None) -> None:
+        """Stop believing something, on the record.
+
+        The first retirement stands. Re-retiring would overwrite the reason with
+        whatever the second caller happened to think, and the reason is the part
+        worth keeping — a memory nobody can explain the retirement of is a gap
+        wearing a timestamp.
+        """
+        row = self.memory(memory_id)
+        if row is None or row["retired_at"]:
+            return
+        self._db.execute(
+            "UPDATE memories SET retired_at = ?, retired_because = ? WHERE id = ?",
+            (utcnow(), because, memory_id),
+        )
+        self._db.commit()
+        if superseded_by is not None:
+            self.relate([(node("memory", superseded_by), SUPERSEDES, node("memory", memory_id))])
 
     # --- graph ------------------------------------------------------------
 

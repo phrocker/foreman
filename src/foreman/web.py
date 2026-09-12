@@ -23,7 +23,8 @@ from .config import load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import project_drift
-from .graph import SEEN_ON, key_of, node
+from .graph import MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
+from .memory import describe
 from .models import utcnow
 from .precision import label as precision_label
 from .precision import rank, rule_scores
@@ -40,6 +41,19 @@ from .skills import label as skill_label
 from .store import Store, open_store
 
 STATIC = Path(__file__).parent / "static"
+
+
+def _proposed(reply: Any) -> list[dict[str, Any]]:
+    """Memories the model offered, as buttons the operator may press.
+
+    A proposal, never a write, for the same reason an approval is. One it
+    attached to something untraversable loses that attachment rather than the
+    whole memory: a button that 400s is worse than no button.
+    """
+    return [
+        {**m.model_dump(), "about": [a for a in m.about if kind_of(a) in MEMORY_ABOUT]}
+        for m in reply.remember
+    ]
 
 
 @dataclass
@@ -417,6 +431,63 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         finally:
             s.close()
 
+    @app.get("/api/memories")
+    def list_memories(include_retired: bool = Query(True)) -> list[dict[str, Any]]:
+        """Durable judgements, retired ones included by default.
+
+        Retired by default because this is the page where a memory is argued
+        with, and "we thought X until Y" is the part a reader needs most. The
+        context pack takes the opposite default, for the same reason.
+        """
+        s = store()
+        try:
+            return describe(s, s.memories(include_retired=include_retired))
+        finally:
+            s.close()
+
+    @app.post("/api/memories")
+    def write_memory(payload: dict[str, Any]) -> dict[str, Any]:
+        """Record a memory. The operator's write — chat only ever proposes one."""
+        statement = (payload.get("statement") or "").strip()
+        if not statement:
+            raise HTTPException(400, "statement is required")
+        about = payload.get("about") or []
+        if not isinstance(about, list) or any(not isinstance(a, str) for a in about):
+            raise HTTPException(400, "about must be a list of node ids")
+        bad = [a for a in about if kind_of(a) not in MEMORY_ABOUT]
+        if bad:
+            raise HTTPException(
+                400, f"a memory cannot be about {bad[0]!r}: expected one of {MEMORY_ABOUT}"
+            )
+        conversation = payload.get("conversation_id")
+        s = store()
+        try:
+            memory_id = s.remember(statement, about, conversation)
+        finally:
+            s.close()
+        return {"id": memory_id}
+
+    @app.post("/api/memories/{memory_id}/retire")
+    def retire_memory(memory_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Stop believing something, with the reason attached.
+
+        A reason is required rather than encouraged: a memory retired without
+        one is a gap wearing a timestamp, and the next reader cannot tell
+        whether it was wrong or merely inconvenient.
+        """
+        because = (payload.get("because") or "").strip()
+        if not because:
+            raise HTTPException(400, "a reason is required to retire a memory")
+        superseded_by = payload.get("superseded_by")
+        s = store()
+        try:
+            if s.memory(memory_id) is None:
+                raise HTTPException(404, "no such memory")
+            s.retire_memory(memory_id, because, superseded_by)
+        finally:
+            s.close()
+        return {"retired": memory_id}
+
     @app.post("/api/chat")
     async def chat(payload: dict[str, Any]) -> dict[str, Any]:
         question = (payload.get("message") or "").strip()
@@ -443,6 +514,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # Suggestions arrive as buttons, never as writes. Approval stays the
             # operator's, which is the whole point of the ledger.
             "suggest": [sg.model_dump() for sg in reply.suggest],
+            # Likewise a proposal, and the operator presses the button.
+            "remember": _proposed(reply),
             "cost_usd": cost,
         }
 
@@ -489,6 +562,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                                 "reply": reply.reply,
                                 "refs": reply.refs,
                                 "suggest": [su.model_dump() for su in reply.suggest],
+                                "remember": _proposed(reply),
                                 "cost_usd": cost,
                             },
                         )

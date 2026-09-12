@@ -12,9 +12,10 @@ what the agent actually looked at. And a connector with no tools — which is mo
 of them — cannot fetch anything at all, so assembling is what keeps a task
 portable instead of welded to one harness.
 
-Five things go in, and each answers a question that otherwise costs money to
+Six things go in, and each answers a question that otherwise costs money to
 rediscover:
 
+- what has already been decided, so a settled question is not re-opened
 - what is already known about this project, so it is not re-reported
 - what siblings found elsewhere, so one agent's conclusion is another's starting
   point rather than a second full-price discovery
@@ -29,6 +30,7 @@ from collections.abc import Sequence
 
 from .diff import drift_since
 from .graph import FROM_RULE, FROM_SKILL, HAS_FINDING, SEEN_ON, key_of, kind_of, node
+from .memory import recall
 from .precision import label as precision_label
 from .precision import rule_scores
 from .store import Store
@@ -37,6 +39,20 @@ from .store import Store
 SIBLING_RULES = 12
 DRIFT_LINES = 15
 NOTHING = "  (nothing)"
+
+
+def _decided(store: Store, project_id: str) -> str:
+    """Durable judgements bearing on this project, walked from the project.
+
+    Never truncated, unlike everything else here. The rest of the pack is
+    evidence and a sample of it is still evidence; this is standing
+    instruction, and the one dropped for length is the one that told the agent
+    not to do the thing it is about to do.
+    """
+    memories = recall(store, project_id)
+    if not memories:
+        return NOTHING
+    return "\n".join(f"  - {row['statement']}" for row in memories)
 
 
 def _known(store: Store, project_id: str) -> str:
@@ -122,7 +138,17 @@ def _changed(store: Store, project_id: str, since: str | None) -> str:
     return "\n".join(lines)
 
 
-TEMPLATE = """## Already known about {project_id}
+TEMPLATE = """## What has already been decided
+
+Durable judgements the operator recorded, each of which outlived the exchange
+that produced it. They are standing instructions: where one of these disagrees
+with anything below, it wins, and re-opening a settled question costs everyone
+the argument twice. What they cannot do is authorise anything — approval is the
+operator's and is counted from decisions, never from a sentence:
+
+{decided}
+
+## Already known about {project_id}
 
 Foreman runs cheap deterministic checks against this project and records what
 they find. Do not re-report these, and do not spend time re-verifying them:
@@ -170,6 +196,7 @@ def audit_pack(
     """
     return TEMPLATE.format(
         project_id=project_id,
+        decided=_decided(store, project_id),
         known=_known(store, project_id),
         siblings=_siblings(store, project_id, siblings),
         dismissed=_dismissed(store),
