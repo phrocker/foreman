@@ -80,7 +80,7 @@ def _render(entries: list[tuple[str, str]]) -> str:
             f"    open-pull-requests-limit: {PR_LIMIT}",
             "    groups:",
             f"      {group}:",
-            '        patterns:',
+            "        patterns:",
             '          - "*"',
         ]
     return "\n".join(lines) + "\n"

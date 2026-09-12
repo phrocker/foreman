@@ -22,7 +22,31 @@ from typing import Any, Protocol, runtime_checkable
 
 from .models import Finding, Observation, utcnow
 
-DEFAULT_DB = Path("foreman.db")
+DB_NAME = "foreman.db"
+DEFAULT_DB = Path(DB_NAME)
+
+
+def default_db() -> Path:
+    """The store beside the registry, not beside wherever you happen to stand.
+
+    A relative default meant `foreman serve` from a stray directory created an
+    empty database and rendered an empty dashboard, with nothing to say it was
+    looking in the wrong place.
+    """
+    from .config import REGISTRY_NAME, find_registry
+
+    registry = find_registry()
+    if registry is None:
+        # Falling back to the working directory is what created an empty store
+        # in whatever directory you happened to be in, and then reported a clean
+        # portfolio from it.
+        raise FileNotFoundError(
+            f"no {REGISTRY_NAME} here or in any parent directory, so there is no "
+            "store to open. Run `foreman init` in your projects directory, or "
+            "pass --db."
+        )
+    return registry.parent / DB_NAME
+
 
 # One row as it crosses the boundary. Deliberately not a driver type: sqlite3.Row
 # supports [] access, so it reads like a dict right up until a second
@@ -78,6 +102,19 @@ class Store(Protocol):
     ) -> None: ...
     def unverified_actions(self, project: str | None = None) -> list[Record]: ...
     def class_stats(self, class_key: str, patch_digest: str | None = None) -> dict[str, int]: ...
+
+    # --- conversations ---
+    def start_conversation(self, title: str | None = None) -> int: ...
+    def add_message(
+        self,
+        conversation_id: int,
+        role: str,
+        content: str,
+        refs: dict[str, Any] | None = None,
+        cost_usd: float | None = None,
+    ) -> int: ...
+    def conversation(self, conversation_id: int) -> list[Record]: ...
+    def conversations(self, limit: int = 20) -> list[Record]: ...
 
 
 def open_store(path: Path | None = None) -> Store:
@@ -175,6 +212,32 @@ CREATE INDEX IF NOT EXISTS idx_actions_open ON actions (project, decision);
 -- every sweep would inflate the ledger and make the counts meaningless.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_pending
     ON actions (project, class_key, patch_digest) WHERE decision IS NULL;
+
+-- Conversations about the portfolio. Stored rather than ephemeral because what
+-- was asked, and what it was answered from, is itself knowledge — "we decided
+-- not to bother with that in March, here is why" is not recoverable from the
+-- findings table.
+CREATE TABLE IF NOT EXISTS conversations (
+    id         INTEGER PRIMARY KEY,
+    title      TEXT,
+    started_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL,   -- user | assistant
+    content         TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    -- What this turn was grounded in: {"findings": [...], "actions": [...],
+    -- "projects": [...]}. An answer with no references is an opinion, and the
+    -- difference has to survive into storage. Under the graph these become
+    -- edges from the turn to the evidence it rests on.
+    refs            TEXT NOT NULL DEFAULT '{}',
+    cost_usd        REAL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation
+    ON messages (conversation_id, created_at);
 """
 
 
@@ -492,6 +555,60 @@ class SqliteStore:
             sql += " AND project = ?"
             params = (project,)
         return _many(self._db.execute(sql + " ORDER BY applied_at", params))
+
+    # --- conversations -----------------------------------------------------
+
+    def start_conversation(self, title: str | None = None) -> int:
+        cur = self._db.execute(
+            "INSERT INTO conversations (title, started_at) VALUES (?, ?)",
+            (title, utcnow()),
+        )
+        self._db.commit()
+        return int(cur.lastrowid)
+
+    def add_message(
+        self,
+        conversation_id: int,
+        role: str,
+        content: str,
+        refs: dict[str, Any] | None = None,
+        cost_usd: float | None = None,
+    ) -> int:
+        cur = self._db.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at, refs, cost_usd) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                conversation_id,
+                role,
+                content,
+                utcnow(),
+                json.dumps(refs or {}, sort_keys=True),
+                cost_usd,
+            ),
+        )
+        self._db.commit()
+        return int(cur.lastrowid)
+
+    def conversation(self, conversation_id: int) -> list[Record]:
+        return _many(
+            self._db.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id",
+                (conversation_id,),
+            )
+        )
+
+    def conversations(self, limit: int = 20) -> list[Record]:
+        return _many(
+            self._db.execute(
+                "SELECT c.*, COUNT(m.id) AS turns, MAX(m.created_at) AS last_at "
+                "FROM conversations c LEFT JOIN messages m ON m.conversation_id = c.id "
+                # id DESC breaks the tie: timestamps are second-resolution, so
+                # two conversations started in the same second would otherwise
+                # order arbitrarily.
+                "GROUP BY c.id ORDER BY COALESCE(last_at, c.started_at) DESC, c.id DESC " "LIMIT ?",
+                (limit,),
+            )
+        )
 
     def class_stats(self, class_key: str, patch_digest: str | None = None) -> dict[str, int]:
         """Approval record for one equivalence class.

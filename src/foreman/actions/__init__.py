@@ -41,6 +41,7 @@ def __getattr__(name: str) -> object:
         return _ops()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+
 # The condition under which a class stops needing a human. Stored as text and
 # evaluated deterministically, so the rule that governs automation is itself
 # auditable — and can be tightened without touching code.
@@ -74,9 +75,7 @@ class ActionProposal:
 
     def still_applies(self, project: Project) -> tuple[bool, str | None]:
         """Re-evaluate the BECAUSE clause against the world as it is now."""
-        return precondition_holds(
-            self.statement, _ops()[self.verb].state(project, self.params)
-        )
+        return precondition_holds(self.statement, _ops()[self.verb].state(project, self.params))
 
     def auto_eligible(self, **stats: int) -> bool:
         """Whether this action's own policy clause is satisfied by its class.

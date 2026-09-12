@@ -123,6 +123,7 @@ foreman collect --collector render
 | `foreman actions` | Pending actions, each with its class's record |
 | `foreman approve` / `reject` | Decide one |
 | `foreman apply-eligible` | Apply what a class has earned under its policy |
+| `foreman ask "…"` | Ask about the portfolio; read-only |
 | `foreman verify` | Ask each project's checks whether applied actions held up |
 | `foreman precision` | Which rules earn their findings |
 | `foreman serve` | Dashboard on loopback (default `:8765`) |
@@ -231,6 +232,29 @@ moving 604ms to 640ms is noise, and a report that fires every night is a report
 you stop reading — that is the failure mode worth designing out, not the missed
 36ms. A certificate counting down one day at a time is likewise not news; a
 renewal is.
+
+## Asking it things
+
+```bash
+foreman ask "what are the two most important things for me to do today?"
+```
+
+Same thing in the dashboard's Chat tab. The whole portfolio state — projects,
+open findings, pending actions with their class evidence, rule precision — is a
+few thousand tokens, so it is assembled and handed over rather than offered as
+tools to go and fetch. That costs one round trip and removes every question
+about what it actually looked at.
+
+**It cannot approve anything.** Actions are yours, and the ledger exists to make
+that decision well-founded rather than to delegate it. An assistant able to
+approve its own suggestions would make the approval record measure its own
+confidence instead of yours. It can *suggest* one and say why; the suggestion
+arrives as a button.
+
+Every turn is stored with what it rested on — the finding, action and project
+ids the answer used. An answer with no references is an opinion, and the
+difference has to survive into storage. Those references are also the edges
+these conversations become once the store is a graph.
 
 ## The dashboard
 

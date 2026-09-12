@@ -20,7 +20,24 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-DEFAULT_REGISTRY = Path("foreman.yaml")
+REGISTRY_NAME = "foreman.yaml"
+DEFAULT_REGISTRY = Path(REGISTRY_NAME)
+
+
+def find_registry(start: Path | None = None) -> Path | None:
+    """Walk up from `start` looking for foreman.yaml, the way git finds a repo.
+
+    Without this, running Foreman from anywhere but the project directory
+    silently created an empty database in the current one and reported that
+    nothing needed attention — which is indistinguishable from a clean
+    portfolio, and the more dangerous of the two to be told.
+    """
+    here = (start or Path.cwd()).resolve()
+    for directory in (here, *here.parents):
+        candidate = directory / REGISTRY_NAME
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 class WebSurface(BaseModel):
@@ -161,7 +178,12 @@ class Registry(BaseModel):
 
 
 def load_registry(path: Path | None = None) -> Registry:
-    path = path or DEFAULT_REGISTRY
+    path = path or find_registry()
+    if path is None:
+        raise FileNotFoundError(
+            f"no {REGISTRY_NAME} here or in any parent directory. Run `foreman init` "
+            "in your projects directory, or pass --registry."
+        )
     if not path.exists():
         raise FileNotFoundError(
             f"{path} not found. Copy foreman.example.yaml to {path} and add your projects."

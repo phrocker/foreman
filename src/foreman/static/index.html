@@ -227,6 +227,23 @@
   .was { color: var(--high); }
   .now { color: var(--good); }
 
+  /* Chat */
+  #chatLog { max-height: 440px; overflow-y: auto; }
+  .turn { padding: 13px 16px; border-bottom: 1px solid var(--border); }
+  .turn:last-child { border-bottom: none; }
+  .turn-role { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em;
+               color: var(--text-3); margin-bottom: 5px; }
+  .turn.user { background: var(--surface-alt); }
+  .turn-body { white-space: pre-wrap; max-width: 70ch; }
+  /* Provenance, again: an answer with no references is an opinion, and the
+     reader has to be able to see which kind they were given. */
+  .turn-refs { margin-top: 9px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .ref { font-size: 11.5px; padding: 1px 8px; border-radius: 999px;
+         border: 1px solid var(--border-firm); color: var(--text-3); }
+  .suggests { margin-top: 11px; display: flex; flex-direction: column; gap: 8px; }
+  .suggest { display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
+             font-size: 13px; color: var(--text-2); }
+
   /* Precision */
   .rule-row { padding: 11px 16px; border-bottom: 1px solid var(--border); }
   .rule-row:last-child { border-bottom: none; }
@@ -268,6 +285,7 @@
     <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
     <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
     <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
+    <button class="tab" data-tab="chat"     role="tab" aria-selected="false">Chat</button>
   </nav>
 
   <section id="panel-findings" role="tabpanel">
@@ -304,6 +322,15 @@
 
   <section id="panel-rules" role="tabpanel" hidden>
     <div class="panel scroll"><div id="precisionList"></div></div>
+  </section>
+
+  <section id="panel-chat" role="tabpanel" hidden>
+    <div class="panel"><div id="chatLog"></div></div>
+    <form id="chatForm" class="filters" style="margin-top:12px">
+      <input type="search" id="chatInput" placeholder="Ask about the portfolio…  e.g. what needs me today?" autocomplete="off">
+      <button class="primary" id="chatSend" type="submit">Ask</button>
+    </form>
+    <div class="hint" style="margin-top:6px">Read-only. It can suggest an approval; only you can grant one.</div>
   </section>
 </div>
 
@@ -354,6 +381,7 @@ async function load() {
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
     ["drift", renderDrift], ["rules", renderPrecision], ["counts", renderCounts],
+    ["chat", () => renderChat(false)],
   ]) {
     try {
       render();
@@ -621,13 +649,78 @@ runBtn.addEventListener("click", async () => {
   poll();
 });
 
+// --- chat ------------------------------------------------------------------
+
+let conversationId = null;
+const turns = [];
+
+function renderChat(pending) {
+  const log = $("chatLog");
+  if (!turns.length && !pending) {
+    log.innerHTML =
+      '<div class="empty">Ask about findings, drift, which rules earn their keep, or what is worth approving.</div>';
+    return;
+  }
+  log.innerHTML = turns.map((t) => {
+    const refs = Object.entries(t.refs || {})
+      .filter(([, v]) => v && v.length)
+      .map(([k, v]) => `<span class="ref">${esc(k)}: ${v.map(esc).join(", ")}</span>`)
+      .join("");
+    const suggests = (t.suggest || []).map((sg) =>
+      `<div class="suggest"><span>#${sg.action_id} — ${esc(sg.why || sg.decision)}</span>
+        <button class="primary sg-approve" data-id="${sg.action_id}">Approve &amp; apply</button>
+        <button class="sg-reject" data-id="${sg.action_id}">Reject</button></div>`).join("");
+    return `<div class="turn ${esc(t.role)}">
+      <div class="turn-role">${t.role === "user" ? "you" : "foreman"}</div>
+      <div class="turn-body">${esc(t.content)}</div>
+      ${refs ? `<div class="turn-refs">${refs}</div>` : ""}
+      ${suggests ? `<div class="suggests">${suggests}</div>` : ""}
+    </div>`;
+  }).join("") + (pending ? '<div class="turn"><div class="turn-role">foreman</div><div class="turn-body">…</div></div>' : "");
+  log.scrollTop = log.scrollHeight;
+
+  // A suggestion is a button, never a write. The model proposes; you dispose.
+  log.querySelectorAll(".sg-approve").forEach((b) =>
+    b.addEventListener("click", () => decide(b.dataset.id, "approve")));
+  log.querySelectorAll(".sg-reject").forEach((b) =>
+    b.addEventListener("click", () => decide(b.dataset.id, "reject")));
+}
+
+$("chatForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("chatInput");
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = "";
+  turns.push({ role: "user", content: message });
+  $("chatSend").disabled = true;
+  renderChat(true);
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, conversation_id: conversationId }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || `failed with ${res.status}`);
+    conversationId = body.conversation_id;
+    turns.push({ role: "assistant", content: body.reply, refs: body.refs, suggest: body.suggest });
+  } catch (err) {
+    turns.push({ role: "assistant", content: `Could not answer: ${err.message}` });
+  } finally {
+    $("chatSend").disabled = false;
+    renderChat(false);
+  }
+});
+
 // --- tabs ------------------------------------------------------------------
 
 function showTab(name) {
   state.tab = name;
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute("aria-selected", String(t.dataset.tab === name)));
-  for (const panel of ["findings", "actions", "drift", "rules"]) {
+  for (const panel of ["findings", "actions", "drift", "rules", "chat"]) {
     $("panel-" + panel).hidden = panel !== name;
   }
   try { localStorage.setItem("foreman-tab", name); } catch {}

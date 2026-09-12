@@ -15,6 +15,7 @@ from .actions import Stale
 from .actions.sagform import policy_allows
 from .audit import DEFAULT_SKILL, AuditError, run_audit
 from .budget import Budget
+from .chat import ChatError, ask
 from .collectors import COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
 from .diff import Kind, project_drift
@@ -28,7 +29,7 @@ from .runner import (
     reject_action,
     verify_applied,
 )
-from .store import DEFAULT_DB, open_store
+from .store import default_db, open_store
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
 console = Console()
@@ -84,7 +85,7 @@ def collect(
         raise typer.BadParameter(f"unknown collector {collector!r} (have: {', '.join(COLLECTORS)})")
 
     async def run() -> None:
-        with open_store(db or DEFAULT_DB) as store:
+        with open_store(db or default_db()) as store:
             total = await collect_all(
                 reg,
                 store,
@@ -105,7 +106,7 @@ def check(
 ) -> None:
     """Evaluate the deterministic rules against the latest snapshot."""
     reg = load_registry(registry)
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         check_all(reg, store, project=project, log=lambda m: console.print(f"[bold]{m}[/]"))
         for row in store.open_findings(project):
             style = SEVERITY_STYLE.get(row["severity"], "")
@@ -120,7 +121,7 @@ def status(
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """What needs attention, across the whole portfolio."""
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         rows = store.open_findings(project)
     if not rows:
         console.print("[green]Nothing open.[/]")
@@ -160,7 +161,7 @@ def audit(
     budget = Budget(limit_usd=budget_usd)
 
     async def run() -> None:
-        with open_store(db or DEFAULT_DB) as store:
+        with open_store(db or default_db()) as store:
             for target in targets:
                 if budget.remaining <= 0:
                     console.print(
@@ -201,7 +202,7 @@ def diff(
     names = [collector] if collector else list(COLLECTORS)
     quiet = True
 
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         for target in targets:
             for name in names:
                 changes, newest, previous = project_drift(store, target.id, name)
@@ -253,7 +254,7 @@ def actions(
 ) -> None:
     """Pending actions, each with the approval record of its class."""
     reg = load_registry(registry)
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         if propose:
             found = propose_actions(reg, store, project=project)
             console.print(f"[dim]{found} new proposal(s).[/]\n")
@@ -321,7 +322,7 @@ def approve(
 ) -> None:
     """Approve and apply one action."""
     reg = load_registry(registry)
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         try:
             written = apply_action(reg, store, action_id)
         except Stale as exc:
@@ -337,7 +338,7 @@ def reject(
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """Reject an action, and by default dismiss the finding behind it."""
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         reject_action(store, action_id, dismiss_finding=not keep)
     console.print("[dim]Rejected.[/]")
 
@@ -356,7 +357,7 @@ def apply_eligible_cmd(
     automation never becomes evidence for more automation.
     """
     reg = load_registry(registry)
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         applied, skipped = apply_eligible(
             reg,
             store,
@@ -388,7 +389,7 @@ def verify(
     reg = load_registry(registry)
 
     async def run() -> None:
-        with open_store(db or DEFAULT_DB) as store:
+        with open_store(db or default_db()) as store:
             good, bad = await verify_applied(
                 reg, store, project=project, log=lambda m: console.print(f"  {m}")
             )
@@ -403,7 +404,7 @@ def verify(
 @app.command()
 def precision(db: Path = typer.Option(None, "--db")) -> None:
     """How often each rule's findings were acted on rather than dismissed."""
-    with open_store(db or DEFAULT_DB) as store:
+    with open_store(db or default_db()) as store:
         rows = store.rule_precision()
     if not rows:
         console.print(
@@ -428,6 +429,45 @@ def precision(db: Path = typer.Option(None, "--db")) -> None:
     console.print(table)
 
 
+@app.command(name="ask")
+def ask_cmd(
+    question: str = typer.Argument(..., help="What to ask about the portfolio."),
+    conversation: int = typer.Option(None, "--conversation", "-c", help="Continue one."),
+    model: str = typer.Option(None, "--model"),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Ask Foreman about the portfolio.
+
+    Read-only. It can suggest an approval and say why; granting one is yours.
+    """
+    reg = load_registry(registry)
+
+    async def run() -> None:
+        with open_store(db or default_db()) as store:
+            try:
+                conversation_id, reply, cost = await ask(
+                    store, reg, question, conversation, model=model
+                )
+            except ChatError as exc:
+                console.print(f"[red]{exc}[/]")
+                raise typer.Exit(1) from None
+
+        console.print(reply.reply)
+        refs = {k: v for k, v in reply.refs.items() if v}
+        if refs:
+            joined = " · ".join(f"{k}: {', '.join(map(str, v))}" for k, v in refs.items())
+            console.print(f"\n[dim]grounded in — {joined}[/]")
+        for suggestion in reply.suggest:
+            console.print(
+                f"[yellow]suggests[/] foreman {suggestion.decision} {suggestion.action_id}"
+                f" — {suggestion.why}"
+            )
+        console.print(f"\n[dim]conversation {conversation_id} · ${cost:.3f}[/]")
+
+    asyncio.run(run())
+
+
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host"),
@@ -442,7 +482,7 @@ def serve(
     from .web import create_app
 
     console.print(f"[bold]Foreman[/] → [link]http://{host}:{port}[/]")
-    uvicorn.run(create_app(registry, db or DEFAULT_DB), host=host, port=port, log_level="warning")
+    uvicorn.run(create_app(registry, db or default_db()), host=host, port=port, log_level="warning")
 
 
 def main() -> None:

@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 
 from .actions import Stale
 from .actions.sagform import policy_allows
+from .chat import ChatError, ask
 from .collectors import COLLECTORS
 from .config import load_registry
 from .diff import project_drift
@@ -30,7 +31,7 @@ from .runner import (
     propose_actions,
     reject_action,
 )
-from .store import DEFAULT_DB, Store, open_store
+from .store import Store, default_db, open_store
 
 STATIC = Path(__file__).parent / "static"
 
@@ -63,7 +64,7 @@ class Job:
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
-    db = db_path or DEFAULT_DB
+    db = db_path or default_db()
     job = Job()
 
     def store() -> Store:
@@ -246,6 +247,50 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             return [dict(row) for row in s.rule_precision()]
         finally:
             s.close()
+
+    @app.get("/api/conversations")
+    def list_conversations() -> list[dict[str, Any]]:
+        s = store()
+        try:
+            return [dict(r) for r in s.conversations()]
+        finally:
+            s.close()
+
+    @app.get("/api/conversations/{conversation_id}")
+    def read_conversation(conversation_id: int) -> list[dict[str, Any]]:
+        s = store()
+        try:
+            return [
+                {**dict(m), "refs": json.loads(m["refs"] or "{}")}
+                for m in s.conversation(conversation_id)
+            ]
+        finally:
+            s.close()
+
+    @app.post("/api/chat")
+    async def chat(payload: dict[str, Any]) -> dict[str, Any]:
+        question = (payload.get("message") or "").strip()
+        if not question:
+            raise HTTPException(400, "message is required")
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            conversation_id, reply, cost = await ask(
+                s, registry, question, payload.get("conversation_id")
+            )
+        except ChatError as exc:
+            raise HTTPException(502, str(exc)) from None
+        finally:
+            s.close()
+        return {
+            "conversation_id": conversation_id,
+            "reply": reply.reply,
+            "refs": {k: v for k, v in reply.refs.items() if v},
+            # Suggestions arrive as buttons, never as writes. Approval stays the
+            # operator's, which is the whole point of the ledger.
+            "suggest": [sg.model_dump() for sg in reply.suggest],
+            "cost_usd": cost,
+        }
 
     @app.get("/api/run")
     def run_status() -> dict[str, Any]:
