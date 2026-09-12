@@ -3,7 +3,7 @@ import pytest
 from foreman.actions import Stale
 from foreman.config import Project, Registry
 from foreman.runner import apply_action, propose_actions, reject_action
-from foreman.store import Store
+from foreman.store import SqliteStore
 
 BLOCKING = """User-agent: *
 Allow: /
@@ -22,7 +22,7 @@ def make_project(root, name="p"):
 def world(tmp_path):
     project = make_project(tmp_path)
     registry = Registry(projects=[project])
-    store = Store(tmp_path / "t.db")
+    store = SqliteStore(tmp_path / "t.db")
     store.connect()
     run_id = store.start_run(project.id, "crawl")
     store.finish_run(run_id, ok=True)
@@ -118,7 +118,7 @@ def test_evidence_accumulates_across_projects_in_one_class(tmp_path):
 
     projects = [make_project(tmp_path, f"p{i}") for i in range(10)]
     registry = Registry(projects=projects)
-    with Store(tmp_path / "t.db") as store:
+    with SqliteStore(tmp_path / "t.db") as store:
         for project in projects:
             run_id = store.start_run(project.id, "crawl")
             store.finish_run(run_id, ok=True)

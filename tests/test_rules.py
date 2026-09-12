@@ -89,9 +89,9 @@ def test_project_summary_does_not_multiply_by_run_count(tmp_path):
     """Regression: rolling findings up across a join on `runs` counted each
     finding once per run, so per-project totals grew every sweep."""
     from foreman.models import Finding, Severity
-    from foreman.store import Store
+    from foreman.store import SqliteStore
 
-    with Store(tmp_path / "t.db") as store:
+    with SqliteStore(tmp_path / "t.db") as store:
         run_ids = []
         for _ in range(5):  # five sweeps of the same site
             run_id = store.start_run("s1", "crawl")

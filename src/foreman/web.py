@@ -30,7 +30,7 @@ from .runner import (
     propose_actions,
     reject_action,
 )
-from .store import DEFAULT_DB, Store
+from .store import DEFAULT_DB, Store, open_store
 
 STATIC = Path(__file__).parent / "static"
 
@@ -67,9 +67,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     job = Job()
 
     def store() -> Store:
-        s = Store(db)
-        s.connect()
-        return s
+        return open_store(db)
 
     @app.get("/")
     def index() -> FileResponse:

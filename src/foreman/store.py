@@ -1,9 +1,15 @@
-"""Timestamped observation store.
+"""Persistence: the Store protocol, and its SQLite implementation.
 
-SQLite on purpose: this is single-operator, single-machine state. Postgres buys
-concurrent writers you do not have and costs you a daemon you would have to keep
-alive on a laptop. If the queue layer ever lands and workers need shared state,
-that is the moment to revisit — not before.
+The protocol exists because the substrate is not settled. Foreman's observation
+model turned out to be a cell store reinvented in SQL — project and subject are
+a row, the collector a column family, the key a column qualifier, and
+observed_at a cell timestamp — so moving it onto one is a real prospect rather
+than a hypothetical. What makes that affordable is that nothing outside this
+module knows which store it is talking to.
+
+Two rules keep it that way, and both were broken before this existed: no caller
+reaches for a connection, and no caller sees a driver's row type. Records cross
+this boundary as plain dicts.
 """
 
 from __future__ import annotations
@@ -12,10 +18,70 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 from .models import Finding, Observation, utcnow
 
 DEFAULT_DB = Path("foreman.db")
+
+# One row as it crosses the boundary. Deliberately not a driver type: sqlite3.Row
+# supports [] access, so it reads like a dict right up until a second
+# implementation returns something that is not one.
+Record = dict[str, Any]
+
+
+@runtime_checkable
+class Store(Protocol):
+    """Everything Foreman asks of a store.
+
+    Grouped by what it is for rather than by table: runs and observations are
+    the observation plane, findings and actions the decision plane. A second
+    implementation may well split those across two differently-shaped tables —
+    scan-and-aggregate for one, point-lookup for the other — and this interface
+    is what lets it.
+    """
+
+    def connect(self) -> None: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> Store: ...
+    def __exit__(self, *exc: object) -> None: ...
+
+    # --- observation plane ---
+    def start_run(self, project: str, collector: str) -> int: ...
+    def finish_run(self, run_id: int, ok: bool = True, error: str | None = None) -> None: ...
+    def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]: ...
+    def record(self, run_id: int, observations: Iterable[Observation]) -> int: ...
+    def run_observations(self, run_id: int) -> list[Record]: ...
+
+    # --- decision plane ---
+    def record_findings(
+        self, run_id: int, findings: Iterable[Finding], source: str = "rule"
+    ) -> int: ...
+    def retire_rule_findings(self, project: str) -> int: ...
+
+    def finding(self, finding_id: int) -> Record | None: ...
+    def open_findings(self, project: str | None = None) -> list[Record]: ...
+    def set_finding_outcome(self, finding_id: int, outcome: str) -> None: ...
+    def rule_precision(self) -> list[Record]: ...
+    def project_summary(self) -> list[Record]: ...
+
+    # --- action ledger ---
+    def record_proposal(self, **fields: Any) -> int | None: ...
+    def action(self, action_id: int) -> Record | None: ...
+    def pending_actions(self, project: str | None = None) -> list[Record]: ...
+    def decide_action(self, action_id: int, decision: str, decided_by: str = "human") -> None: ...
+    def record_application(
+        self, action_id: int, outcome: str, error: str | None = None
+    ) -> None: ...
+    def class_stats(self, class_key: str, patch_digest: str | None = None) -> dict[str, int]: ...
+
+
+def open_store(path: Path | None = None) -> Store:
+    """Open the configured store. The one place a substrate is chosen."""
+    store = SqliteStore(path)
+    store.connect()
+    return store
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -137,12 +203,22 @@ def _additive_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE findings ADD COLUMN outcome_at TEXT")
 
 
-class Store:
+def _one(row: sqlite3.Row | None) -> Record | None:
+    return dict(row) if row is not None else None
+
+
+def _many(rows: Iterable[sqlite3.Row]) -> list[Record]:
+    return [dict(row) for row in rows]
+
+
+class SqliteStore:
+    """SQLite implementation. Single operator, single machine, WAL mode."""
+
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path else DEFAULT_DB
         self._conn: sqlite3.Connection | None = None
 
-    def __enter__(self) -> Store:
+    def __enter__(self) -> SqliteStore:
         self.connect()
         return self
 
@@ -150,6 +226,8 @@ class Store:
         self.close()
 
     def connect(self) -> None:
+        if self._conn is not None:
+            return
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -167,31 +245,31 @@ class Store:
             self._conn = None
 
     @property
-    def conn(self) -> sqlite3.Connection:
+    def _db(self) -> sqlite3.Connection:
         if self._conn is None:
-            raise RuntimeError("Store is not connected; use `with Store() as store:`")
+            raise RuntimeError("store is not connected; use `with SqliteStore() as store:`")
         return self._conn
 
     # --- runs -------------------------------------------------------------
 
     def start_run(self, project: str, collector: str) -> int:
-        cur = self.conn.execute(
+        cur = self._db.execute(
             "INSERT INTO runs (project, collector, started_at) VALUES (?, ?, ?)",
             (project, collector, utcnow()),
         )
-        self.conn.commit()
+        self._db.commit()
         return int(cur.lastrowid)
 
     def finish_run(self, run_id: int, ok: bool = True, error: str | None = None) -> None:
-        self.conn.execute(
+        self._db.execute(
             "UPDATE runs SET finished_at = ?, ok = ?, error = ? WHERE id = ?",
             (utcnow(), 1 if ok else 0, error, run_id),
         )
-        self.conn.commit()
+        self._db.commit()
 
     def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]:
         """Most recent successful run ids, newest first."""
-        rows = self.conn.execute(
+        rows = self._db.execute(
             "SELECT id FROM runs WHERE project = ? AND collector = ? AND ok = 1 "
             "ORDER BY id DESC LIMIT ?",
             (project, collector, limit),
@@ -205,19 +283,21 @@ class Store:
         rows = [
             (run_id, o.project, o.collector, o.subject, o.key, o.value, now) for o in observations
         ]
-        self.conn.executemany(
+        self._db.executemany(
             "INSERT INTO observations "
             "(run_id, project, collector, subject, key, value, observed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
-        self.conn.commit()
+        self._db.commit()
         return len(rows)
 
-    def run_observations(self, run_id: int) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT subject, key, value FROM observations WHERE run_id = ?", (run_id,)
-        ).fetchall()
+    def run_observations(self, run_id: int) -> list[Record]:
+        return _many(
+            self._db.execute(
+                "SELECT subject, key, value FROM observations WHERE run_id = ?", (run_id,)
+            )
+        )
 
     # --- findings ---------------------------------------------------------
 
@@ -239,34 +319,52 @@ class Store:
             )
             for f in findings
         ]
-        self.conn.executemany(
+        self._db.executemany(
             "INSERT INTO findings "
             "(run_id, project, rule, severity, summary, subjects, detail, found_at, source) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
-        self.conn.commit()
+        self._db.commit()
         return len(rows)
 
-    def finding(self, finding_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+    def retire_rule_findings(self, project: str) -> int:
+        """Drop a project's open rule findings so a sweep can re-derive them.
+
+        Scoped to source='rule' on purpose: agent findings cost money and come
+        from their own run, so a nightly sweep must never delete them. This
+        lives here rather than in the runner because it is the only place a
+        caller was reaching past the interface into a connection — which is
+        exactly the leak that makes a substrate unswappable.
+        """
+        cur = self._db.execute(
+            "DELETE FROM findings " "WHERE project = ? AND resolved_at IS NULL AND source = 'rule'",
+            (project,),
+        )
+        self._db.commit()
+        return cur.rowcount
+
+    def finding(self, finding_id: int) -> Record | None:
+        return _one(
+            self._db.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+        )
 
     def set_finding_outcome(self, finding_id: int, outcome: str) -> None:
         """Record whether a finding was worth acting on ('acted' | 'dismissed')."""
-        self.conn.execute(
+        self._db.execute(
             "UPDATE findings SET outcome = ?, outcome_at = ? WHERE id = ?",
             (outcome, utcnow(), finding_id),
         )
-        self.conn.commit()
+        self._db.commit()
 
-    def rule_precision(self) -> list[sqlite3.Row]:
+    def rule_precision(self) -> list[Record]:
         """Per rule: how often it was acted on versus dismissed.
 
         The number that says which rules deserve attention and which are noise.
         Rules with no decided findings are excluded rather than shown at 0% —
         an unmeasured rule and a bad one are different things.
         """
-        return self.conn.execute("""
+        return _many(self._db.execute("""
             SELECT rule,
                    source,
                    SUM(outcome = 'acted')     AS acted,
@@ -276,7 +374,7 @@ class Store:
             WHERE outcome IS NOT NULL
             GROUP BY rule, source
             ORDER BY dismissed DESC, decided DESC
-            """).fetchall()
+            """))
 
     # --- the action ledger -------------------------------------------------
 
@@ -300,14 +398,14 @@ class Store:
         # computed against the old contents now has a different patch. Those are
         # superseded, not rejected — left alone they accumulate every sweep and
         # the pending list stops meaning anything.
-        self.conn.execute(
+        self._db.execute(
             "UPDATE actions SET outcome = 'superseded' "
             "WHERE project = ? AND class_key = ? AND decision IS NULL "
             "AND outcome IS NULL AND patch_digest != ?",
             (project, class_key, patch_digest),
         )
         try:
-            cur = self.conn.execute(
+            cur = self._db.execute(
                 "INSERT INTO actions "
                 "(project, finding_id, verb, statement, class_statement, class_key, "
                 " params, patch_digest, files, proposed_at) "
@@ -327,13 +425,13 @@ class Store:
             )
         except sqlite3.IntegrityError:
             return None
-        self.conn.commit()
+        self._db.commit()
         return int(cur.lastrowid)
 
-    def action(self, action_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
+    def action(self, action_id: int) -> Record | None:
+        return _one(self._db.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone())
 
-    def pending_actions(self, project: str | None = None) -> list[sqlite3.Row]:
+    def pending_actions(self, project: str | None = None) -> list[Record]:
         # outcome IS NULL excludes rows retired as superseded: they were never
         # decided, so decision alone would leave them pending forever.
         sql = "SELECT * FROM actions WHERE decision IS NULL AND outcome IS NULL"
@@ -341,21 +439,21 @@ class Store:
         if project:
             sql += " AND project = ?"
             params = (project,)
-        return self.conn.execute(sql + " ORDER BY proposed_at", params).fetchall()
+        return _many(self._db.execute(sql + " ORDER BY proposed_at", params))
 
     def decide_action(self, action_id: int, decision: str, decided_by: str = "human") -> None:
-        self.conn.execute(
+        self._db.execute(
             "UPDATE actions SET decision = ?, decided_at = ?, decided_by = ? WHERE id = ?",
             (decision, utcnow(), decided_by, action_id),
         )
-        self.conn.commit()
+        self._db.commit()
 
     def record_application(self, action_id: int, outcome: str, error: str | None = None) -> None:
-        self.conn.execute(
+        self._db.execute(
             "UPDATE actions SET applied_at = ?, outcome = ?, error = ? WHERE id = ?",
             (utcnow(), outcome, error, action_id),
         )
-        self.conn.commit()
+        self._db.commit()
 
     def class_stats(self, class_key: str, patch_digest: str | None = None) -> dict[str, int]:
         """Approval record for one equivalence class.
@@ -364,7 +462,7 @@ class Store:
         evidence for approving more automatically, or a single bad class
         bootstraps its own authority.
         """
-        row = self.conn.execute(
+        row = self._db.execute(
             """
             SELECT
                 SUM(decision = 'approved')                   AS approvals,
@@ -385,12 +483,12 @@ class Store:
             "failures": int(row["failures"] or 0),
         }
 
-    def project_summary(self) -> list[sqlite3.Row]:
+    def project_summary(self) -> list[Record]:
         """Per-project rollup: open findings by severity, and when it was last seen."""
         # Two aggregates joined, not one join then aggregated: `runs` has many
         # rows per project, so counting findings across that join multiplies every
         # finding by the number of runs.
-        return self.conn.execute("""
+        return _many(self._db.execute("""
             SELECT
                 r.project                  AS project,
                 r.last_run                 AS last_run,
@@ -409,9 +507,9 @@ class Store:
                 FROM findings WHERE resolved_at IS NULL GROUP BY project
             ) f ON f.project = r.project
             ORDER BY high DESC, medium DESC, low DESC, r.project
-            """).fetchall()
+            """))
 
-    def open_findings(self, project: str | None = None) -> list[sqlite3.Row]:
+    def open_findings(self, project: str | None = None) -> list[Record]:
         sql = "SELECT * FROM findings WHERE resolved_at IS NULL"
         params: tuple[str, ...] = ()
         if project:
@@ -421,4 +519,4 @@ class Store:
             " ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
             "ELSE 2 END, found_at DESC"
         )
-        return self.conn.execute(sql, params).fetchall()
+        return _many(self._db.execute(sql, params))

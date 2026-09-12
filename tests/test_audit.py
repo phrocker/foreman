@@ -7,7 +7,7 @@ from foreman.audit import AgentReport, _cost_of, _known_findings
 from foreman.config import Project, Registry
 from foreman.models import Finding, Observation, Severity
 from foreman.runner import check_all
-from foreman.store import Store
+from foreman.store import SqliteStore
 
 
 def test_cost_is_read_from_the_claude_json_envelope():
@@ -33,7 +33,7 @@ def test_agent_report_accepts_an_empty_finding_list():
 
 
 def test_known_findings_are_formatted_for_the_prompt(tmp_path):
-    with Store(tmp_path / "t.db") as store:
+    with SqliteStore(tmp_path / "t.db") as store:
         run_id = store.start_run("s1", "crawl")
         store.finish_run(run_id, ok=True)
         store.record_findings(
@@ -62,7 +62,7 @@ def test_no_known_findings_reads_cleanly():
 def test_nightly_check_does_not_delete_agent_findings(tmp_path):
     """Agent findings cost real money and come from their own run. A nightly
     sweep re-derives the deterministic ones and must leave these alone."""
-    with Store(tmp_path / "t.db") as store:
+    with SqliteStore(tmp_path / "t.db") as store:
         run_id = store.start_run("s1", "crawl")
         # A snapshot has to exist, or check_all skips the site entirely and the
         # delete never runs — which would make this test pass for the wrong

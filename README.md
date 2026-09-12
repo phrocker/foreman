@@ -82,7 +82,12 @@ homepage shell. Foreman asks for URLs that should not exist and compares.
   anything that spawns subagents needs a ceiling.
 - **No stealth browser.** Foreman crawls projects you own. If a WAF blocks it,
   allowlist it.
-- **No Postgres.** Single operator, single machine. SQLite in WAL mode.
+- **No Postgres.** Single operator, single machine. SQLite in WAL mode — behind
+  a `Store` protocol, because the substrate is not settled. Foreman's
+  observation model turned out to be a cell store reinvented in SQL (project and
+  subject are a row, the collector a column family, the key a column qualifier,
+  `observed_at` a cell timestamp), so moving it onto one is a real prospect. The
+  protocol and its tests are what keep that affordable.
 - **No second model provider yet.** Worth adding for redundancy and cost
   arbitrage, not for speed — nothing here is rate-limited.
 

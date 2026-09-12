@@ -1,6 +1,6 @@
 from foreman.diff import Kind, compare, project_drift
 from foreman.models import Observation
-from foreman.store import Store
+from foreman.store import SqliteStore
 
 
 def rows(*triples):
@@ -84,7 +84,7 @@ def test_non_numeric_values_are_never_tolerance_tested():
 
 
 def test_a_first_snapshot_has_not_drifted(tmp_path):
-    with Store(tmp_path / "t.db") as store:
+    with SqliteStore(tmp_path / "t.db") as store:
         run_id = store.start_run("p", "crawl")
         store.record(
             run_id,
@@ -102,7 +102,7 @@ def test_a_first_snapshot_has_not_drifted(tmp_path):
 
 
 def test_drift_between_two_stored_runs(tmp_path):
-    with Store(tmp_path / "t.db") as store:
+    with SqliteStore(tmp_path / "t.db") as store:
         for title in ("Before", "After"):
             run_id = store.start_run("p", "crawl")
             store.record(
@@ -127,7 +127,7 @@ def test_drift_between_two_stored_runs(tmp_path):
 def test_a_failed_run_is_not_compared_against(tmp_path):
     """A collector that errored stored nothing. Diffing against it would report
     every page as removed."""
-    with Store(tmp_path / "t.db") as store:
+    with SqliteStore(tmp_path / "t.db") as store:
         first = store.start_run("p", "crawl")
         store.record(
             first,
