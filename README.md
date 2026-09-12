@@ -288,13 +288,20 @@ Four tabs over the same data the CLI reads: **Findings**, **Actions**,
 **Drift** and **Rules**. Filter by severity, project or free text; click a
 finding for every affected subject; hit "Run sweep" for a live log.
 
-The Actions tab is the trust ladder made visible — each pending action shows its
-class's record, its canonical SAG statement verbatim, and whether it has earned
-its policy. Approving asks first, because it writes to a working tree. "Apply
-earned" dry-runs before confirming: a prompt that cannot say how many files it
-will touch is not a confirmation. An action whose target moved since it was
-computed is marked stale with its Approve button disabled, rather than quietly
-applying to a file nobody re-read. Severity is encoded as **shape + label +
+The Actions tab is the trust ladder made visible, one card per equivalence
+*class* rather than per action. "Anchor this prefix in eight repositories" is
+one decision, so one card names the eight projects and carries the class's
+record, the class's canonical SAG statement, and whether it has earned its
+policy — with each project's own statement a disclosure away. The approval is
+still written to the ledger once per project, because "approved 8/8 across 8
+projects" means nothing if eight approvals were stored as one.
+
+Approving asks first, because it writes to every one of those working trees, and
+the prompt says how many and whose. "Apply earned" dry-runs before confirming:
+a prompt that cannot say how many files it will touch is not a confirmation. An
+action whose target moved since it was computed is marked stale and left out of
+its group's approval by name, rather than quietly applying to a file nobody
+re-read. Severity is encoded as **shape + label +
 colour** — the status palette's medium and low steps measure 13.6 ΔE apart, below
 the threshold at which full-colour vision separates them reliably, so colour is
 never load-bearing.

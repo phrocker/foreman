@@ -198,6 +198,55 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             s.close()
         return {"rejected": action_id}
 
+    @app.post("/api/actions/decide")
+    def decide_group(payload: dict[str, Any]) -> dict[str, Any]:
+        """Decide a whole equivalence class at once, one ledger row at a time.
+
+        The unit a person decides on is the class — "bump this dependency
+        everywhere" is one judgement — but the evidence the class accrues is
+        per-instance, so this loops rather than recording a group decision. Each
+        approval re-checks its own guardrail, which is also why the result is a
+        per-action report and not a single status: a stale member must be
+        refused individually and said so, never carried along with the rest.
+        """
+        verb = payload.get("verb")
+        if verb not in ("approve", "reject"):
+            raise HTTPException(400, "verb must be 'approve' or 'reject'")
+        raw = payload.get("ids")
+        if not isinstance(raw, list) or not raw:
+            raise HTTPException(400, "ids must be a non-empty list")
+        try:
+            ids = [int(value) for value in raw]
+        except (TypeError, ValueError):
+            raise HTTPException(400, "ids must be integers") from None
+
+        registry = load_registry(registry_path)
+        s = store()
+        decided: list[dict[str, Any]] = []
+        refused: list[dict[str, Any]] = []
+        try:
+            for action_id in ids:
+                row = s.action(action_id)
+                project = row["project"] if row is not None else None
+                try:
+                    if verb == "approve":
+                        written = apply_action(registry, s, action_id)
+                        decided.append({"id": action_id, "project": project, "files": written})
+                    else:
+                        reject_action(s, action_id)
+                        decided.append({"id": action_id, "project": project, "files": []})
+                except Stale as exc:
+                    refused.append(
+                        {"id": action_id, "project": project, "reason": str(exc), "stale": True}
+                    )
+                except (KeyError, ValueError) as exc:
+                    refused.append(
+                        {"id": action_id, "project": project, "reason": str(exc), "stale": False}
+                    )
+        finally:
+            s.close()
+        return {"verb": verb, "decided": decided, "refused": refused}
+
     @app.post("/api/actions/apply-eligible")
     def apply_earned(
         project: str | None = Query(None), confirm: bool = Query(False)

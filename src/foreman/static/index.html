@@ -222,6 +222,35 @@
   }
   .badge.earned { color: var(--good); border-color: var(--good); }
   .stale { color: var(--medium); font-size: 13px; margin-top: 8px; }
+  /* A class card. The count is the number of projects one decision covers, so
+     it is text and tabular figures — never a colour, which severity already
+     owns and which nothing here may lean on alone. */
+  .class-count { font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .members { list-style: none; margin: 12px 0 0; padding: 0; border-top: 1px solid var(--border); }
+  .members li {
+    display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+    padding: 7px 2px; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .members li:last-child { border-bottom: none; }
+  /* Chips, when every member edits the same path. Staleness is a dashed border
+     AND the word "stale" — the border alone would be a colour-free signal, and
+     the colour alone would be no signal at all. */
+  .members.compact { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 10px; }
+  .members.compact li {
+    display: inline-flex; gap: 6px; align-items: baseline; padding: 3px 10px;
+    border: 1px solid var(--border-firm); border-bottom: 1px solid var(--border-firm);
+    border-radius: 999px; font-size: 12.5px;
+  }
+  .members.compact li.is-stale { border-style: dashed; border-color: var(--medium); }
+  .members.compact .stale { font-size: 11.5px; }
+  .members .stale { margin-top: 0; }
+  .per-project { margin-top: 10px; }
+  .per-project > summary {
+    cursor: pointer; color: var(--text-3); font-size: 12.5px; list-style-position: outside;
+  }
+  .per-project .statement { margin: 6px 0 0; }
+  .member-name { color: var(--text-2); font-size: 12.5px; margin-top: 8px; }
+  .action-buttons .stale { margin-top: 0; }
 
   /* Drift */
   .drift { padding: 11px 16px; border-bottom: 1px solid var(--border); }
@@ -368,6 +397,7 @@
       <button id="proposeBtn">Recompute proposals</button>
       <button id="eligibleBtn" title="Apply only what a class has earned under its own policy">Apply earned</button>
     </div>
+    <div class="hint" id="actionSummary"></div>
     <div id="actionList"></div>
   </section>
 
@@ -507,10 +537,167 @@ function visibleActions() {
   return state.actions.filter((a) => !state.project || a.project === state.project);
 }
 
+/** Pending actions grouped into the unit a person actually decides on.
+ *
+ *  A class_key means "the same decision": anchoring the same asset prefix in
+ *  eight repositories is one judgement, and the ledger already records those
+ *  eight rows as one class. Forty projects times a handful of alerts is several
+ *  hundred cards otherwise, which is a list nobody reads to the bottom of.
+ *
+ *  Grouping is on class_key alone, not class_key plus patch_digest: two
+ *  projects whose rendered patches differ byte-for-byte are still the same
+ *  decision. The digest difference is reported inside the card instead, because
+ *  it is what "patch identical to N of them" is counted against.
+ */
+function groupActions(actions) {
+  const groups = new Map();
+  for (const action of actions) {
+    let group = groups.get(action.class_key);
+    if (!group) {
+      group = {
+        key: action.class_key,
+        verb: action.verb,
+        class_statement: action.class_statement,
+        members: [],
+      };
+      groups.set(action.class_key, group);
+    }
+    group.members.push(action);
+  }
+  return [...groups.values()];
+}
+
+/** The class's approval record, in words.
+ *
+ *  Everything here except `identical` is a property of the class, so it is read
+ *  off any member. `identical` counts byte-identical patches, which is a claim
+ *  about one member's digest — so a group spanning several digests says how
+ *  many rather than pretending one number covers it.
+ */
+function classRecord(group) {
+  const first = group.members[0];
+  const s = first.stats;
+  if (first.decided === 0) return "No prior decisions — this class is new.";
+  const digests = new Set(group.members.map((m) => m.patch_digest));
+  return `Approved ${s.approvals}/${first.decided} across ${s.projects} project(s)` +
+    (s.rejections ? ` · <span class="was">${s.rejections} rejected</span>` : "") +
+    (digests.size > 1
+      ? ` · ${digests.size} distinct patches here`
+      : s.identical ? ` · patch identical to ${s.identical} of them` : "") +
+    (s.verified ? ` · <span class="now">${s.verified} verified by CI</span>` : "") +
+    (s.broke ? ` · <span class="was">${s.broke} broke the build</span>` : "") +
+    (s.failures ? ` · <span class="was">${s.failures} failed on apply</span>` : "");
+}
+
+function actionCard(group, index) {
+  const members = group.members;
+  const first = members[0];
+  const s = first.stats;
+  // One member is the common case for a young class, and it must not read as a
+  // group of one: it keeps the original single-action layout, project and files
+  // in the head and its own statement verbatim.
+  const one = members.length === 1;
+  const stale = members.filter((m) => m.stale);
+  const fresh = members.filter((m) => !m.stale);
+  const earned = members.filter((m) => m.eligible);
+  // Against whichever count this class's policy reads, not always approvals.
+  const counted = first.statement.includes("class.verified") ? s.verified : s.approvals;
+  const pct = Math.min(100, (counted / 10) * 100);
+  const badge = earned.length === members.length ? "earned under policy"
+    : earned.length ? `${earned.length} of ${members.length} earned under policy`
+    : "needs you";
+  const mixed = earned.length && earned.length !== members.length;
+
+  // The affected projects, as compactly as the truth allows. When every member
+  // edits the same path — the usual case, since that is roughly what makes them
+  // one class — the path is said once in the head and the projects collapse to a
+  // wrapped row. When the paths differ, each one is named, because "which file
+  // in which project" is then part of what you are approving.
+  const sameFiles = new Set(members.map((m) => m.files.join(", "))).size === 1;
+  const head = one
+    ? `<span class="project-cell">${esc(first.project)}</span>
+       <span class="action-files">${first.files.map(esc).join(", ")}</span>`
+    : `<span class="class-count">${members.length} projects</span>
+       ${sameFiles ? `<span class="action-files">${first.files.map(esc).join(", ")}</span>` : ""}`;
+
+  // What you are deciding. For a class of one that is the instance statement,
+  // verbatim, as before; for several it is the class statement, which is the
+  // only text the whole group shares — the per-project ones are below.
+  const statement = esc(one ? first.statement : group.class_statement);
+
+  const mark = (m) =>
+    (mixed && m.eligible ? '<span class="badge earned">earned</span>' : "") +
+    (m.stale ? '<span class="stale">⚠ stale</span>' : "");
+  const rows = one ? "" : sameFiles
+    ? `<ul class="members compact">${members.map((m) => `
+        <li${m.stale ? ' class="is-stale"' : ""}>
+          <span class="project-cell">${esc(m.project)}</span>${mark(m)}</li>`).join("")}</ul>`
+    : `<ul class="members">${members.map((m) => `
+        <li>
+          <span class="project-cell">${esc(m.project)}</span>
+          <span class="action-files">${m.files.map(esc).join(", ")}</span>
+          ${mark(m)}
+        </li>`).join("")}</ul>`;
+
+  const perProject = one ? "" : `<details class="per-project">
+      <summary>Each project's statement (${members.length})</summary>
+      ${members.map((m) => `<div class="member-name">${esc(m.project)}</div>
+        <div class="statement">${esc(m.statement)}</div>`).join("")}
+    </details>`;
+
+  // Staleness is surfaced, and excluded. Approving a group must never quietly
+  // spend the same decision on a file nobody re-read.
+  const staleNote = one
+    ? (first.stale ? `<div class="stale">⚠ stale — ${esc(first.stale)}</div>` : "")
+    : (stale.length
+        ? `<span class="stale">⚠ ${stale.length} of ${members.length} stale — excluded from Approve</span>`
+        : "");
+  // Named, with the reason, rather than left as a count: a stale member is the
+  // one thing in a group decision that is not the group's decision. Members are
+  // gathered by reason, because twelve repetitions of one sentence is a wall
+  // people skip rather than read.
+  const byReason = new Map();
+  for (const m of stale) byReason.set(m.stale, [...(byReason.get(m.stale) || []), m.project]);
+  const staleWhy = one ? "" : [...byReason].map(([reason, projects]) =>
+    `<div class="stale">⚠ ${projects.map(esc).join(", ")} — ${esc(reason)}</div>`).join("");
+
+  // "…to 0 projects" is not a label anyone needs: when nothing is approvable the
+  // button is disabled and the note beside it says why.
+  const approveLabel = one || !fresh.length ? "Approve &amp; apply"
+    : `Approve &amp; apply to ${fresh.length} project${fresh.length === 1 ? "" : "s"}`;
+  const rejectLabel = one ? "Reject" : `Reject for ${members.length} projects`;
+
+  return `<div class="action" data-group="${index}">
+    <div class="action-head">
+      <span class="verb">${esc(group.verb)}</span>
+      ${head}
+      <span style="margin-left:auto" class="badge${earned.length === members.length ? " earned" : ""}">
+        ${badge}</span>
+    </div>
+    <div class="evidence">
+      <div class="evidence-text">${classRecord(group)}</div>
+      ${first.decided === 0 ? "" :
+        `<div class="meter${earned.length === members.length ? " earned" : ""}"><span style="width:${pct}%"></span></div>`}
+    </div>
+    <div class="statement">${statement}</div>
+    ${rows}
+    ${staleWhy}
+    ${perProject}
+    ${one ? staleNote : ""}
+    <div class="action-buttons">
+      <button class="primary approve" ${fresh.length ? "" : "disabled"}>${approveLabel}</button>
+      <button class="reject">${rejectLabel}</button>
+      ${one ? "" : staleNote}
+    </div>
+  </div>`;
+}
+
 function renderActions() {
   const list = $("actionList");
+  const summary = $("actionSummary");
   const actions = visibleActions();
   if (!actions.length) {
+    summary.textContent = "";
     list.innerHTML = `<div class="panel"><div class="empty">${
       state.actions.length
         ? `No pending actions for ${esc(state.project)}.`
@@ -518,52 +705,78 @@ function renderActions() {
     }</div></div>`;
     return;
   }
-  list.innerHTML = actions.map((a) => {
-    const s = a.stats;
-    // Both claims, kept apart: class_key counts "the same kind of action",
-    // patch_digest counts "byte-identical to what you approved".
-    const record = a.decided === 0
-      ? "No prior decisions — this class is new."
-      : `Approved ${s.approvals}/${a.decided} across ${s.projects} project(s)` +
-        (s.rejections ? ` · <span class="was">${s.rejections} rejected</span>` : "") +
-        (s.identical ? ` · patch identical to ${s.identical} of them` : "") +
-        (s.verified ? ` · <span class="now">${s.verified} verified by CI</span>` : "") +
-        (s.broke ? ` · <span class="was">${s.broke} broke the build</span>` : "") +
-        (s.failures ? ` · <span class="was">${s.failures} failed on apply</span>` : "");
-    // Against whichever count this class's policy reads, not always approvals.
-    const counted = a.statement.includes("class.verified") ? s.verified : s.approvals;
-    const pct = Math.min(100, (counted / 10) * 100);
-    return `<div class="action" data-id="${a.id}">
-      <div class="action-head">
-        <span class="verb">${esc(a.verb)}</span>
-        <span class="project-cell">${esc(a.project)}</span>
-        <span class="action-files">${a.files.map(esc).join(", ")}</span>
-        <span style="margin-left:auto" class="badge${a.eligible ? " earned" : ""}">
-          ${a.eligible ? "earned under policy" : "needs you"}</span>
-      </div>
-      <div class="evidence">
-        <div class="evidence-text">${record}</div>
-        ${a.decided === 0 ? "" :
-          `<div class="meter${a.eligible ? " earned" : ""}"><span style="width:${pct}%"></span></div>`}
-      </div>
-      <div class="statement">${esc(a.statement)}</div>
-      ${a.stale ? `<div class="stale">⚠ stale — ${esc(a.stale)}</div>` : ""}
-      <div class="action-buttons">
-        <button class="primary approve" ${a.stale ? "disabled" : ""}>Approve &amp; apply</button>
-        <button class="reject">Reject</button>
-      </div>
-    </div>`;
-  }).join("");
+  const groups = groupActions(actions);
+  summary.textContent =
+    `${actions.length} pending action${actions.length === 1 ? "" : "s"} in ` +
+    `${groups.length} class${groups.length === 1 ? "" : "es"} — one card per decision.`;
+  list.innerHTML = groups.map(actionCard).join("");
 
+  const groupOf = (button) => groups[Number(button.closest(".action").dataset.group)];
   list.querySelectorAll(".approve").forEach((b) =>
-    b.addEventListener("click", () => decide(b.closest(".action").dataset.id, "approve")));
+    b.addEventListener("click", () => approveGroup(groupOf(b))));
   list.querySelectorAll(".reject").forEach((b) =>
-    b.addEventListener("click", () => decide(b.closest(".action").dataset.id, "reject")));
+    b.addEventListener("click", () => rejectGroup(groupOf(b))));
+}
+
+function approveGroup(group) {
+  const fresh = group.members.filter((m) => !m.stale);
+  const stale = group.members.filter((m) => m.stale);
+  if (!fresh.length) return;
+  // Approving writes to working trees, so it asks first — and a prompt that
+  // cannot say how many trees it will touch, or whose, is not a confirmation.
+  const lines = [
+    `Apply ${fresh.length} action${fresh.length === 1 ? "" : "s"} to ` +
+      `${fresh.length === 1 ? "this working tree" : "these working trees"}?`,
+    "",
+    fresh.map((m) => m.project).join(", "),
+  ];
+  if (stale.length) {
+    lines.push("", `Excluded as stale: ${stale.map((m) => m.project).join(", ")}`);
+  }
+  if (!confirm(lines.join("\n"))) return;
+  decideMany(fresh.map((m) => m.id), "approve");
+}
+
+function rejectGroup(group) {
+  const members = group.members;
+  // Rejecting writes nothing but the ledger, and one instance stays as cheap as
+  // it was. Several are a judgement about every project at once, so that asks.
+  if (members.length > 1 &&
+      !confirm(`Reject this for ${members.length} projects?\n\n` +
+               members.map((m) => m.project).join(", "))) return;
+  decideMany(members.map((m) => m.id), "reject");
+}
+
+/** One decision, recorded once per instance, so the ledger stays per-instance.
+ *
+ *  Partial success is the normal outcome — a member can go stale between the
+ *  page load and the click — so the reply is a per-action report and whatever
+ *  was refused is named rather than folded into a single failure.
+ */
+async function decideMany(ids, verb) {
+  const res = await fetch("/api/actions/decide", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ verb, ids }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+  } else {
+    const body = await res.json();
+    if (body.refused.length) {
+      alert(
+        `${body.decided.length} recorded, ${body.refused.length} refused:\n\n` +
+        body.refused.map((r) => `${r.project || r.id} — ${r.reason}`).join("\n"),
+      );
+    }
+  }
+  load();
 }
 
 async function decide(id, verb) {
   // Approving writes to a repository, so it asks. Rejecting is reversible and
-  // does not.
+  // does not. Used by the chat's suggestion buttons, which name one action.
   if (verb === "approve" && !confirm("Apply this change to the working tree?")) return;
   const res = await fetch(`/api/actions/${id}/${verb}`, { method: "POST" });
   if (!res.ok) {
