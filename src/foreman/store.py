@@ -296,6 +296,16 @@ class Store:
         """Store a proposed action. Returns None if an identical one is already
         pending, which the unique index enforces rather than a read-then-write
         that could race a concurrent sweep."""
+        # Applying one action to a file changes it, so every other pending action
+        # computed against the old contents now has a different patch. Those are
+        # superseded, not rejected — left alone they accumulate every sweep and
+        # the pending list stops meaning anything.
+        self.conn.execute(
+            "UPDATE actions SET outcome = 'superseded' "
+            "WHERE project = ? AND class_key = ? AND decision IS NULL "
+            "AND outcome IS NULL AND patch_digest != ?",
+            (project, class_key, patch_digest),
+        )
         try:
             cur = self.conn.execute(
                 "INSERT INTO actions "
@@ -324,7 +334,9 @@ class Store:
         return self.conn.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
 
     def pending_actions(self, project: str | None = None) -> list[sqlite3.Row]:
-        sql = "SELECT * FROM actions WHERE decision IS NULL"
+        # outcome IS NULL excludes rows retired as superseded: they were never
+        # decided, so decision alone would leave them pending forever.
+        sql = "SELECT * FROM actions WHERE decision IS NULL AND outcome IS NULL"
         params: tuple[str, ...] = ()
         if project:
             sql += " AND project = ?"
@@ -396,7 +408,7 @@ class Store:
                        SUM(severity = 'low')    AS low
                 FROM findings WHERE resolved_at IS NULL GROUP BY project
             ) f ON f.project = r.project
-            ORDER BY high DESC, medium DESC, r.project
+            ORDER BY high DESC, medium DESC, low DESC, r.project
             """).fetchall()
 
     def open_findings(self, project: str | None = None) -> list[sqlite3.Row]:

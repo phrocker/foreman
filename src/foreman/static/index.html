@@ -159,6 +159,7 @@
          border: 1px solid var(--border-firm); color: var(--text-3);
          white-space: nowrap; vertical-align: 1px; }
 
+  #projectRows { max-height: 232px; overflow-y: auto; }
   .project-row { display: flex; align-items: center; gap: 12px; padding: 11px 16px;
               border-bottom: 1px solid var(--border); cursor: pointer; }
   .project-row:last-child { border-bottom: none; }
@@ -245,7 +246,7 @@
     <div class="brand">Foreman <span id="lastRun">—</span></div>
     <div class="spacer"></div>
     <button id="runBtn" class="primary">Run sweep</button>
-    <button id="themeBtn" class="icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    <button id="themeBtn" class="icon" title="Toggle theme" aria-label="Toggle theme"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1a7 7 0 0 0 0 14z" fill="currentColor"/></svg></button>
   </header>
 
   <div class="hero">
@@ -324,7 +325,13 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
 
 function ago(iso) {
   if (!iso) return "never";
-  const secs = (Date.now() - new Date(iso + (iso.endsWith("Z") ? "" : "Z")).getTime()) / 1000;
+  // Timestamps arrive as ISO-8601 with an explicit offset ("+00:00"). Appending
+  // a Z to that is not a UTC hint, it is an invalid date — which rendered as
+  // "NaNd ago".
+  const stamped = /[Z+]|-\d\d:\d\d$/.test(iso) ? iso : iso + "Z";
+  const ms = new Date(stamped).getTime();
+  if (Number.isNaN(ms)) return "unknown";
+  const secs = (Date.now() - ms) / 1000;
   if (secs < 90) return "just now";
   if (secs < 5400) return Math.round(secs / 60) + "m ago";
   if (secs < 172800) return Math.round(secs / 3600) + "h ago";
@@ -340,13 +347,20 @@ async function load() {
     fetch("/api/precision").then((r) => r.json()),
   ]);
   Object.assign(state, { overview, findings, actions, drift, precision });
-  renderOverview();
-  renderSites();
-  renderFindings();
-  renderActions();
-  renderDrift();
-  renderPrecision();
-  renderCounts();
+  // Each panel renders independently. One throwing used to abort the rest of
+  // load(), so a single bad reference blanked the whole page instead of one
+  // section — a failure mode that is much harder to notice than an empty panel.
+  for (const [name, render] of [
+    ["overview", renderOverview], ["projects", renderProjects],
+    ["findings", renderFindings], ["actions", renderActions],
+    ["drift", renderDrift], ["rules", renderPrecision], ["counts", renderCounts],
+  ]) {
+    try {
+      render();
+    } catch (err) {
+      console.error(`render failed: ${name}`, err);
+    }
+  }
 }
 
 function renderCounts() {
@@ -386,7 +400,8 @@ function renderActions() {
       </div>
       <div class="evidence">
         <div class="evidence-text">${record}</div>
-        <div class="meter${a.eligible ? " earned" : ""}"><span style="width:${pct}%"></span></div>
+        ${a.decided === 0 ? "" :
+          `<div class="meter${a.eligible ? " earned" : ""}"><span style="width:${pct}%"></span></div>`}
       </div>
       <div class="statement">${esc(a.statement)}</div>
       ${a.stale ? `<div class="stale">⚠ stale — ${esc(a.stale)}</div>` : ""}
@@ -472,7 +487,7 @@ function renderOverview() {
   $("heroBreak").textContent =
     t.open ? `${t.high} high · ${t.medium} medium · ${t.low} low` : "everything clear";
   $("lastRun").textContent = "· last swept " + ago(state.overview.last_run);
-  $("heroNote").textContent = `across ${t.projects} site${t.projects === 1 ? "" : "s"}`;
+  $("heroNote").textContent = `across ${t.projects} project${t.projects === 1 ? "" : "s"}`;
   $("tiles").innerHTML = [
     ["Projects monitored", t.projects],
     ["High severity", t.high],
@@ -484,22 +499,22 @@ function renderOverview() {
   const sel = $("projectFilter");
   const current = sel.value;
   sel.innerHTML = '<option value="">All projects</option>' +
-    state.overview.projects.map((s) => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join("");
+    state.overview.projects.map((p) => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join("");
   sel.value = current;
 }
 
-function renderSites() {
+function renderProjects() {
   const rows = state.overview.projects;
   $("projectRows").innerHTML = rows.length ? rows.map((p) => {
-    const pills = s.total === 0
+    const pills = p.total === 0
       ? '<span class="pill clean"><span class="glyph">✓</span> clean</span>'
-      : ["high", "medium", "low"].filter((k) => s[k] > 0).map((k) =>
-          `<span class="pill"><span class="glyph sev-${k}">${SEV[k].glyph}</span>${s[k]} ${SEV[k].label.toLowerCase()}</span>`
+      : ["high", "medium", "low"].filter((k) => p[k] > 0).map((k) =>
+          `<span class="pill"><span class="glyph sev-${k}">${SEV[k].glyph}</span>${p[k]} ${SEV[k].label.toLowerCase()}</span>`
         ).join("");
     return `<div class="project-row" data-project="${esc(p.project)}">
       <span class="project-name">${esc(p.project)}</span>
       <span class="pills">${pills}</span>
-      <span class="project-when">swept ${esc(ago(s.last_run))}</span></div>`;
+      <span class="project-when">swept ${esc(ago(p.last_run))}</span></div>`;
   }).join("") : '<div class="empty">No projects collected yet. Run a sweep.</div>';
 
   document.querySelectorAll(".project-row").forEach((el) =>

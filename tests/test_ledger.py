@@ -175,3 +175,40 @@ def test_precision_is_unmeasured_until_findings_are_decided(world):
     (row,) = store.rule_precision()
     assert row["rule"] == "robots_blocks_assets"
     assert (row["acted"], row["dismissed"]) == (0, 1)
+
+
+def test_a_superseded_proposal_stops_being_pending(world):
+    """Applying one action to a file changes it, so any other pending action
+    computed against the old contents is superseded. Left pending they pile up
+    every sweep until the list means nothing."""
+    registry, store, project = world
+    propose_actions(registry, store)
+    first = store.pending_actions()[0]
+
+    # Someone edits the file, so the next sweep computes a different patch.
+    path = project.repo / "public" / "robots.txt"
+    path.write_text("# a comment someone added\n" + path.read_text())
+    propose_actions(registry, store)
+
+    pending = store.pending_actions()
+    assert len(pending) == 1
+    assert pending[0]["id"] != first["id"]
+
+    retired = store.action(first["id"])
+    assert retired["outcome"] == "superseded"
+    # Superseding is not a judgement, so it must not enter the statistics.
+    assert retired["decision"] is None
+    assert store.class_stats(first["class_key"])["approvals"] == 0
+
+
+def test_an_unchanged_proposal_is_not_duplicated(world):
+    """The other half: nothing changed, so re-proposing must leave the existing
+    row alone rather than retiring and re-filing it."""
+    registry, store, _ = world
+    propose_actions(registry, store)
+    first = store.pending_actions()[0]
+    propose_actions(registry, store)
+
+    pending = store.pending_actions()
+    assert len(pending) == 1
+    assert pending[0]["id"] == first["id"]
