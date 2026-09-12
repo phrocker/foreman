@@ -129,6 +129,25 @@
 
   /* Connectors. Whether a backend is up decides whether audits and chat work
      at all, so state is a word and a shape, never a colour on its own. */
+  .cred { display: grid; grid-template-columns: 1fr auto; gap: 10px 14px;
+    align-items: start; padding: 12px; border-top: 1px solid var(--border); }
+  .cred-label { font-weight: 600; }
+  .cred-help { color: var(--text-3); font-size: 12px; margin-top: 3px; max-width: 62ch; }
+  .cred-state { font-size: 12px; letter-spacing: .03em; text-transform: uppercase;
+    white-space: nowrap; }
+  /* The hint is the credential's own last characters, so it must not be
+     case-folded — "…IJKL" would be a lie about what is stored. */
+  .cred-hint { text-transform: none; letter-spacing: 0; color: var(--text-3);
+    font-variant-numeric: tabular-nums; }
+  .cred-set { color: var(--good); }
+  .cred-unset { color: var(--text-3); }
+  .cred-form { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center;
+    flex-wrap: wrap; }
+  .cred-form input { flex: 1 1 260px; min-width: 0; padding: 6px 9px;
+    border: 1px solid var(--border-firm); border-radius: 7px;
+    background: var(--surface); color: var(--text); font: inherit; }
+  .cred-note { color: var(--text-3); font-size: 12px; }
+
   .conn { display: grid; grid-template-columns: 160px 76px 1fr; gap: 10px;
     align-items: baseline; padding: 8px 12px; border-top: 1px solid var(--border); }
   .conn-name { font-weight: 600; }
@@ -469,6 +488,7 @@
     <button class="tab" data-tab="history"  role="tab" aria-selected="false">History <span class="count" id="countHistory"></span></button>
     <button class="tab" data-tab="memory"   role="tab" aria-selected="false">Memory <span class="count" id="countMemory"></span></button>
     <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
+    <button class="tab" data-tab="settings" role="tab" aria-selected="false">Settings</button>
   </nav>
 
   <section id="panel-findings" role="tabpanel">
@@ -546,6 +566,13 @@
       <div id="precisionList"></div>
     </div>
   </section>
+
+  <section id="panel-settings" role="tabpanel" hidden>
+    <div class="panel">
+      <div class="section-head">Credentials — kept in the OS keyring, never in a file</div>
+      <div id="credentialList"></div>
+    </div>
+  </section>
 </div>
 </div>
 </div>
@@ -558,7 +585,7 @@ const SEV = {
 };
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
-  connectors: [], skills: [], memories: [],
+  connectors: [], skills: [], memories: [], settings: null,
   sevs: new Set(), project: "", q: "", open: new Set(),
   tab: "findings", decisiveOnly: true, kind: "", showRetired: true,
 };
@@ -626,7 +653,8 @@ function ago(iso) {
 }
 
 async function load() {
-  const [overview, findings, actions, drift, precision, history, connectors, skills, memories] =
+  const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
+         settings] =
     await Promise.all([
     fetch("/api/overview").then((r) => r.json()),
     fetch("/api/findings").then((r) => r.json()),
@@ -637,9 +665,12 @@ async function load() {
     fetch("/api/connectors").then((r) => r.json()),
     fetch("/api/skills").then((r) => r.json()),
     fetch("/api/memories").then((r) => r.json()),
+    fetch("/api/settings").then((r) => r.json()),
   ]);
-  Object.assign(state,
-    { overview, findings, actions, drift, precision, history, connectors, skills, memories });
+  Object.assign(state, {
+    overview, findings, actions, drift, precision, history,
+    connectors, skills, memories, settings,
+  });
   // Each panel renders independently. One throwing used to abort the rest of
   // load(), so a single bad reference blanked the whole page instead of one
   // section — a failure mode that is much harder to notice than an empty panel.
@@ -648,7 +679,8 @@ async function load() {
     ["findings", renderFindings], ["actions", renderActions],
     ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
-    ["rules", renderPrecision], ["memory", renderMemory], ["counts", renderCounts],
+    ["rules", renderPrecision], ["memory", renderMemory],
+    ["settings", renderSettings], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -1176,6 +1208,76 @@ $("retiredToggle").addEventListener("click", () => {
   renderMemory();
 });
 
+// --- settings --------------------------------------------------------------
+
+function renderSettings() {
+  const list = $("credentialList");
+  const s = state.settings;
+  if (!s) { list.innerHTML = '<div class="empty">Could not read settings.</div>'; return; }
+
+  const head = s.usable
+    ? `<p class="warn">Stored in <strong>${esc(s.keyring)}</strong>. Never written to foreman.yaml, the store or the graph — and there is no way to read one back out of this page.</p>`
+    : `<p class="warn">No usable keyring: ${esc(s.keyring)}<br>Credentials cannot be stored until this is fixed. Foreman will not fall back to a file.</p>`;
+
+  list.innerHTML = head + s.credentials.map((c) => `
+    <div class="cred" data-name="${esc(c.name)}">
+      <div>
+        <div class="cred-label">${esc(c.label)}</div>
+        <div class="cred-help">${esc(c.help)}</div>
+      </div>
+      <div class="cred-state ${c.set ? "cred-set" : "cred-unset"}">${
+        c.set
+          ? `\u25CF set${c.hint ? `<span class="cred-hint"> \u00B7 \u2026${esc(c.hint)}</span>` : ""}`
+          : "\u25CB not set"
+      }</div>
+      <div class="cred-form">
+        <input type="password" autocomplete="off" spellcheck="false"
+               placeholder="${c.set ? "Replace it" : "Paste it here"}"
+               aria-label="${esc(c.label)}" ${s.usable ? "" : "disabled"}>
+        <button class="primary cred-save" ${s.usable ? "" : "disabled"}>Save</button>
+        ${c.set ? '<button class="cred-clear">Remove</button>' : ""}
+        <span class="cred-note">${c.set ? "Saved values are never shown again." : ""}</span>
+      </div>
+    </div>`).join("");
+
+  list.querySelectorAll(".cred-save").forEach((b) =>
+    b.addEventListener("click", () => saveCredential(b.closest(".cred"))));
+  list.querySelectorAll(".cred-clear").forEach((b) =>
+    b.addEventListener("click", () => clearCredential(b.closest(".cred"))));
+}
+
+async function saveCredential(row) {
+  const input = row.querySelector("input");
+  const value = input.value.trim();
+  if (!value) { input.focus(); return; }
+  try {
+    const res = await fetch(`/api/settings/${encodeURIComponent(row.dataset.name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || `failed with ${res.status}`);
+  } catch (err) {
+    alert(`Could not save: ${err.message}`);
+    return;
+  } finally {
+    // Cleared either way: a credential should not sit in the DOM after the
+    // attempt, successful or not.
+    input.value = "";
+  }
+  state.settings = await fetch("/api/settings").then((r) => r.json());
+  renderSettings();
+}
+
+async function clearCredential(row) {
+  const name = row.dataset.name;
+  if (!confirm(`Remove ${name}? Whatever reads it will stop working until it is replaced.`)) return;
+  const res = await fetch(`/api/settings/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!res.ok) { alert(`Could not remove: ${res.status}`); return; }
+  state.settings = await fetch("/api/settings").then((r) => r.json());
+  renderSettings();
+}
+
 // --- connectors ------------------------------------------------------------
 
 function renderConnectors() {
@@ -1594,7 +1696,8 @@ function showTab(name) {
   state.tab = name;
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute("aria-selected", String(t.dataset.tab === name)));
-  for (const panel of ["findings", "actions", "drift", "history", "memory", "rules"]) {
+  for (const panel of
+       ["findings", "actions", "drift", "history", "memory", "rules", "settings"]) {
     $("panel-" + panel).hidden = panel !== name;
   }
   try { localStorage.setItem("foreman-tab", name); } catch {}

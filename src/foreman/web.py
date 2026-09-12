@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
+from . import secrets
 from .actions import Stale, target_label
 from .actions.sagform import automatable, policy_allows
 from .chat import ChatError, ask
@@ -351,6 +352,62 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             item["fields"] = json.loads(row["fields"] or "{}")
             out.append(item)
         return out
+
+    @app.get("/api/settings")
+    def settings() -> dict[str, Any]:
+        """What is configured. Never a credential.
+
+        There is deliberately no endpoint that returns a secret: set-or-not and
+        the last four characters are enough to tell which key is loaded, and a
+        value that can be read back over HTTP is a value in a browser history.
+        """
+        try:
+            backend = secrets.backend_name()
+            usable = True
+        except secrets.SecretsUnavailable as exc:
+            backend, usable = str(exc), False
+        return {
+            "keyring": backend,
+            "usable": usable,
+            "credentials": [
+                {
+                    "name": c.name,
+                    "label": c.label,
+                    "provider": c.provider,
+                    "help": c.help,
+                    "set": st.set,
+                    "hint": st.hint,
+                }
+                for c, st in zip(secrets.CREDENTIALS, secrets.statuses(), strict=True)
+            ],
+        }
+
+    @app.put("/api/settings/{name}")
+    def set_credential(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if name not in {c.name for c in secrets.CREDENTIALS}:
+            raise HTTPException(404, f"no credential called {name!r}")
+        value = (payload.get("value") or "").strip()
+        if not value:
+            raise HTTPException(400, "a credential cannot be empty")
+        try:
+            secrets.set_secret(name, value)
+        except secrets.SecretsUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+        # The status, not the value — the response goes back to a browser.
+        st = secrets.status(name)
+        return {"name": st.name, "set": st.set, "hint": st.hint}
+
+    @app.delete("/api/settings/{name}")
+    def clear_credential(name: str) -> dict[str, Any]:
+        """Revocation lives beside storage: a credential you cannot remove from
+        where you added it is the half of the feature you need in a hurry."""
+        if name not in {c.name for c in secrets.CREDENTIALS}:
+            raise HTTPException(404, f"no credential called {name!r}")
+        try:
+            removed = secrets.delete_secret(name)
+        except secrets.SecretsUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+        return {"name": name, "removed": removed, "set": False}
 
     @app.get("/api/connectors")
     def connectors() -> list[dict[str, Any]]:
