@@ -12,6 +12,9 @@ dependencies = [
     "rich>=13.7",
     "pyyaml>=6.0",
     "grpcio>=1.60",
+    # The generated stubs import it directly; grpcio does not pull it in, so
+    # without this a fresh install cannot talk to shoal at all.
+    "protobuf>=4.25",
     "fastapi>=0.110",
     "semantic-action-grammar>=1.2.2",
     "uvicorn>=0.29",
