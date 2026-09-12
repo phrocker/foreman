@@ -131,3 +131,19 @@ def project_drift(store: Store, project: str) -> tuple[list[Change], str | None,
         newest,
         previous,
     )
+
+
+def drift_since(store: Store, project: str, since: str | None) -> list[Change]:
+    """Everything that changed between some past moment and now.
+
+    `project_drift` asks "what moved last night", which is the right question
+    for a report read every morning. Escalation asks a different one: what has
+    moved since the last time money was spent on this project, which may be
+    many sweeps ago. Same set comparison, different left-hand side.
+
+    With no moment to compare against, every fact known now is new — so a
+    project never audited reads as maximal drift rather than none, which is the
+    answer that makes a caller escalate rather than skip it forever.
+    """
+    before = store.latest_observations(project, as_of=since) if since else []
+    return compare(before, store.latest_observations(project))

@@ -75,6 +75,7 @@ class Store(Protocol):
     def start_run(self, project: str, collector: str) -> int: ...
     def finish_run(self, run_id: int, ok: bool = True, error: str | None = None) -> None: ...
     def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]: ...
+    def last_run_time(self, project: str, collector: str) -> str | None: ...
     def sweep_times(self, project: str, limit: int = 2) -> list[str]: ...
     def record(self, run_id: int, observations: Iterable[Observation]) -> int: ...
     def latest_observations(self, project: str, as_of: str | None = None) -> list[Record]: ...
@@ -385,6 +386,21 @@ class SqliteStore:
             (project, collector, limit),
         ).fetchall()
         return [int(r["id"]) for r in rows]
+
+    def last_run_time(self, project: str, collector: str) -> str | None:
+        """When this collector last finished successfully here, if it ever did.
+
+        Distinct from `sweep_times`, which answers "when was this project
+        observed" across every collector at once. Deciding whether to spend
+        money auditing a project is a question about one collector's history —
+        `audit:<skill>` — and None is the answer that matters most: never.
+        """
+        row = self._db.execute(
+            "SELECT MAX(finished_at) AS last FROM runs "
+            "WHERE project = ? AND collector = ? AND ok = 1 AND finished_at IS NOT NULL",
+            (project, collector),
+        ).fetchone()
+        return row["last"] if row and row["last"] else None
 
     # --- observations -----------------------------------------------------
 

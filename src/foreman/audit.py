@@ -18,12 +18,16 @@ import asyncio
 import json
 import os
 import tempfile
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
 from .budget import Budget
 from .config import Project
+from .diff import drift_since
 from .models import Finding, Severity
 from .store import Store
 
@@ -31,6 +35,14 @@ from .store import Store
 # which domain matters most for a given project.
 DEFAULT_SKILL = "seo-audit"
 DEFAULT_TIMEOUT_S = 1800
+
+# How long an audit's judgement is taken to still hold. Nothing about a site
+# guarantees its collectors can see every reason to look again — a competitor
+# outranking you leaves no trace in your own snapshot — so an old audit is
+# re-run on age alone, drift or no drift. Two weeks is roughly the interval at
+# which a portfolio of forty projects costs about what one project costs to
+# audit every day.
+STALE_AFTER_DAYS = 14.0
 
 # Analysis skills fetch pages, run commands, and read files. Write is needed for
 # the report itself. Nothing here edits the repo: fixes are a separate, reviewed
@@ -212,3 +224,109 @@ def _cost_of(stdout: bytes) -> float:
         if isinstance(payload, dict) and isinstance(payload.get(key), (int, float)):
             return float(payload[key])
     return 0.0
+
+
+@dataclass(frozen=True)
+class Choice:
+    """One project's audit decision, and the sentence that justifies it.
+
+    The reason is carried rather than logged where it was computed because the
+    caller is the one who has to answer "why did you spend $2.18 on that one
+    and not this one" — and a selection nobody can interrogate is worse than no
+    selection at all.
+    """
+
+    project: str
+    selected: bool
+    reason: str
+
+
+def _age_days(moment: str, now: datetime) -> float | None:
+    """Days between an ISO-8601 stamp and now, or None if it will not parse.
+
+    Unparseable is treated as unknown by every caller, never as recent: a
+    corrupt timestamp must not be what stops a project ever being audited.
+    """
+    try:
+        stamp = datetime.fromisoformat(moment)
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return (now - stamp).total_seconds() / 86400
+
+
+def _ago(age_days: float) -> str:
+    """How long ago that was, in the words a person would use.
+
+    "audited 0d ago" is technically the answer and reads like a bug, which
+    matters here: these strings are the justification for spending money.
+    """
+    return "today" if age_days < 1 else f"{age_days:.0f}d ago"
+
+
+def select_for_audit(
+    store: Store,
+    projects: Sequence[Project],
+    skill: str = DEFAULT_SKILL,
+    stale_after_days: float = STALE_AFTER_DAYS,
+    now: datetime | None = None,
+) -> list[Choice]:
+    """Decide which of these projects are worth auditing, and say why for each.
+
+    Three things earn an audit, in the order they are cheapest to establish:
+    never having had one, having had one long enough ago that it no longer
+    describes the project, and having drifted since the last one. Anything else
+    is money spent to be told what the last run already said.
+
+    Every project comes back, skipped ones included — a selection that returns
+    only its winners cannot be argued with.
+    """
+    now = now or datetime.now(UTC)
+    collector = f"audit:{skill}"
+    choices: list[Choice] = []
+
+    for project in projects:
+        last = store.last_run_time(project.id, collector)
+        if last is None:
+            choices.append(Choice(project.id, True, f"never audited with /{skill}"))
+            continue
+
+        age = _age_days(last, now)
+        if age is None:
+            choices.append(Choice(project.id, True, f"last audit is stamped {last!r}, unreadable"))
+            continue
+        if age >= stale_after_days:
+            choices.append(
+                Choice(
+                    project.id,
+                    True,
+                    f"last audited {_ago(age)}, past the {stale_after_days:.0f}d horizon",
+                )
+            )
+            continue
+
+        # Decisive keys only, matching what `foreman diff` shows by default: a
+        # title someone rewrote is a reason to look again, an LCP that wobbled
+        # 40ms is not, and paying $2.18 for the second is the whole problem.
+        changes = drift_since(store, project.id, last)
+        decisive = [change for change in changes if change.decisive]
+        if decisive:
+            choices.append(
+                Choice(
+                    project.id,
+                    True,
+                    f"{len(decisive)} decisive change(s) since the audit {_ago(age)}",
+                )
+            )
+        elif changes:
+            choices.append(
+                Choice(
+                    project.id,
+                    False,
+                    f"audited {_ago(age)}; {len(changes)} change(s) since, none decisive",
+                )
+            )
+        else:
+            choices.append(Choice(project.id, False, f"audited {_ago(age)} and unchanged since"))
+    return choices

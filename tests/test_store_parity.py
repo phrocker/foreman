@@ -325,3 +325,15 @@ def test_findings_recorded_in_the_same_second_still_order_deterministically(stor
 def test_proposals_made_in_the_same_second_still_order_deterministically(store):
     ids = [_propose(store, digest=f"d{n}", class_key=f"k{n}") for n in range(5)]
     assert [r["id"] for r in store.pending_actions()] == ids
+
+
+def test_last_run_time_agrees_across_both_stores(store):
+    """Audit selection spends money on this answer, so both stores must give
+    the same one — including None for a collector that has never finished here."""
+    _sweep(store)
+    audit = store.start_run("p", "audit:seo-audit")
+    store.finish_run(audit, ok=True)
+
+    assert store.last_run_time("p", "audit:seo-audit") == store.sweep_times("p")[0]
+    assert store.last_run_time("p", "audit:security") is None
+    assert store.last_run_time("other", "crawl") is None

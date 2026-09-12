@@ -13,7 +13,7 @@ from rich.table import Table
 
 from .actions import Stale
 from .actions.sagform import policy_allows
-from .audit import DEFAULT_SKILL, AuditError, run_audit
+from .audit import DEFAULT_SKILL, STALE_AFTER_DAYS, AuditError, run_audit, select_for_audit
 from .budget import Budget
 from .chat import ChatError, ask
 from .collectors import COLLECTORS
@@ -21,6 +21,8 @@ from .config import DEFAULT_REGISTRY, load_registry
 from .diff import Kind, project_drift
 from .migrate import migrate as copy_store
 from .models import Severity
+from .precision import label as precision_label
+from .precision import rank, rule_scores
 from .runner import (
     apply_action,
     apply_eligible,
@@ -124,19 +126,26 @@ def status(
     """What needs attention, across the whole portfolio."""
     with open_store(db) as store:
         rows = store.open_findings(project)
+        scores = rule_scores(store.rule_precision())
     if not rows:
         console.print("[green]Nothing open.[/]")
         return
+    # Severity first, then how often this rule has been worth acting on. The
+    # precision column is shown so the order can be argued with rather than
+    # merely trusted.
+    rows = rank(rows, scores)
     table = Table(box=None, pad_edge=False)
-    for col in ("project", "severity", "finding", "affected"):
+    for col in ("project", "severity", "finding", "affected", "precision"):
         table.add_column(col)
     for row in rows:
         style = SEVERITY_STYLE.get(row["severity"], "")
+        standing = precision_label(row, scores)
         table.add_row(
             row["project"],
             f"[{style}]{row['severity']}[/]",
             row["summary"],
             str(len(json.loads(row["subjects"]))),
+            f"[dim]{standing}[/]" if standing == "unmeasured" else standing,
         )
     console.print(table)
     console.print(f"\n{len(rows)} open finding(s).")
@@ -149,13 +158,22 @@ def audit(
     budget_usd: float = typer.Option(5.0, "--budget", help="Ceiling for this whole invocation."),
     model: str = typer.Option(None, "--model"),
     timeout: int = typer.Option(1800, "--timeout", help="Per-site seconds."),
+    stale_after: float = typer.Option(
+        STALE_AFTER_DAYS, "--stale-after", help="Days after which an audit no longer counts."
+    ),
+    force: bool = typer.Option(False, "--force", help="Audit every target, drift or no drift."),
     registry: Path = typer.Option(None, "--registry", "-r"),
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """Escalate to a Claude Code skill for judgement the rules can't make.
 
-    Costs real money — it runs Claude Code per project. Open deterministic
-    findings are passed in so the agent skips what the sweep already knows.
+    Costs real money — it runs Claude Code per project — so by default this
+    audits only the projects that have drifted since their last audit, plus any
+    whose last audit is stale or missing. Every target's reason is printed,
+    picked or not. `--force` audits the lot.
+
+    Open deterministic findings are passed in so the agent skips what the sweep
+    already knows.
     """
     reg = load_registry(registry)
     targets = [reg.get(project)] if project else reg.active
@@ -163,11 +181,25 @@ def audit(
 
     async def run() -> None:
         with open_store(db) as store:
-            for target in targets:
+            if not targets:
+                console.print("[yellow]No active projects to audit.[/]")
+                return
+            chosen = _choose(store, targets, skill, stale_after, force)
+            if not chosen:
+                # Loudly, not quietly: a pass that audits nothing and says
+                # nothing is indistinguishable from a pass that is broken.
+                console.print(
+                    f"\n[yellow]Nothing qualified.[/] All {len(targets)} project(s) were "
+                    f"audited within {stale_after:.0f}d and nothing decisive has changed "
+                    "since. Re-run with --force to audit them anyway."
+                )
+                return
+            console.print()
+            for target in chosen:
                 if budget.remaining <= 0:
                     console.print(
                         f"[yellow]Budget of ${budget_usd:.2f} spent; "
-                        f"skipping {len(targets) - targets.index(target)} project(s).[/]"
+                        f"skipping {len(chosen) - chosen.index(target)} project(s).[/]"
                     )
                     break
                 try:
@@ -185,6 +217,27 @@ def audit(
             console.print(f"\n[bold]${budget.spent:.2f}[/] spent of ${budget_usd:.2f}.")
 
     asyncio.run(run())
+
+
+def _choose(store, targets, skill: str, stale_after: float, force: bool) -> list:
+    """The projects this pass will audit, with the reason for each printed.
+
+    Selection is a default, not a cage: --force keeps the old behaviour of
+    auditing everything, and says so rather than quietly behaving differently
+    from the flagless run.
+    """
+    if force:
+        console.print(f"[dim]--force — selection skipped; auditing all {len(targets)}.[/]")
+        return list(targets)
+
+    by_id = {target.id: target for target in targets}
+    chosen = []
+    for choice in select_for_audit(store, targets, skill=skill, stale_after_days=stale_after):
+        mark = "[green]audit[/]" if choice.selected else "[dim] skip[/]"
+        console.print(f"  {mark} [bold]{choice.project}[/] [dim]— {choice.reason}[/]")
+        if choice.selected:
+            chosen.append(by_id[choice.project])
+    return chosen
 
 
 @app.command()

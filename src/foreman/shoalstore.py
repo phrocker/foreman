@@ -298,6 +298,17 @@ class ShoalStore:
         runs.sort(key=lambda r: int(r["id"]), reverse=True)
         return [int(r["id"]) for r in runs[:limit]]
 
+    def last_run_time(self, project: str, collector: str) -> str | None:
+        times = [
+            r["finished_at"]
+            for r in self._entities("ent:run|").values()
+            if r.get("project") == project
+            and r.get("collector") == collector
+            and r.get("ok") == "1"
+            and r.get("finished_at")
+        ]
+        return max(times) if times else None
+
     def sweep_times(self, project: str, limit: int = 2) -> list[str]:
         times = {
             r["finished_at"]

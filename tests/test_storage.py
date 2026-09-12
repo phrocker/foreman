@@ -147,3 +147,20 @@ def test_the_protocol_covers_what_callers_actually_use():
 
 def test_record_is_exported_for_callers_to_annotate_against():
     assert Record is not None
+
+
+def test_a_collector_that_never_ran_here_has_no_last_run_time(store):
+    """None is the answer escalation cares most about: a project never audited
+    has to be distinguishable from one audited long ago."""
+    run_id = store.start_run("p", "crawl")
+    store.finish_run(run_id, ok=True)
+    assert store.last_run_time("p", "audit:seo-audit") is None
+    assert store.last_run_time("p", "crawl") is not None
+
+
+def test_a_failed_run_is_not_a_last_run_time(store):
+    """An audit that crashed produced no judgement. Counting the attempt as
+    coverage would quietly stop the project ever being audited again."""
+    run_id = store.start_run("p", "audit:seo-audit")
+    store.finish_run(run_id, ok=False, error="timed out")
+    assert store.last_run_time("p", "audit:seo-audit") is None
