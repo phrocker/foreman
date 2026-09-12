@@ -22,6 +22,8 @@ from .chat import ChatError, ask
 from .config import load_registry
 from .diff import project_drift
 from .models import utcnow
+from .precision import label as precision_label
+from .precision import rank, rule_scores
 from .runner import (
     apply_action,
     apply_eligible,
@@ -106,14 +108,20 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         s = store()
         try:
             rows = s.open_findings(project)
+            scores = rule_scores(s.rule_precision())
         finally:
             s.close()
         out = []
-        for row in rows:
+        # Severity first, then how often this rule has been worth acting on —
+        # the dashboard ordered by severity alone, so a rule dismissed four
+        # times in five sat level with one always acted on. The label travels
+        # with the row so the order can be argued with rather than trusted.
+        for row in rank(rows, scores):
             if severity and row["severity"] != severity:
                 continue
             item = dict(row)
             item["subjects"] = json.loads(row["subjects"])
+            item["precision"] = precision_label(row, scores)
             out.append(item)
         return out
 
@@ -284,6 +292,26 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     )
         finally:
             s.close()
+        return out
+
+    @app.get("/api/history")
+    def history(
+        project: str | None = Query(None),
+        kind: str | None = Query(None),
+        since: str | None = Query(None),
+        limit: int = Query(300),
+    ) -> list[dict[str, Any]]:
+        """Repository history, read from the store rather than from GitHub."""
+        s = store()
+        try:
+            rows = s.events(project=project, kind=kind, since=since, limit=limit)
+        finally:
+            s.close()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["fields"] = json.loads(row["fields"] or "{}")
+            out.append(item)
         return out
 
     @app.get("/api/precision")

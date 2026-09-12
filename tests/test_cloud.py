@@ -250,6 +250,34 @@ async def test_a_service_account_holding_a_basic_role_is_counted_apart_from_a_hu
 
 
 @pytest.mark.asyncio
+async def test_googles_own_service_agents_are_not_counted_against_you(monkeypatch):
+    """Enabling an API binds editor to a Google-managed service agent, and you
+    cannot take it away. Counting those beside a default compute account you can
+    actually fix turns one piece of work into a number nobody can act on — on a
+    real project it reported two holders where exactly one was addressable."""
+    policy = {
+        "bindings": [
+            {
+                "role": "roles/editor",
+                "members": [
+                    "serviceAccount:1-compute@developer.gserviceaccount.com",
+                    "serviceAccount:1@cloudservices.gserviceaccount.com",
+                    "serviceAccount:service-1@container-engine-robot.iam.gserviceaccount.com",
+                    "serviceAccount:mine@acme-prod.iam.gserviceaccount.com",
+                ],
+            }
+        ]
+    }
+    facts = await collect(monkeypatch, {**WHOLE, "projects get-iam-policy": policy})
+    members = facts[("gcp:acme-prod", "iam_basic_role_members")]
+    assert facts[("gcp:acme-prod", "iam_basic_role_automation")] == "2"
+    assert "compute@developer" in members
+    assert "mine@acme-prod" in members
+    assert "cloudservices" not in members
+    assert "container-engine-robot" not in members
+
+
+@pytest.mark.asyncio
 async def test_public_principals_are_counted_wherever_the_binding_sits(monkeypatch):
     public = {
         "bindings": [

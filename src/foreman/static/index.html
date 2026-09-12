@@ -127,6 +127,27 @@
   }
   input[type="search"] { flex: 1; min-width: 170px; }
 
+  /* History. A log reads as a log: a date rule, then one line per thing that
+     happened, times in tabular figures so they form a column. */
+  .hist-day { padding: 10px 12px 5px; font-size: 11px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--text-3); border-top: 1px solid var(--border);
+    background: var(--surface-alt); position: sticky; top: 0; }
+  .hist { display: grid; grid-template-columns: 46px 68px 84px 1fr auto; gap: 10px;
+    align-items: baseline; padding: 6px 12px; border-top: 1px solid var(--border); }
+  .hist-time { font-variant-numeric: tabular-nums; color: var(--text-3); font-size: 12px; }
+  .hist-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-what a { color: var(--text); text-decoration: none; }
+  .hist-what a:hover { text-decoration: underline; }
+  .hist-who { color: var(--text-3); font-size: 12px; white-space: nowrap; }
+  /* Kind is a word, never a colour: four categories at a glance should not ask
+     anyone to learn a palette. */
+  .kind { font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+    color: var(--text-2); border: 1px solid var(--border-firm); border-radius: 999px;
+    padding: 1px 7px; text-align: center; }
+  /* What a rule has earned, shown beside its finding so the order can be
+     argued with. Muted: it explains the position, it is not the content. */
+  .earned { color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums;
+    white-space: nowrap; margin-left: 8px; }
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
@@ -373,6 +394,7 @@
     <button class="tab" data-tab="findings" role="tab" aria-selected="true">Findings <span class="count" id="countFindings"></span></button>
     <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
     <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
+    <button class="tab" data-tab="history"  role="tab" aria-selected="false">History <span class="count" id="countHistory"></span></button>
     <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
   </nav>
 
@@ -409,6 +431,18 @@
     <div class="panel scroll"><div id="driftList"></div></div>
   </section>
 
+  <section id="panel-history" role="tabpanel" hidden>
+    <div class="filters" id="historyKinds">
+      <button class="chip" data-kind="" aria-pressed="true">All</button>
+      <button class="chip" data-kind="commit" aria-pressed="false">Commits</button>
+      <button class="chip" data-kind="pr" aria-pressed="false">Pull requests</button>
+      <button class="chip" data-kind="issue" aria-pressed="false">Issues</button>
+      <button class="chip" data-kind="release" aria-pressed="false">Releases</button>
+      <span class="hint" id="historyHint">Read from the store, not from GitHub — this costs no API calls.</span>
+    </div>
+    <div class="panel scroll"><div id="historyList"></div></div>
+  </section>
+
   <section id="panel-rules" role="tabpanel" hidden>
     <div class="panel scroll"><div id="precisionList"></div></div>
   </section>
@@ -423,9 +457,9 @@ const SEV = {
   low:    { glyph: "●", label: "Low" },
 };
 const state = {
-  findings: [], overview: null, actions: [], drift: [], precision: [],
+  findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   sevs: new Set(), project: "", q: "", open: new Set(),
-  tab: "findings", decisiveOnly: true,
+  tab: "findings", decisiveOnly: true, kind: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -491,21 +525,23 @@ function ago(iso) {
 }
 
 async function load() {
-  const [overview, findings, actions, drift, precision] = await Promise.all([
+  const [overview, findings, actions, drift, precision, history] = await Promise.all([
     fetch("/api/overview").then((r) => r.json()),
     fetch("/api/findings").then((r) => r.json()),
     fetch("/api/actions").then((r) => r.json()),
     fetch("/api/drift").then((r) => r.json()),
     fetch("/api/precision").then((r) => r.json()),
+    fetch("/api/history").then((r) => r.json()),
   ]);
-  Object.assign(state, { overview, findings, actions, drift, precision });
+  Object.assign(state, { overview, findings, actions, drift, precision, history });
   // Each panel renders independently. One throwing used to abort the rest of
   // load(), so a single bad reference blanked the whole page instead of one
   // section — a failure mode that is much harder to notice than an empty panel.
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["drift", renderDrift], ["rules", renderPrecision], ["counts", renderCounts],
+    ["drift", renderDrift], ["history", renderHistory],
+    ["rules", renderPrecision], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -520,6 +556,7 @@ function renderCounts() {
   $("countFindings").textContent = visible().length || "";
   $("countActions").textContent = visibleActions().length || "";
   $("countDrift").textContent = visibleDrift().length || "";
+  $("countHistory").textContent = visibleHistory().length || "";
 }
 
 /** One filter, every panel. Re-rendering only findings is what made clicking a
@@ -528,7 +565,65 @@ function applyFilters() {
   renderFindings();
   renderActions();
   renderDrift();
+  renderHistory();
   renderCounts();
+}
+
+// --- history ---------------------------------------------------------------
+
+// A word per kind rather than a colour. "pr" is what the store calls it and
+// "PR" is what a person calls it.
+const KIND_LABEL = { commit: "commit", pr: "PR", issue: "issue", release: "release" };
+// Matches the API default. Kept here so the panel can say when it is capped.
+const HISTORY_LIMIT = 300;
+
+function visibleHistory() {
+  const q = state.q;
+  return state.history.filter((e) =>
+    (!state.project || e.project === state.project) &&
+    (!state.kind || e.kind === state.kind) &&
+    (!q || (e.title || "").toLowerCase().includes(q) || String(e.ref).toLowerCase().includes(q)));
+}
+
+function renderHistory() {
+  const rows = visibleHistory();
+  const list = $("historyList");
+  if (!rows.length) {
+    list.innerHTML = `<div class="empty">${
+      state.history.length
+        ? "Nothing here under the current filters."
+        : "No history retained yet. Run <code>foreman history</code> to ingest commits, pull requests, issues and releases."
+    }</div>`;
+    return;
+  }
+  const out = [];
+  let day = "";
+  for (const e of rows) {
+    const at = String(e.at || "");
+    if (at.slice(0, 10) !== day) {
+      day = at.slice(0, 10);
+      out.push(`<div class="hist-day">${esc(day)}</div>`);
+    }
+    const title = esc(e.title || e.ref);
+    // Links open on GitHub; the point of retaining history is not having to go
+    // there to read it, but following one item through is another matter.
+    const what = e.url
+      ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">${title}</a>`
+      : title;
+    out.push(`<div class="hist">
+      <span class="hist-time">${esc(at.slice(11, 16))}</span>
+      <span class="kind">${esc(KIND_LABEL[e.kind] || e.kind)}</span>
+      <span class="project-cell">${esc(e.project)}</span>
+      <span class="hist-what">${what}</span>
+      <span class="hist-who">${esc(e.actor || "")}</span>
+    </div>`);
+  }
+  // The API returns the most recent HISTORY_LIMIT events, so a full window
+  // silently looks like the whole history. Say which it is.
+  if (state.history.length >= HISTORY_LIMIT) {
+    out.push(`<div class="hist-day">Showing the ${HISTORY_LIMIT} most recent events. Filter by project or kind to look further back.</div>`);
+  }
+  list.innerHTML = out.join("");
 }
 
 // --- actions ---------------------------------------------------------------
@@ -920,7 +1015,8 @@ function renderFindings() {
         <td><span class="sev sev-${esc(f.severity)}"><span class="glyph">${s.glyph}</span><span class="txt">${esc(s.label)}</span></span></td>
         <td class="project-cell">${esc(f.project)}</td>
         <td>${esc(f.summary)}${f.source && f.source.startsWith("agent:")
-            ? `<span class="src" title="Reported by an agent, not a deterministic rule">${esc(f.source.slice(6))}</span>` : ""}</td>
+            ? `<span class="src" title="Reported by an agent, not a deterministic rule">${esc(f.source.slice(6))}</span>` : ""}${
+            f.precision ? `<span class="earned" title="How often findings from this rule have been acted on. Ordering within a severity band follows it.">${esc(f.precision)}</span>` : ""}</td>
         <td class="num">${f.subjects.length}</td>
       </tr>${detail}`;
   }).join("");
@@ -1083,7 +1179,7 @@ function showTab(name) {
   state.tab = name;
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute("aria-selected", String(t.dataset.tab === name)));
-  for (const panel of ["findings", "actions", "drift", "rules"]) {
+  for (const panel of ["findings", "actions", "drift", "history", "rules"]) {
     $("panel-" + panel).hidden = panel !== name;
   }
   try { localStorage.setItem("foreman-tab", name); } catch {}
@@ -1091,6 +1187,17 @@ function showTab(name) {
 
 document.querySelectorAll(".tab").forEach((t) =>
   t.addEventListener("click", () => showTab(t.dataset.tab)));
+
+$("historyKinds").addEventListener("click", (ev) => {
+  const chip = ev.target.closest("[data-kind]");
+  if (!chip) return;
+  state.kind = chip.dataset.kind;
+  for (const c of $("historyKinds").querySelectorAll("[data-kind]")) {
+    c.setAttribute("aria-pressed", String(c.dataset.kind === state.kind));
+  }
+  renderHistory();
+  renderCounts();
+});
 
 $("decisiveOnly").addEventListener("click", () => {
   state.decisiveOnly = !state.decisiveOnly;

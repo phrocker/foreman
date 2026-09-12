@@ -45,6 +45,22 @@ MAX_SERVICE_ACCOUNTS = 50
 # guidance is to leave these to humans and not to bind them to automation.
 BASIC_ROLES = frozenset({"roles/owner", "roles/editor"})
 
+# Google binds editor to its own service agents when you enable an API, and you
+# cannot take it away — reporting those alongside a default compute account you
+# *can* fix inflates the count with work nobody can do. `cloudservices` is the
+# API service agent; `service-<number>@` is the shape every other agent takes.
+# Deliberately narrow: `<number>-compute@developer` and anything under the
+# project's own iam domain stay in, because those are yours to change.
+GOOGLE_MANAGED_SUFFIXES = ("@cloudservices.gserviceaccount.com", "@system.gserviceaccount.com")
+
+
+def _google_managed(member: str) -> bool:
+    account = member.split(":", 1)[-1]
+    return account.endswith(GOOGLE_MANAGED_SUFFIXES) or (
+        account.startswith("service-") and account.endswith(".iam.gserviceaccount.com")
+    )
+
+
 # The two principals that mean "the internet". Bound to any role on a project
 # policy, they are almost never intentional.
 PUBLIC_MEMBERS = frozenset({"allUsers", "allAuthenticatedUsers"})
@@ -263,7 +279,9 @@ class GcloudCollector:
                 # A human owner is a governance question; a service account with
                 # project-wide edit is a blast radius, and the two deserve
                 # different rules.
-                basic_automation.extend(m for m in members if m.startswith("serviceAccount:"))
+                basic_automation.extend(
+                    m for m in members if m.startswith("serviceAccount:") and not _google_managed(m)
+                )
             if not role:
                 continue
             # Per-role rows so that a binding gaining a member is visible as a
