@@ -12,8 +12,9 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from foreman.chat import ALLOWED_TOOLS, PROMPT, Reply, _cost, portfolio_state
+from foreman.chat import PROMPT, Reply, ask, portfolio_state
 from foreman.config import Project, Registry
+from foreman.connectors import Result
 from foreman.models import Finding, Severity
 from foreman.store import SqliteStore
 
@@ -93,12 +94,27 @@ def test_the_model_is_told_it_cannot_approve():
     assert "cannot approve or reject" in PROMPT
 
 
-def test_the_model_gets_no_tool_that_reaches_the_working_tree():
-    """Its context is assembled and handed over, so it has no reason to go
-    looking and no means to change anything if it did."""
-    tools = set(ALLOWED_TOOLS.split(","))
-    assert "Edit" not in tools
-    assert "Bash" not in tools
+@pytest.mark.asyncio
+async def test_answering_a_question_asks_for_no_capability_at_all(world):
+    """Stronger than an allow-list: its context is assembled and handed over, so
+    it does not request a repository, the web or a shell — there is nothing to
+    restrict because nothing was asked for. It is also what lets the chat pane
+    run on a backend that has no tools to offer."""
+    registry, store = world
+    seen = []
+
+    class Spy:
+        name, capabilities = "spy", frozenset()
+
+        def available(self):
+            return True
+
+        async def run(self, task):
+            seen.append(task)
+            return Result(value=Reply(reply="ok"), cost_usd=0.0, connector=self.name)
+
+    await ask(store, registry, "what needs me?", connectors=[Spy()])
+    assert seen[0].needs == frozenset()
 
 
 def test_a_reply_without_refs_is_still_valid_but_empty():
@@ -123,12 +139,6 @@ def test_suggestions_parse_into_something_the_ui_can_render():
     )
     assert reply.suggest[0].action_id == 5
     assert reply.suggest[0].decision == "approve"
-
-
-def test_cost_survives_a_missing_or_broken_envelope():
-    assert _cost(json.dumps({"total_cost_usd": 0.215}).encode()) == pytest.approx(0.215)
-    assert _cost(b"not json") == 0.0
-    assert _cost(b'{"no": "cost"}') == 0.0
 
 
 def test_turns_are_stored_with_what_they_rested_on(world):

@@ -18,6 +18,8 @@ from .budget import Budget
 from .chat import ChatError, ask
 from .collectors import COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
+from .connectors import build as build_connectors
+from .connectors import describe as describe_connectors
 from .diff import Kind, project_drift
 from .history import ingest_all
 from .migrate import migrate as copy_store
@@ -210,6 +212,7 @@ def audit(
                         skill=skill,
                         budget=budget,
                         timeout_s=timeout,
+                        connectors=build_connectors(reg.connectors),
                         model=model,
                         log=lambda m: console.print(f"  {m}"),
                     )
@@ -497,7 +500,12 @@ def ask_cmd(
         with open_store(db) as store:
             try:
                 conversation_id, reply, cost = await ask(
-                    store, reg, question, conversation, model=model
+                    store,
+                    reg,
+                    question,
+                    conversation,
+                    model=model,
+                    connectors=build_connectors(reg.connectors),
                 )
             except ChatError as exc:
                 console.print(f"[red]{exc}[/]")
@@ -612,6 +620,27 @@ def timeline(
             _clip(row["title"] or "", 70),
         )
     console.print(table)
+
+
+@app.command(name="connectors")
+def connectors_cmd(registry: Path = typer.Option(None, "--registry", "-r")) -> None:
+    """Which backends can run an agent, and what each of them can do."""
+    reg = load_registry(registry)
+    rows = describe_connectors(build_connectors(reg.connectors))
+    if not rows:
+        console.print("[yellow]No connectors configured.[/] Nothing can run an audit or a chat.")
+        raise typer.Exit(1)
+
+    table = Table(box=None, pad_edge=False)
+    for column in ("connector", "state", "can"):
+        table.add_column(column)
+    for row in rows:
+        # Word, not colour: "down" has to survive a monochrome terminal.
+        state = "[green]up[/]" if row["available"] else "[red]down[/]"
+        table.add_row(str(row["name"]), state, ", ".join(row["capabilities"]) or "nothing extra")
+    console.print(table)
+    if not any(r["available"] for r in rows):
+        console.print("\n[yellow]Nothing is available.[/] Audits and chat will fail until one is.")
 
 
 @app.command()

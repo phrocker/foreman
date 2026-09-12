@@ -55,3 +55,17 @@ projects:
     # no collector — they report themselves as unmonitored rather than quietly
     # contributing nothing, because that is the half of the report you would
     # otherwise mistake for good news.
+
+# Which backends may run an agent, in preference order. The first that covers
+# what a task needs and is actually available gets it.
+#
+# Omit this block entirely and Foreman assumes claude-code, which is what it
+# required before connectors existed.
+#
+# A task declares capabilities — repo, web, shell, skills — and a connector
+# declares what it offers. An audit needs web, shell and skills; answering a
+# question about the portfolio needs none of them, because the state is
+# assembled and handed over rather than fetched. That is what lets the chat
+# pane run on a backend with no tools at all.
+connectors:
+  - kind: claude-code

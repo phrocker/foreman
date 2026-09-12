@@ -1,26 +1,14 @@
-import json
 import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
-from foreman.audit import AgentReport, _cost_of, _known_findings, select_for_audit
+from foreman.audit import AgentReport, _known_findings, select_for_audit
 from foreman.config import Project, Registry
 from foreman.models import Finding, Observation, Severity
 from foreman.runner import check_all
 from foreman.store import SqliteStore
-
-
-def test_cost_is_read_from_the_claude_json_envelope():
-    payload = json.dumps({"type": "result", "total_cost_usd": 0.103612}).encode()
-    assert _cost_of(payload) == pytest.approx(0.103612)
-
-
-def test_cost_of_garbage_is_zero_not_a_crash():
-    """A failed run still has to record something; it must not take the sweep down."""
-    assert _cost_of(b"not json at all") == 0.0
-    assert _cost_of(b'{"no": "cost here"}') == 0.0
 
 
 def test_agent_report_rejects_an_invented_severity():

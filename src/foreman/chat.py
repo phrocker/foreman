@@ -19,23 +19,16 @@ turns these conversations into edges once the store is a graph.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import tempfile
-from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from .config import Registry
+from .connectors import Connector, ConnectorError, Task, choose
 from .store import Store
 
 TIMEOUT_S = 180
-# Read-only. No Edit, no Bash, nothing that reaches the working tree — the
-# context it needs is assembled here and handed over, so it has no reason to go
-# looking and no means to change anything if it did.
-ALLOWED_TOOLS = "Read,Grep,Glob,Write"
 
 PROMPT = """You are Foreman, a portfolio monitor. Answer the operator's question
 about the projects below.
@@ -61,16 +54,13 @@ You cannot approve or reject anything. If an action should be taken, put it in
 
 ## Answer
 
-Write your answer to {out} as JSON matching exactly:
+`reply` is your answer, in markdown, a few sentences.
 
-{{"reply": "your answer, markdown, a few sentences",
-  "refs": {{"findings": [<ids you used>], "actions": [<ids>], "projects": ["<ids>"]}},
-  "suggest": [{{"action_id": <id>, "decision": "approve" | "reject",
-               "why": "one sentence"}}]}}
+`refs` is what it rests on — the finding, action and project ids you actually
+used. Leave a list empty rather than padding it.
 
-`refs` is what your answer rests on — leave a list empty rather than padding it.
-`suggest` is usually empty; offer something only when the state plainly supports
-it."""
+`suggest` is usually empty. Offer an approval or rejection only when the state
+plainly supports it, with one sentence saying why."""
 
 
 class Suggestion(BaseModel):
@@ -150,74 +140,43 @@ def _history(store: Store, conversation_id: int, limit: int = 12) -> str:
     return "\n".join(f"{t['role']}: {t['content']}" for t in turns)
 
 
-def _cost(stdout: bytes) -> float:
-    try:
-        payload = json.loads(stdout.decode("utf-8", "replace"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return 0.0
-    value = payload.get("total_cost_usd") if isinstance(payload, dict) else None
-    return float(value) if isinstance(value, (int, float)) else 0.0
-
-
 async def ask(
     store: Store,
     registry: Registry,
     question: str,
     conversation_id: int | None = None,
     model: str | None = None,
+    connectors: list[Connector] | None = None,
 ) -> tuple[int, Reply, float]:
     """Put a question to Foreman. Returns (conversation id, reply, USD spent)."""
+    if connectors is None:
+        from .connectors.claudecode import ClaudeCodeConnector
+
+        connectors = [ClaudeCodeConnector()]
     if conversation_id is None:
         conversation_id = store.start_conversation(question[:80])
     store.add_message(conversation_id, "user", question)
 
-    with tempfile.TemporaryDirectory(prefix="foreman-chat-") as tmp:
-        out_path = Path(tmp) / "reply.json"
-        prompt = PROMPT.format(
+    task = Task(
+        instructions=PROMPT.format(
             state=portfolio_state(store, registry),
             history=_history(store, conversation_id),
             question=question,
-            out=out_path,
-        )
-        cmd = [
-            "claude",
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            "--permission-mode",
-            "dontAsk",
-            "--allowed-tools",
-            ALLOWED_TOOLS,
-            "--add-dir",
-            str(tmp),
-        ]
-        if model:
-            cmd += ["--model", model]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=tmp,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            # Nested Claude Code sessions inherit this and refuse to start.
-            env={k: v for k, v in os.environ.items() if k != "CLAUDECODE"},
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_S)
-        except TimeoutError:
-            proc.kill()
-            raise ChatError(f"timed out after {TIMEOUT_S}s") from None
-
-        cost = _cost(stdout)
-        if proc.returncode != 0:
-            raise ChatError(stderr.decode("utf-8", "replace")[:300] or "claude failed")
-        if not out_path.exists():
-            raise ChatError("no reply was written")
-        try:
-            reply = Reply.model_validate_json(out_path.read_text())
-        except ValidationError as exc:
-            raise ChatError(f"reply did not match the schema: {exc}") from exc
+        ),
+        schema=Reply,
+        # Nothing. The whole portfolio state is assembled above and handed
+        # over, so this asks for no repository, no web and no shell — which is
+        # what makes the chat pane work on any backend, including one with no
+        # tools at all.
+        needs=frozenset(),
+        timeout_s=TIMEOUT_S,
+        model=model,
+    )
+    try:
+        result = await choose(connectors, task).run(task)
+    except ConnectorError as exc:
+        raise ChatError(str(exc)) from exc
+    reply, cost = result.value, result.cost_usd
 
     store.add_message(
         conversation_id,

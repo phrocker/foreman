@@ -127,6 +127,20 @@
   }
   input[type="search"] { flex: 1; min-width: 170px; }
 
+  /* Connectors. Whether a backend is up decides whether audits and chat work
+     at all, so state is a word and a shape, never a colour on its own. */
+  .conn { display: grid; grid-template-columns: 160px 76px 1fr; gap: 10px;
+    align-items: baseline; padding: 8px 12px; border-top: 1px solid var(--border); }
+  .conn-name { font-weight: 600; }
+  .conn-state { font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  .conn-up { color: var(--good); }
+  .conn-down { color: var(--high); }
+  .conn-caps { color: var(--text-2); font-size: 12px; }
+  .warn { margin: 0; padding: 10px 12px; border-top: 1px solid var(--border);
+    background: var(--surface-alt); color: var(--text); font-size: 13px; }
+  .section-head { padding: 10px 12px 4px; font-size: 11px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--text-3); }
+
   /* History. A log reads as a log: a date rule, then one line per thing that
      happened, times in tabular figures so they form a column. */
   .hist-day { padding: 10px 12px 5px; font-size: 11px; letter-spacing: .05em;
@@ -444,7 +458,14 @@
   </section>
 
   <section id="panel-rules" role="tabpanel" hidden>
-    <div class="panel scroll"><div id="precisionList"></div></div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="section-head">Connectors — what can run an agent</div>
+      <div id="connectorList"></div>
+    </div>
+    <div class="panel scroll">
+      <div class="section-head">Rule precision — how often a rule is worth acting on</div>
+      <div id="precisionList"></div>
+    </div>
   </section>
 </div>
 </div>
@@ -458,6 +479,7 @@ const SEV = {
 };
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
+  connectors: [],
   sevs: new Set(), project: "", q: "", open: new Set(),
   tab: "findings", decisiveOnly: true, kind: "",
 };
@@ -525,15 +547,16 @@ function ago(iso) {
 }
 
 async function load() {
-  const [overview, findings, actions, drift, precision, history] = await Promise.all([
+  const [overview, findings, actions, drift, precision, history, connectors] = await Promise.all([
     fetch("/api/overview").then((r) => r.json()),
     fetch("/api/findings").then((r) => r.json()),
     fetch("/api/actions").then((r) => r.json()),
     fetch("/api/drift").then((r) => r.json()),
     fetch("/api/precision").then((r) => r.json()),
     fetch("/api/history").then((r) => r.json()),
+    fetch("/api/connectors").then((r) => r.json()),
   ]);
-  Object.assign(state, { overview, findings, actions, drift, precision, history });
+  Object.assign(state, { overview, findings, actions, drift, precision, history, connectors });
   // Each panel renders independently. One throwing used to abort the rest of
   // load(), so a single bad reference blanked the whole page instead of one
   // section — a failure mode that is much harder to notice than an empty panel.
@@ -541,7 +564,7 @@ async function load() {
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
     ["drift", renderDrift], ["history", renderHistory],
-    ["rules", renderPrecision], ["counts", renderCounts],
+    ["connectors", renderConnectors], ["rules", renderPrecision], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -912,6 +935,31 @@ function renderDrift() {
         <span class="rule-tag">${esc(d.key)}</span></div>
       <div class="drift-subject">${esc(d.subject)}</div>${body}</div>`;
   }).join("");
+}
+
+// --- connectors ------------------------------------------------------------
+
+function renderConnectors() {
+  const list = $("connectorList");
+  if (!state.connectors.length) {
+    list.innerHTML =
+      '<p class="warn">No connectors configured, so nothing can run an audit or answer a question. Add one under <code>connectors:</code> in foreman.yaml.</p>';
+    return;
+  }
+  const rows = state.connectors.map((c) => {
+    const up = c.available;
+    return `<div class="conn">
+      <span class="conn-name">${esc(c.name)}</span>
+      <span class="conn-state ${up ? "conn-up" : "conn-down"}">${up ? "\u25CF up" : "\u25CB down"}</span>
+      <span class="conn-caps">${(c.capabilities || []).map(esc).join(" \u00B7 ") || "no extra capabilities"}</span>
+    </div>`;
+  });
+  // Everything failing because no backend is reachable looks exactly like a
+  // portfolio with nothing to say, which is the confusion worth pre-empting.
+  if (!state.connectors.some((c) => c.available)) {
+    rows.push('<p class="warn">Nothing is available right now — audits and chat will fail until one is.</p>');
+  }
+  list.innerHTML = rows.join("");
 }
 
 // --- rule precision --------------------------------------------------------

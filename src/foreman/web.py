@@ -20,6 +20,8 @@ from .actions import Stale
 from .actions.sagform import policy_allows
 from .chat import ChatError, ask
 from .config import load_registry
+from .connectors import build as build_connectors
+from .connectors import describe as describe_connectors
 from .diff import project_drift
 from .models import utcnow
 from .precision import label as precision_label
@@ -314,6 +316,17 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             out.append(item)
         return out
 
+    @app.get("/api/connectors")
+    def connectors() -> list[dict[str, Any]]:
+        """Which backends can run an agent, and whether they are up.
+
+        Worth surfacing rather than leaving to a log: with nothing available,
+        audits and the chat pane fail, and the dashboard would otherwise look
+        exactly like a portfolio with nothing to say.
+        """
+        registry = load_registry(registry_path)
+        return describe_connectors(build_connectors(registry.connectors))
+
     @app.get("/api/precision")
     def precision() -> list[dict[str, Any]]:
         s = store()
@@ -350,7 +363,11 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         s = store()
         try:
             conversation_id, reply, cost = await ask(
-                s, registry, question, payload.get("conversation_id")
+                s,
+                registry,
+                question,
+                payload.get("conversation_id"),
+                connectors=build_connectors(registry.connectors),
             )
         except ChatError as exc:
             raise HTTPException(502, str(exc)) from None

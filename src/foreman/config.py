@@ -162,11 +162,29 @@ class Project(BaseModel):
         return tuple(name for name in DOMAINS if self.covers(name))
 
 
+class ConnectorConfig(BaseModel):
+    """One backend that can run an agent.
+
+    Order is preference: the first that covers what a task needs and is
+    actually available gets it. Absent entirely, Foreman assumes Claude Code,
+    which is what it required before connectors existed.
+    """
+
+    kind: str
+    model: str | None = None
+    # Kept out of here on purpose — a key belongs in the environment, not in a
+    # file that sits next to a list of client sites.
+    enabled: bool = True
+
+
 class Registry(BaseModel):
     # Where state lives: "sqlite" (a file beside this one) or
     # "shoal://host:port" for a running `shoal-embed serve`.
     store: str = "sqlite"
     projects: list[Project]
+    connectors: list[ConnectorConfig] = Field(
+        default_factory=lambda: [ConnectorConfig(kind="claude-code")]
+    )
 
     @property
     def active(self) -> list[Project]:
