@@ -20,12 +20,14 @@ turns these conversations into edges once the store is a graph.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from .config import Registry
 from .connectors import Connector, ConnectorError, Task, choose
+from .graph import FROM_SKILL, SEEN_ON, key_of, node
 from .store import Store
 
 TIMEOUT_S = 180
@@ -130,6 +132,41 @@ def portfolio_state(store: Store, registry: Registry) -> str:
             lines.append(f"- {row['rule']}: {acted}/{decided} acted on")
     else:
         lines.append("\n### Rule precision\nNot yet measured — no findings decided.")
+
+    lines.append(_graph(store, findings))
+    return "\n".join(lines)
+
+
+def _graph(store: Store, findings: Sequence[Any]) -> str:
+    """What the graph relates, so Foreman can answer questions about itself.
+
+    Asked "what's in the graph", it used to say there wasn't one — the state it
+    got was a flat list and it answered honestly from that. The store *is* a
+    graph and the relationships are the part worth knowing: which rules recur
+    across the portfolio, and which of them came from judgement rather than a
+    check that fires wherever it applies.
+    """
+    lines = [
+        "\n### The graph",
+        "State is stored as a graph: project -has_finding-> finding -from_rule-> rule,",
+        "with rule -seen_on-> project back the other way, finding -found_by-> skill,",
+        "and rule -from_skill-> skill. Dispatched agents are given the same relationships.",
+    ]
+    recurring: list[tuple[str, list[str], bool]] = []
+    for rule in sorted({row["rule"] for row in findings}):
+        seen = [key_of(p) for p in store.neighbors([node("rule", rule)], [SEEN_ON])]
+        if len(seen) > 1:
+            judged = bool(store.neighbors([node("rule", rule)], [FROM_SKILL]))
+            recurring.append((rule, sorted(seen), judged))
+
+    if not recurring:
+        lines.append("\nNo rule is open on more than one project.")
+        return "\n".join(lines)
+
+    lines.append("\nRules open on more than one project — portfolio problems, not chores:")
+    for rule, seen, judged in sorted(recurring, key=lambda r: (-len(r[1]), r[0])):
+        source = "agent judgement" if judged else "deterministic check"
+        lines.append(f"- {rule} on {', '.join(seen)} ({source})")
     return "\n".join(lines)
 
 
