@@ -36,6 +36,7 @@ from .runner import (
     reject_action,
     verify_applied,
 )
+from .skills import track_records
 from .store import default_db, open_store
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
@@ -482,6 +483,48 @@ def precision(db: Path = typer.Option(None, "--db")) -> None:
             str(acted),
             str(int(row["dismissed"] or 0)),
             f"[{style}]{rate:.0%}[/]",
+        )
+    console.print(table)
+
+
+@app.command(name="skills")
+def skills_cmd(db: Path = typer.Option(None, "--db")) -> None:
+    """What each dispatched skill has cost, returned, and been worth acting on.
+
+    The counterpart to `precision` for the expensive half of the portfolio.
+    `audit` already knew what a run cost; until it was written down, "is
+    /seo-audit worth it on this kind of project" had no answer but a habit.
+    """
+    with open_store(db) as store:
+        records = track_records(store)
+    if not records:
+        console.print(
+            "[dim]No skill has been dispatched yet. `foreman audit` records what "
+            "each run costs and what it returns.[/]"
+        )
+        return
+    table = Table(box=None, pad_edge=False)
+    for col in ("skill", "runs", "spent", "per run", "findings", "per finding", "acted on"):
+        table.add_column(col)
+    for record in records:
+        # Unmeasured is printed as a word, never as 0%: a skill nobody has
+        # judged has not failed, and the two must not look alike in a table
+        # someone is about to spend money on the strength of.
+        if record.measured:
+            rate = record.acted / record.decided
+            style = "red" if rate < 0.5 else ("yellow" if rate < 0.8 else "green")
+            standing = f"[{style}]{rate:.0%} of {record.decided}[/]"
+        else:
+            standing = "[dim]unmeasured[/]"
+        per_useful = record.cost_per_acted_finding
+        table.add_row(
+            f"/{record.skill}",
+            str(record.runs) + (f" ({record.failed} failed)" if record.failed else ""),
+            f"${record.cost_usd:.2f}",
+            f"${record.cost_per_run:.2f}" if record.cost_per_run is not None else "—",
+            str(record.findings),
+            f"${per_useful:.2f}" if per_useful is not None else "—",
+            standing,
         )
     console.print(table)
 

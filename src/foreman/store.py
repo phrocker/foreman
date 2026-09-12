@@ -74,8 +74,16 @@ class Store(Protocol):
 
     # --- observation plane ---
     def start_run(self, project: str, collector: str) -> int: ...
-    def finish_run(self, run_id: int, ok: bool = True, error: str | None = None) -> None: ...
+    def finish_run(
+        self,
+        run_id: int,
+        ok: bool = True,
+        error: str | None = None,
+        cost_usd: float | None = None,
+        connector: str | None = None,
+    ) -> None: ...
     def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]: ...
+    def runs(self, run_ids: Sequence[int]) -> list[Record]: ...
     def last_run_time(self, project: str, collector: str) -> str | None: ...
     def sweep_times(self, project: str, limit: int = 2) -> list[str]: ...
     def record(self, run_id: int, observations: Iterable[Observation]) -> int: ...
@@ -122,6 +130,7 @@ class Store(Protocol):
 
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
+    def nodes(self, kind: str) -> list[str]: ...
     def neighbors(
         self,
         sources: Sequence[str],
@@ -185,7 +194,13 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at  TEXT NOT NULL,
     finished_at TEXT,
     ok          INTEGER,
-    error       TEXT
+    error       TEXT,
+    -- What this run cost and who served it. Collectors are free and leave both
+    -- NULL; a dispatched skill is not, and `audit` used to print the figure
+    -- once and drop it — which is why "is /seo-audit worth what it costs on
+    -- this kind of project" had no answer.
+    cost_usd    REAL,
+    connector   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observations (
@@ -378,6 +393,11 @@ def _additive_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE actions ADD COLUMN verification TEXT")
         conn.execute("ALTER TABLE actions ADD COLUMN verified_at TEXT")
         conn.execute("ALTER TABLE actions ADD COLUMN verification_ref TEXT")
+    # Every audit already run spent money that was never written down. Nothing
+    # recovers those, but the column has to exist before the next one can be.
+    if "cost_usd" not in _columns(conn, "runs"):
+        conn.execute("ALTER TABLE runs ADD COLUMN cost_usd REAL")
+        conn.execute("ALTER TABLE runs ADD COLUMN connector TEXT")
 
 
 def _one(row: sqlite3.Row | None) -> Record | None:
@@ -437,12 +457,44 @@ class SqliteStore:
         self._db.commit()
         return int(cur.lastrowid)
 
-    def finish_run(self, run_id: int, ok: bool = True, error: str | None = None) -> None:
+    def finish_run(
+        self,
+        run_id: int,
+        ok: bool = True,
+        error: str | None = None,
+        cost_usd: float | None = None,
+        connector: str | None = None,
+    ) -> None:
+        """Close a run, recording what it cost if it cost anything.
+
+        COALESCE rather than assignment, so a caller that knows nothing about
+        cost — every collector — cannot blank a figure an earlier write
+        established. A run that failed after spending is the case this protects:
+        the money is gone and the ledger has to keep saying so.
+        """
         self._db.execute(
-            "UPDATE runs SET finished_at = ?, ok = ?, error = ? WHERE id = ?",
-            (utcnow(), 1 if ok else 0, error, run_id),
+            "UPDATE runs SET finished_at = ?, ok = ?, error = ?, "
+            "cost_usd = COALESCE(?, cost_usd), connector = COALESCE(?, connector) "
+            "WHERE id = ?",
+            (utcnow(), 1 if ok else 0, error, cost_usd, connector, run_id),
         )
         self._db.commit()
+
+    def runs(self, run_ids: Sequence[int]) -> list[Record]:
+        """The run records behind a set of run node ids, oldest first.
+
+        Takes ids rather than a filter because the question "which runs" is one
+        the graph answers — walk `skill -ran-> run` — and this only fetches what
+        that walk already named.
+        """
+        ids = [int(value) for value in run_ids]
+        if not ids:
+            return []
+        rows = self._db.execute(
+            f"SELECT * FROM runs WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id",
+            ids,
+        )
+        return _many(rows)
 
     def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]:
         """Most recent successful run ids, newest first."""
@@ -551,7 +603,7 @@ class SqliteStore:
             )
             recorded.append((int(cursor.lastrowid), f))
         self._db.commit()
-        self.relate(edges_for(recorded, source))
+        self.relate(edges_for(recorded, source, run_id))
         return len(recorded)
 
     def retire_rule_findings(self, project: str) -> int:
@@ -840,6 +892,23 @@ class SqliteStore:
         )
         self._db.commit()
         return len(rows)
+
+    def nodes(self, kind: str) -> list[str]:
+        """Every node of this kind the graph knows about, sorted.
+
+        A walk needs somewhere to start, and "which skills have ever run" has no
+        other honest answer: a skill with no findings appears in no finding row,
+        and a list drawn from configuration would name skills that never ran.
+        Membership is being an endpoint of an edge, which is also what the shoal
+        implementation materialises as a node cell.
+        """
+        prefix = f"{kind}|"
+        rows = self._db.execute(
+            "SELECT DISTINCT source AS id FROM edges WHERE substr(source, 1, ?) = ? "
+            "UNION SELECT DISTINCT target FROM edges WHERE substr(target, 1, ?) = ?",
+            (len(prefix), prefix, len(prefix), prefix),
+        )
+        return sorted(row["id"] for row in rows)
 
     def neighbors(
         self,

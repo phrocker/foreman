@@ -25,8 +25,10 @@ from .budget import Budget
 from .config import Project
 from .connectors import REPO, SHELL, SKILLS, WEB, Connector, ConnectorError, Task, choose
 from .diff import drift_since
+from .graph import skill_run_edges
 from .models import Finding, Severity
 from .pack import audit_pack
+from .skills import track_record
 from .store import Store
 
 # No default: the skill names the domain, and Foreman has no opinion about
@@ -41,6 +43,14 @@ DEFAULT_TIMEOUT_S = 1800
 # which a portfolio of forty projects costs about what one project costs to
 # audit every day.
 STALE_AFTER_DAYS = 14.0
+
+# The standing below which a skill's own record argues against spending on it
+# again. Below neutral by design: an unmeasured skill scores exactly NEUTRAL, so
+# nothing here can ever suppress a skill nobody has judged — only one that has
+# been judged and found wanting. The gap is wide enough that a couple of early
+# dismissals cannot silence a skill on their own; under precision.py's prior it
+# takes roughly one acted finding in four, over a handful of decisions.
+SKILL_FLOOR = 0.35
 
 # Analysis skills fetch pages, run commands, and read files. Write is needed for
 # the report itself. Nothing here edits the repo: fixes are a separate, reviewed
@@ -133,6 +143,12 @@ async def run_audit(
         for r in store.open_findings(project.id)
     }
     run_id = store.start_run(project.id, f"audit:{skill}")
+    # What this dispatch spent, carried out of the try so the failure path can
+    # record it too. A run that timed out after $2.18 is still $2.18 the skill
+    # cost, and a track record assembled from successes alone would recommend
+    # the skill that fails most expensively.
+    spent = 0.0
+    backend: str | None = None
     try:
         task = Task(
             instructions=PROMPT.format(
@@ -158,7 +174,13 @@ async def run_audit(
             hints={"skill": skill},
         )
         connector = choose(connectors, task)
-        log(f"{project.id}: /{skill} via {connector.name} …")
+        backend = connector.name
+        # Related before the answer comes back, not after. These say what was
+        # dispatched at what, and that is true the moment it is dispatched —
+        # deferring them until a result parses would lose every run that cost
+        # money and then fell over, which are the ones worth remembering.
+        store.relate(skill_run_edges(run_id, skill, project.id, backend))
+        log(f"{project.id}: /{skill} via {backend} …")
         try:
             result = await connector.run(task)
         except ConnectorError as exc:
@@ -166,10 +188,11 @@ async def run_audit(
             # already gone, so the only question is whether the ledger records
             # it. Refusing the entry once reported $0.00 against a real $2.18
             # and left the ceiling intact for every remaining project.
+            spent = exc.cost_usd
             _charge(budget, exc.cost_usd, project, log)
             raise AuditError(str(exc)) from exc
 
-        cost = result.cost_usd
+        cost = spent = result.cost_usd
         _charge(budget, cost, project, log)
         report = result.value
 
@@ -194,12 +217,18 @@ async def run_audit(
             )
 
         store.record_findings(run_id, findings, source=f"agent:{skill}")
-        store.finish_run(run_id, ok=True)
+        store.finish_run(run_id, ok=True, cost_usd=cost, connector=backend)
         repeated = f", {duplicates} already known" if duplicates else ""
         log(f"{project.id}: {len(findings)} finding(s){repeated}, ${cost:.2f}")
         return len(findings), cost
     except Exception as exc:
-        store.finish_run(run_id, ok=False, error=f"{type(exc).__name__}: {exc}"[:500])
+        store.finish_run(
+            run_id,
+            ok=False,
+            error=f"{type(exc).__name__}: {exc}"[:500],
+            cost_usd=spent,
+            connector=backend,
+        )
         raise
 
 
@@ -256,12 +285,31 @@ def select_for_audit(
     describes the project, and having drifted since the last one. Anything else
     is money spent to be told what the last run already said.
 
+    A fourth thing can take one away: the skill's own record. Drift and age say
+    the project moved; they say nothing about whether this skill has ever had
+    anything useful to say about it, and re-running one whose findings are
+    dismissed four times in five is the same wasted $2.18 by another route.
+
     Every project comes back, skipped ones included — a selection that returns
     only its winners cannot be argued with.
     """
     now = now or datetime.now(UTC)
     collector = f"audit:{skill}"
     choices: list[Choice] = []
+
+    # Evidence for *not* spending again, never for spending unattended. The
+    # record can only remove a project from the list, and only one this skill
+    # has already been judged on: an unmeasured skill sits at neutral, above the
+    # floor, so a new skill is never talked out of its first run — which is the
+    # run that would measure it. Portfolio-wide rather than per-project, which
+    # is what the decided findings can currently support; the reason says so by
+    # quoting the counts it rests on.
+    record = track_record(store, skill)
+    veto = (
+        f"only {record.acted} of {record.decided} /{skill} findings were acted on"
+        if record.measured and record.standing < SKILL_FLOOR
+        else None
+    )
 
     for project in projects:
         last = store.last_run_time(project.id, collector)
@@ -274,12 +322,9 @@ def select_for_audit(
             choices.append(Choice(project.id, True, f"last audit is stamped {last!r}, unreadable"))
             continue
         if age >= stale_after_days:
+            horizon = f"last audited {_ago(age)}, past the {stale_after_days:.0f}d horizon"
             choices.append(
-                Choice(
-                    project.id,
-                    True,
-                    f"last audited {_ago(age)}, past the {stale_after_days:.0f}d horizon",
-                )
+                Choice(project.id, not veto, horizon if not veto else f"{horizon}, but {veto}")
             )
             continue
 
@@ -289,12 +334,9 @@ def select_for_audit(
         changes = drift_since(store, project.id, last)
         decisive = [change for change in changes if change.decisive]
         if decisive:
+            moved = f"{len(decisive)} decisive change(s) since the audit {_ago(age)}"
             choices.append(
-                Choice(
-                    project.id,
-                    True,
-                    f"{len(decisive)} decisive change(s) since the audit {_ago(age)}",
-                )
+                Choice(project.id, not veto, moved if not veto else f"{moved}, but {veto}")
             )
         elif changes:
             choices.append(

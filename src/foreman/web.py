@@ -35,6 +35,8 @@ from .runner import (
     propose_actions,
     reject_action,
 )
+from .skills import TrackRecord, track_records
+from .skills import label as skill_label
 from .store import Store, open_store
 
 STATIC = Path(__file__).parent / "static"
@@ -338,6 +340,47 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         """
         registry = load_registry(registry_path)
         return describe_connectors(build_connectors(registry.connectors))
+
+    def _skill_payload(record: TrackRecord) -> dict[str, Any]:
+        """One skill's record as the page needs it.
+
+        `measured` travels separately from `standing` rather than being inferred
+        from it, because an unmeasured skill and a neutral one score the same
+        0.5 by design — and a page that guessed from the number alone would
+        print "50% acted on" about findings nobody has judged.
+        """
+        return {
+            "skill": record.skill,
+            "runs": record.runs,
+            "failed": record.failed,
+            "cost_usd": record.cost_usd,
+            "findings": record.findings,
+            "acted": record.acted,
+            "decided": record.decided,
+            "measured": record.measured,
+            "standing": record.standing,
+            "precision": skill_label(record),
+            "cost_per_run": record.cost_per_run,
+            "findings_per_run": record.findings_per_run,
+            "cost_per_acted_finding": record.cost_per_acted_finding,
+            "projects": [vars(s_) for s_ in record.projects],
+            "connectors": [vars(s_) for s_ in record.connectors],
+        }
+
+    @app.get("/api/skills")
+    def skills() -> list[dict[str, Any]]:
+        """What each skill has cost, produced, and been worth acting on.
+
+        Dispatching a skill is the most expensive thing Foreman does and was
+        the only one with no ledger behind it, so this sits beside connectors
+        and rule precision: the same question — is this worth what it costs —
+        asked of the thing that costs the most.
+        """
+        s = store()
+        try:
+            return [_skill_payload(record) for record in track_records(s)]
+        finally:
+            s.close()
 
     @app.get("/api/precision")
     def precision() -> list[dict[str, Any]]:

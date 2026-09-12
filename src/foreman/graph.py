@@ -45,6 +45,15 @@ FOUND_BY = "found_by"
 # walking to some finding and back would depend on which finding you picked.
 FROM_SKILL = "from_skill"
 CONCERNS = "concerns"
+# A skill's track record, as relationships rather than a tally kept beside the
+# graph. Dispatching a skill costs money, so the run it produced is the unit
+# that carries the evidence: what it cost, where it was aimed, which backend
+# served it, and what came back. Each of those is a different question, so each
+# is its own edge and none of them has to be recomputed from the others.
+RAN = "ran"
+AUDITED = "audited"
+RAN_VIA = "ran_via"
+YIELDED = "yielded"
 
 Edge = tuple[str, str, str]
 
@@ -70,7 +79,9 @@ def key_of(node_id: str) -> str:
     return node_id.split("|", 1)[1] if "|" in node_id else ""
 
 
-def finding_edges(finding_id: int, finding: Finding, source: str) -> list[Edge]:
+def finding_edges(
+    finding_id: int, finding: Finding, source: str, run_id: int | None = None
+) -> list[Edge]:
     """Everything a finding relates to, written when the finding is.
 
     `seen_on` is the reverse of walking project -> finding -> rule, and exists
@@ -78,6 +89,11 @@ def finding_edges(finding_id: int, finding: Finding, source: str) -> list[Edge]:
     which rules turned up, not which project each came from. Attribution is the
     question the pack actually asks — "found on three other projects" — so the
     edge that answers it directly is stored rather than recomputed.
+
+    `yielded` runs from the run rather than from the skill because yield is a
+    per-run quantity: "twelve findings for $2.18" is a sentence about one
+    dispatch, and an edge straight from the skill would collapse every run it
+    ever made into a single undated heap.
     """
     finding_node = node("finding", finding_id)
     rule_node = node("rule", finding.rule)
@@ -88,6 +104,8 @@ def finding_edges(finding_id: int, finding: Finding, source: str) -> list[Edge]:
         (finding_node, FROM_RULE, rule_node),
         (rule_node, SEEN_ON, project_node),
     ]
+    if run_id is not None:
+        edges.append((node("run", run_id), YIELDED, finding_node))
     # Which skill produced it, so a track record can be attributed to the thing
     # that earned it rather than to "an agent" in general.
     if source.startswith("agent:"):
@@ -98,8 +116,31 @@ def finding_edges(finding_id: int, finding: Finding, source: str) -> list[Edge]:
     return edges
 
 
-def edges_for(findings: Iterable[tuple[int, Finding]], source: str) -> list[Edge]:
-    return [e for finding_id, f in findings for e in finding_edges(finding_id, f, source)]
+def edges_for(
+    findings: Iterable[tuple[int, Finding]], source: str, run_id: int | None = None
+) -> list[Edge]:
+    return [e for finding_id, f in findings for e in finding_edges(finding_id, f, source, run_id)]
+
+
+def skill_run_edges(run_id: int, skill: str, project: str, connector: str) -> list[Edge]:
+    """What one dispatch of a skill relates to, written when it is dispatched.
+
+    Written before the answer comes back rather than after, because a run that
+    timed out still spent the money and still belongs to the skill that spent
+    it. A track record assembled only from successes would flatter every skill
+    that fails expensively.
+
+    The connector is an endpoint of its own because a skill's cost is not
+    separable from the backend that produced it: the same `/seo-audit` against
+    the same project costs differently through a different harness, and
+    averaging the two hides the only difference that would explain the bill.
+    """
+    run_node = node("run", run_id)
+    return [
+        (node("skill", skill), RAN, run_node),
+        (run_node, AUDITED, node("project", project)),
+        (run_node, RAN_VIA, node("connector", connector)),
+    ]
 
 
 def relink(store: Any) -> int:
@@ -123,5 +164,11 @@ def relink(store: Any) -> int:
             summary=row["summary"],
             subjects=json.loads(row["subjects"] or "[]"),
         )
-        edges += finding_edges(int(row["id"]), finding, row["source"] or "rule")
+        run_id = row["run_id"]
+        edges += finding_edges(
+            int(row["id"]),
+            finding,
+            row["source"] or "rule",
+            int(run_id) if run_id is not None else None,
+        )
     return store.relate(edges)

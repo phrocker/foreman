@@ -154,6 +154,7 @@ foreman collect --collector render
 | `foreman migrate shoal://…` | Copy this store into another one |
 | `foreman verify` | Ask each project's checks whether applied actions held up |
 | `foreman precision` | Which rules earn their findings |
+| `foreman skills` | What each dispatched skill costs and returns |
 | `foreman serve` | Dashboard on loopback (default `:8765`) |
 
 `--project` scopes any of them; `--collector` scopes `collect`.
@@ -181,6 +182,30 @@ so a nightly sweep cannot wipe results you paid for.
 `--budget` is a real ceiling. Cost comes back in Claude Code's JSON envelope and
 is recorded whether or not it fits — a ledger that discards an over-ceiling
 charge reports `$0.00` against a real bill and gates nothing.
+
+### What a skill has earned
+
+That cost is kept rather than printed, on the run that spent it, and the graph
+relates the run to the skill that made it, the project it was aimed at, the
+backend that served it and the findings it returned. `foreman skills` adds it
+up: cost per run, findings per run, and cost per finding actually acted on —
+the number that says whether a pass was worth it.
+
+```bash
+foreman skills
+
+skill            runs          spent  per run  findings  per finding  acted on
+/seo-audit       3             $6.43  $2.14    5         $2.14        60% of 5
+/security-audit  2 (1 failed)  $1.06  $0.53    1         —            unmeasured
+```
+
+**Unmeasured is not a bad score.** A skill nobody has judged sits exactly where
+`precision.py` puts an unjudged rule — neutral — because a skill demoted for
+being new would never collect the decisions that would measure it. Only a skill
+already judged and found wanting can lose a dispatch: `foreman audit` will skip
+a re-audit that drift or staleness would otherwise have bought, and say so in
+the reason. It never suppresses a project's first audit with that skill, and it
+never buys one.
 
 ## Actions, and the evidence for trusting them
 
@@ -293,6 +318,12 @@ endpoint triggers crawls.
 Four tabs over the same data the CLI reads: **Findings**, **Actions**,
 **Drift** and **Rules**. Filter by severity, project or free text; click a
 finding for every affected subject; hit "Run sweep" for a live log.
+
+The Rules tab carries the three ledgers behind an expensive decision: which
+backends can run an agent, what each skill has cost and returned, and how often
+each rule's findings were worth acting on. Unmeasured is drawn as its own state
+— the word, and a hatched bar rather than a short one — because a half-full grey
+meter reads as 50%.
 
 The Actions tab is the trust ladder made visible, one card per equivalence
 *class* rather than per action. "Anchor this prefix in eight repositories" is

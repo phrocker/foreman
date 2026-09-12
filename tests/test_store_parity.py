@@ -22,14 +22,19 @@ from pathlib import Path
 import pytest
 
 from foreman.graph import (
+    AUDITED,
     CONCERNS,
     FOUND_BY,
     FROM_RULE,
     FROM_SKILL,
     HAS_FINDING,
+    RAN,
+    RAN_VIA,
     SEEN_ON,
+    YIELDED,
     node,
     relink,
+    skill_run_edges,
 )
 from foreman.models import Event, Finding, Observation, Severity
 from foreman.shoalstore import ShoalStore
@@ -581,3 +586,135 @@ def test_a_deterministic_rule_has_no_skill_behind_it(store):
 
     assert store.neighbors(["rule|checked"], [FROM_SKILL]) == []
     assert store.neighbors(["rule|judged"], [FROM_SKILL]) == ["skill|seo-audit"]
+
+
+# --- what a run cost, and the skill it belongs to ---------------------------
+
+
+def test_a_run_remembers_what_it_cost_and_which_backend_served_it(store):
+    """The fact `audit` used to print and drop. Without it there is no answer to
+    "is this skill worth what it costs", which is the question that should
+    decide whether to dispatch it."""
+    run_id = store.start_run("p", "audit:seo-audit")
+    store.finish_run(run_id, ok=True, cost_usd=2.18, connector="claude-code")
+
+    (row,) = store.runs([run_id])
+    assert row["cost_usd"] == pytest.approx(2.18)
+    assert row["connector"] == "claude-code"
+    assert int(row["ok"]) == 1
+
+
+def test_a_collector_finishing_a_run_does_not_blank_a_cost_already_recorded(store):
+    """Every collector calls finish_run knowing nothing about money. If saying
+    nothing meant saying zero, the cheapest caller in the codebase would erase
+    the most expensive fact in it."""
+    run_id = store.start_run("p", "audit:seo-audit")
+    store.finish_run(run_id, ok=True, cost_usd=2.18, connector="claude-code")
+    store.finish_run(run_id, ok=True)
+
+    (row,) = store.runs([run_id])
+    assert row["cost_usd"] == pytest.approx(2.18)
+    assert row["connector"] == "claude-code"
+
+
+def test_a_run_that_spent_money_and_then_failed_still_records_the_spend(store):
+    """A ceiling that only counts successes is not a ceiling, and a track record
+    built from successes flatters whichever skill fails most expensively."""
+    run_id = store.start_run("p", "audit:seo-audit")
+    store.finish_run(run_id, ok=False, error="timed out", cost_usd=2.18, connector="claude-code")
+
+    (row,) = store.runs([run_id])
+    assert row["cost_usd"] == pytest.approx(2.18)
+    assert int(row["ok"]) == 0
+
+
+def test_a_free_run_records_no_cost_at_all(store):
+    """None, not 0.0. A collector that costs nothing and an audit billed at zero
+    are different claims, and averaging the second into cost-per-run is wrong."""
+    run_id = store.start_run("p", "crawl")
+    store.finish_run(run_id, ok=True)
+
+    (row,) = store.runs([run_id])
+    assert row["cost_usd"] is None
+    assert row["connector"] is None
+
+
+def test_runs_come_back_in_id_order_and_unknown_ids_are_simply_absent(store):
+    first = store.start_run("p", "crawl")
+    second = store.start_run("p", "tls")
+    store.finish_run(first, ok=True)
+    store.finish_run(second, ok=True)
+
+    assert [int(r["id"]) for r in store.runs([second, first, 999])] == [first, second]
+
+
+def test_asking_for_no_runs_is_not_an_error(store):
+    assert store.runs([]) == []
+
+
+def test_a_skill_can_be_walked_to_everything_one_dispatch_touched(store):
+    """The whole track record in one shape: which runs a skill made, where each
+    was aimed, and what served it."""
+    run_id = store.start_run("acme", "audit:seo-audit")
+    store.relate(skill_run_edges(run_id, "seo-audit", "acme", "claude-code"))
+    run_node = node("run", run_id)
+
+    assert store.neighbors(["skill|seo-audit"], [RAN]) == [run_node]
+    assert store.neighbors([run_node], [AUDITED]) == ["project|acme"]
+    assert store.neighbors([run_node], [RAN_VIA]) == ["connector|claude-code"]
+
+
+def test_a_run_is_related_to_every_finding_it_produced(store):
+    """Yield is a per-run quantity — twelve findings for $2.18 is a sentence
+    about one dispatch — so the edge hangs off the run, not off the skill."""
+    run_id = _sweep(store, project="acme")
+    store.record_findings(
+        run_id,
+        [_finding(project="acme", rule="thin"), _finding(project="acme", rule="slow")],
+        source="agent:seo-audit",
+    )
+    found = {node("finding", int(r["id"])) for r in store.open_findings()}
+    assert set(store.neighbors([node("run", run_id)], [YIELDED])) == found
+
+
+def test_a_skill_reaches_its_findings_in_two_hops(store):
+    run_id = _sweep(store, project="acme")
+    store.relate(skill_run_edges(run_id, "seo-audit", "acme", "claude-code"))
+    store.record_findings(run_id, [_finding(project="acme", rule="thin")], source="agent:seo-audit")
+    (row,) = store.open_findings()
+
+    reached = store.neighbors(["skill|seo-audit"], [RAN, YIELDED], hops=2)
+    assert node("finding", int(row["id"])) in reached
+
+
+def test_every_skill_that_ever_ran_can_be_listed(store):
+    """A walk needs an anchor, and "which skills have run" has no other honest
+    answer: a skill that found nothing appears in no finding row."""
+    first = store.start_run("acme", "audit:seo-audit")
+    second = store.start_run("acme", "audit:security-audit")
+    store.relate(skill_run_edges(first, "seo-audit", "acme", "claude-code"))
+    store.relate(skill_run_edges(second, "security-audit", "acme", "claude-code"))
+
+    assert store.nodes("skill") == ["skill|security-audit", "skill|seo-audit"]
+    assert store.nodes("connector") == ["connector|claude-code"]
+
+
+def test_a_run_no_edge_touches_is_not_in_the_graph(store):
+    """Membership is being an endpoint of an edge. Every collector run is a row
+    in both stores; only the ones something relates to are nodes."""
+    store.start_run("acme", "crawl")
+    assert store.nodes("run") == []
+
+
+def test_listing_a_kind_nothing_has_ever_used_is_empty(store):
+    assert store.nodes("skill") == []
+
+
+def test_relink_reaches_the_run_a_finding_came_from(store):
+    """Findings recorded before the run edge existed are invisible to a yield
+    count, which would report every skill as producing nothing."""
+    run_id = _sweep(store, project="acme")
+    store.record_findings(run_id, [_finding(project="acme", rule="thin")], source="agent:seo-audit")
+    relink(store)
+    (row,) = store.open_findings()
+    assert store.neighbors([node("run", run_id)], [YIELDED]) == [node("finding", int(row["id"]))]

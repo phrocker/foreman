@@ -372,6 +372,29 @@
   .rule-name { font: 12.5px ui-monospace, Menlo, monospace; }
   .rule-pct { margin-left: auto; font-variant-numeric: tabular-nums; }
 
+  /* Skill track record */
+  .skill-row { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .skill-row:last-child { border-bottom: none; }
+  .skill-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .skill-name { font: 13px ui-monospace, Menlo, monospace; font-weight: 600; }
+  .skill-cost { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .skill-facts { margin-top: 5px; color: var(--text-2); font-size: 12.5px;
+                 font-variant-numeric: tabular-nums; }
+  .skill-stand { margin-top: 7px; display: flex; gap: 10px; align-items: center;
+                 font-size: 12.5px; color: var(--text-2); }
+  .skill-stand .meter { flex: 1; }
+  /* Unmeasured is a third state, not a low score, so it gets a texture of its
+     own as well as the word: a flat grey bar at half width would read as 50%. */
+  .meter.unmeasured > span { width: 100% !important;
+    background: repeating-linear-gradient(135deg, var(--border-firm) 0 4px,
+                                          transparent 4px 8px); }
+  .skill-break { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px 14px;
+                 font-size: 12px; color: var(--text-3);
+                 font-variant-numeric: tabular-nums; }
+  .skill-break b { font-weight: 600; color: var(--text-2); }
+  .skill-break-head { width: 100%; font-size: 11px; letter-spacing: .04em;
+                      text-transform: uppercase; color: var(--text-3); }
+
   @media (max-width: 620px) {
     .hero-figure { font-size: 42px; }
     .hero-note { margin-left: 0; width: 100%; }
@@ -475,6 +498,10 @@
       <div class="section-head">Connectors — what can run an agent</div>
       <div id="connectorList"></div>
     </div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="section-head">Skill track record — what a dispatched skill costs and returns</div>
+      <div id="skillList"></div>
+    </div>
     <div class="panel scroll">
       <div class="section-head">Rule precision — how often a rule is worth acting on</div>
       <div id="precisionList"></div>
@@ -492,7 +519,7 @@ const SEV = {
 };
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
-  connectors: [],
+  connectors: [], skills: [],
   sevs: new Set(), project: "", q: "", open: new Set(),
   tab: "findings", decisiveOnly: true, kind: "",
 };
@@ -560,7 +587,8 @@ function ago(iso) {
 }
 
 async function load() {
-  const [overview, findings, actions, drift, precision, history, connectors] = await Promise.all([
+  const [overview, findings, actions, drift, precision, history, connectors, skills] =
+    await Promise.all([
     fetch("/api/overview").then((r) => r.json()),
     fetch("/api/findings").then((r) => r.json()),
     fetch("/api/actions").then((r) => r.json()),
@@ -568,8 +596,9 @@ async function load() {
     fetch("/api/precision").then((r) => r.json()),
     fetch("/api/history").then((r) => r.json()),
     fetch("/api/connectors").then((r) => r.json()),
+    fetch("/api/skills").then((r) => r.json()),
   ]);
-  Object.assign(state, { overview, findings, actions, drift, precision, history, connectors });
+  Object.assign(state, { overview, findings, actions, drift, precision, history, connectors, skills });
   // Each panel renders independently. One throwing used to abort the rest of
   // load(), so a single bad reference blanked the whole page instead of one
   // section — a failure mode that is much harder to notice than an empty panel.
@@ -577,7 +606,8 @@ async function load() {
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
     ["drift", renderDrift], ["history", renderHistory],
-    ["connectors", renderConnectors], ["rules", renderPrecision], ["counts", renderCounts],
+    ["connectors", renderConnectors], ["skills", renderSkills],
+    ["rules", renderPrecision], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -973,6 +1003,68 @@ function renderConnectors() {
     rows.push('<p class="warn">Nothing is available right now — audits and chat will fail until one is.</p>');
   }
   list.innerHTML = rows.join("");
+}
+
+// --- skill track record ----------------------------------------------------
+
+const usd = (n) => "$" + Number(n || 0).toFixed(2);
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** One project's or one backend's share of a skill's bill. */
+function skillSlice(s) {
+  return `<span><b>${esc(s.key)}</b> ${plural(s.runs, "run")} · ${usd(s.cost_usd)} · ${
+    plural(s.findings, "finding")}</span>`;
+}
+
+function renderSkills() {
+  const list = $("skillList");
+  if (!state.skills.length) {
+    list.innerHTML =
+      '<div class="empty">No skill has been dispatched yet. <code>foreman audit</code> records what each run costs and what it returns.</div>';
+    return;
+  }
+  list.innerHTML = state.skills.map((k) => {
+    const rate = k.decided ? k.acted / k.decided : null;
+    // Unmeasured is its own state, never a score of zero: a skill nobody has
+    // judged has not failed, and the word plus the hatched bar say so without
+    // relying on the colour of either.
+    const tone = rate === null ? "var(--text-3)"
+      : rate < 0.5 ? "var(--high)" : rate < 0.8 ? "var(--medium)" : "var(--good)";
+    const standing = rate === null
+      ? `<span class="meter unmeasured"><span></span></span>
+         <span>Unmeasured — no finding from this skill has been acted on or dismissed yet.</span>`
+      : `<span class="meter"><span style="width:${rate * 100}%;background:${tone}"></span></span>
+         <span>${(rate * 100).toFixed(0)}% of ${plural(k.decided, "decided finding")} acted on</span>`;
+
+    const facts = [
+      plural(k.runs, "run") + (k.failed ? ` (${k.failed} failed)` : ""),
+      k.cost_per_run === null ? null : usd(k.cost_per_run) + " per run",
+      plural(k.findings, "finding"),
+      k.findings_per_run === null ? null : k.findings_per_run.toFixed(1) + " findings per run",
+      // The number the issue asks for, and the one that is honestly missing
+      // when nothing has been decided — so it says which of the two it is.
+      k.cost_per_acted_finding !== null ? usd(k.cost_per_acted_finding) + " per finding acted on"
+        : k.measured ? "nothing acted on yet, so cost per useful finding is undefined"
+        : null,
+    ].filter(Boolean).join(" · ");
+
+    const breakdown = (head, rows) => rows.length
+      ? `<div class="skill-break"><span class="skill-break-head">${head}</span>${
+          rows.map(skillSlice).join("")}</div>`
+      : "";
+
+    return `<div class="skill-row">
+      <div class="skill-head">
+        <span class="skill-name">/${esc(k.skill)}</span>
+        <span class="src">${esc(k.precision)}</span>
+        <span class="skill-cost">${usd(k.cost_usd)} spent</span>
+      </div>
+      <div class="skill-facts">${esc(facts)}</div>
+      <div class="skill-stand">${standing}</div>
+      ${breakdown("Where it ran", k.projects)}
+      ${breakdown("What ran it", k.connectors)}
+    </div>`;
+  }).join("");
 }
 
 // --- rule precision --------------------------------------------------------

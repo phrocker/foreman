@@ -74,7 +74,16 @@ from .store import Record
 # to a stable shape on the way out — otherwise every reader needs .get() and an
 # absent field becomes a KeyError at the worst moment.
 FIELDS: dict[str, tuple[str, ...]] = {
-    "run": ("project", "collector", "started_at", "finished_at", "ok", "error"),
+    "run": (
+        "project",
+        "collector",
+        "started_at",
+        "finished_at",
+        "ok",
+        "error",
+        "cost_usd",
+        "connector",
+    ),
     "finding": (
         "run_id",
         "project",
@@ -320,20 +329,59 @@ class ShoalStore:
         )
         return run_id
 
-    def finish_run(self, run_id: int, ok: bool = True, error: str | None = None) -> None:
-        self._write(
-            [
-                self._put(
-                    _rid("run", _pad(run_id)),
-                    "run",
-                    {
-                        "finished_at": utcnow(),
-                        "ok": "1" if ok else "0",
-                        "error": error,
-                    },
-                )
-            ]
-        )
+    def finish_run(
+        self,
+        run_id: int,
+        ok: bool = True,
+        error: str | None = None,
+        cost_usd: float | None = None,
+        connector: str | None = None,
+    ) -> None:
+        """Close a run, recording what it cost if it cost anything.
+
+        A field the caller said nothing about is left out of the mutation
+        entirely rather than written as empty. There is no COALESCE here, so an
+        unconditional write is how a collector finishing a run would erase the
+        cost an audit had already recorded against it.
+        """
+        fields: dict[str, Any] = {
+            "finished_at": utcnow(),
+            "ok": "1" if ok else "0",
+            "error": error,
+        }
+        if cost_usd is not None:
+            fields["cost_usd"] = cost_usd
+        if connector is not None:
+            fields["connector"] = connector
+        self._write([self._put(_rid("run", _pad(run_id)), "run", fields)])
+
+    def runs(self, run_ids: Sequence[int]) -> list[Record]:
+        """The run records behind a set of run node ids, oldest first."""
+        out: list[Record] = []
+        for run_id in sorted({int(value) for value in run_ids}):
+            found = self._entities(f"ent:run|{_pad(run_id)}")
+            record = next(iter(found.values()), None)
+            if record is None:
+                continue
+            out.append(self._typed_run(record))
+        return out
+
+    @staticmethod
+    def _typed_run(record: Record) -> Record:
+        """A run record shaped like the SQLite one: its own fields, typed.
+
+        Projected onto the declared fields because a row carries its edges as
+        cells too, and a caller comparing two stores' records should not have to
+        know that one of them stores the graph in the same place as the entity.
+        Numbers come back as numbers for the same reason: every cell is a string
+        on the way out, and a caller summing `cost_usd` would concatenate it.
+        """
+        out: Record = {"id": record["id"]}
+        for field in FIELDS["run"]:
+            out[field] = record.get(field)
+        out["ok"] = int(out["ok"]) if out["ok"] is not None else None
+        out["cost_usd"] = float(out["cost_usd"]) if out["cost_usd"] else None
+        return out
 
     def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]:
         runs = [
@@ -426,7 +474,7 @@ class ShoalStore:
                 )
             )
         self._write(mutations)
-        self.relate(edges_for(recorded, source))
+        self.relate(edges_for(recorded, source, run_id))
         return len(mutations)
 
     def retire_rule_findings(self, project: str) -> int:
@@ -775,6 +823,21 @@ class ShoalStore:
                 )
         self._write([pb.Mutation(row=row, entries=e) for row, e in by_row.items()])
         return count
+
+    def nodes(self, kind: str) -> list[str]:
+        """Every node of this kind the graph knows about, sorted.
+
+        The `node` cell relate() writes for both endpoints is what makes this a
+        question about the graph rather than about the rows: `ent:run|` also
+        holds every collector run, and a bare prefix scan would report runs no
+        edge ever touched — which SQLite, reading the edge table, would not.
+        """
+        seen = {
+            cell.row.decode().removeprefix("ent:")
+            for cell in self._cells(f"ent:{kind}|")
+            if cell.column_family == b"node"
+        }
+        return sorted(seen)
 
     def neighbors(
         self,
