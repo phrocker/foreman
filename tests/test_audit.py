@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from foreman.audit import AgentReport, _known_findings, select_for_audit
+from foreman.audit import AgentReport, _fingerprint, select_for_audit
 from foreman.config import Project, Registry
 from foreman.models import Finding, Observation, Severity
 from foreman.runner import check_all
@@ -22,31 +22,17 @@ def test_agent_report_accepts_an_empty_finding_list():
     assert AgentReport.model_validate_json('{"findings": []}').findings == []
 
 
-def test_known_findings_are_formatted_for_the_prompt(tmp_path):
-    with SqliteStore(tmp_path / "t.db") as store:
-        run_id = store.start_run("s1", "crawl")
-        store.finish_run(run_id, ok=True)
-        store.record_findings(
-            run_id,
-            [
-                Finding(
-                    project="s1",
-                    rule="soft_404_shell",
-                    severity=Severity.HIGH,
-                    summary="nonexistent URLs answer 200",
-                )
-            ],
-        )
-        text = _known_findings(store, "s1")
-    assert "soft_404_shell" in text and "high" in text
+def test_the_same_finding_from_two_agents_is_one_finding():
+    """Agent findings are never retired between runs, so without a fingerprint
+    a second audit — or a sibling reaching the same conclusion — files a
+    duplicate and the counts the trust ladder rests on drift upwards."""
+    a = _fingerprint("p", "seo-audit/thin", ["https://x/1", "https://x/2"])
+    b = _fingerprint("p", "seo-audit/thin", ["https://x/2", "https://x/1"])
+    assert a == b
 
 
-def test_no_known_findings_reads_cleanly():
-    class Empty:
-        def open_findings(self, site):
-            return []
-
-    assert "none" in _known_findings(Empty(), "s1")
+def test_the_same_rule_on_a_different_project_is_a_different_finding():
+    assert _fingerprint("a", "r", ["u"]) != _fingerprint("b", "r", ["u"])
 
 
 def test_nightly_check_does_not_delete_agent_findings(tmp_path):

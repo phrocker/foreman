@@ -14,6 +14,7 @@ rediscovering them — the same "work on the delta" principle the collectors fol
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ from .config import Project
 from .connectors import REPO, SHELL, SKILLS, WEB, Connector, ConnectorError, Task, choose
 from .diff import drift_since
 from .models import Finding, Severity
+from .pack import audit_pack
 from .store import Store
 
 # No default: the skill names the domain, and Foreman has no opinion about
@@ -50,14 +52,13 @@ PROMPT = """Run the /{skill} skill against {url}.
 Project: {project_id}
 {repo_note}
 
-Foreman already runs cheap deterministic checks against this project every
-night and records what they find. These are its currently open findings:
+{pack}
 
-{known}
+## Your job
 
-Do NOT re-report any of the above, and do not spend time re-verifying them.
 Report only what a deterministic check cannot see — anything requiring
-judgement, comparison, or domain expertise.
+judgement, comparison, or domain expertise. Everything above is context you are
+being given so you do not have to spend money rediscovering it.
 
 Analysis only — do not edit any files.
 
@@ -93,11 +94,15 @@ def _charge(budget: Budget | None, cost: float, project: Project, log) -> None:
         log(f"{project.id}: over ceiling — ${budget.spent:.2f} spent of ${budget.limit_usd:.2f}")
 
 
-def _known_findings(store: Store, project_id: str) -> str:
-    rows = store.open_findings(project_id)
-    if not rows:
-        return "  (none open)"
-    return "\n".join(f"  - [{r['severity']}] {r['rule']}: {r['summary']}" for r in rows)
+def _fingerprint(project: str, rule: str, subjects: Sequence[str]) -> tuple:
+    """What makes two findings the same finding.
+
+    Agent findings are never retired between runs the way rule findings are, so
+    without this a second audit — or a sibling reaching the same conclusion —
+    files a duplicate, and the counts the trust ladder rests on drift upwards
+    for no reason.
+    """
+    return (project, rule, tuple(sorted(subjects)))
 
 
 async def run_audit(
@@ -119,6 +124,13 @@ async def run_audit(
         from .connectors.claudecode import ClaudeCodeConnector
 
         connectors = [ClaudeCodeConnector()]
+    # Read before the run starts: once this run exists, its own findings would
+    # count as already known and every one would look like a duplicate.
+    since = store.last_run_time(project.id, f"audit:{skill}")
+    already = {
+        _fingerprint(r["project"], r["rule"], json.loads(r["subjects"]))
+        for r in store.open_findings(project.id)
+    }
     run_id = store.start_run(project.id, f"audit:{skill}")
     try:
         task = Task(
@@ -132,7 +144,7 @@ async def run_audit(
                     if project.fixable
                     else "No local checkout — this project is monitored, not owned."
                 ),
-                known=_known_findings(store, project.id),
+                pack=audit_pack(store, project.id, since=since),
             ),
             schema=AgentReport,
             # An audit reads the live site, runs checks against it and drives an
@@ -160,22 +172,30 @@ async def run_audit(
         _charge(budget, cost, project, log)
         report = result.value
 
-        findings = [
-            Finding(
-                project=project.id,
-                # Namespaced so an agent finding is never mistaken for a
-                # deterministic one — they have very different reliability.
-                rule=f"{skill}/{f.rule}",
-                severity=f.severity,
-                summary=f.summary,
-                subjects=f.subjects,
-                detail=f.detail,
+        findings = []
+        duplicates = 0
+        for f in report.findings:
+            # Namespaced so an agent finding is never mistaken for a
+            # deterministic one — they have very different reliability.
+            rule = f"{skill}/{f.rule}"
+            if _fingerprint(project.id, rule, f.subjects) in already:
+                duplicates += 1
+                continue
+            findings.append(
+                Finding(
+                    project=project.id,
+                    rule=rule,
+                    severity=f.severity,
+                    summary=f.summary,
+                    subjects=f.subjects,
+                    detail=f.detail,
+                )
             )
-            for f in report.findings
-        ]
+
         store.record_findings(run_id, findings, source=f"agent:{skill}")
         store.finish_run(run_id, ok=True)
-        log(f"{project.id}: {len(findings)} finding(s), ${cost:.2f}")
+        repeated = f", {duplicates} already known" if duplicates else ""
+        log(f"{project.id}: {len(findings)} finding(s){repeated}, ${cost:.2f}")
         return len(findings), cost
     except Exception as exc:
         store.finish_run(run_id, ok=False, error=f"{type(exc).__name__}: {exc}"[:500])

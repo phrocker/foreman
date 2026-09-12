@@ -162,6 +162,12 @@
      argued with. Muted: it explains the position, it is not the content. */
   .earned { color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums;
     white-space: nowrap; margin-left: 8px; }
+  /* The same rule open elsewhere: a problem on six projects is a portfolio
+     decision, one on a single project is a chore. The context pack tells
+     dispatched agents the same thing. */
+  .elsewhere { color: var(--text-2); font-size: 11px; letter-spacing: .02em;
+    border: 1px solid var(--border-firm); border-radius: 999px; padding: 1px 7px;
+    margin-left: 8px; white-space: nowrap; }
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
@@ -1064,7 +1070,8 @@ function renderFindings() {
         <td class="project-cell">${esc(f.project)}</td>
         <td>${esc(f.summary)}${f.source && f.source.startsWith("agent:")
             ? `<span class="src" title="Reported by an agent, not a deterministic rule">${esc(f.source.slice(6))}</span>` : ""}${
-            f.precision ? `<span class="earned" title="How often findings from this rule have been acted on. Ordering within a severity band follows it.">${esc(f.precision)}</span>` : ""}</td>
+            f.precision ? `<span class="earned" title="How often findings from this rule have been acted on. Ordering within a severity band follows it.">${esc(f.precision)}</span>` : ""}${
+            f.also_on ? `<span class="elsewhere" title="The same rule is open on other projects. Agents dispatched against those are told about it too.">also on ${f.also_on}</span>` : ""}</td>
         <td class="num">${f.subjects.length}</td>
       </tr>${detail}`;
   }).join("");

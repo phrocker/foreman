@@ -110,6 +110,9 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         s = store()
         try:
             rows = s.open_findings(project)
+            # Unfiltered, so recurrence is counted across the portfolio rather
+            # than across whatever the operator is currently looking at.
+            all_rows = s.open_findings() if project else rows
             scores = rule_scores(s.rule_precision())
         finally:
             s.close()
@@ -118,12 +121,22 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         # the dashboard ordered by severity alone, so a rule dismissed four
         # times in five sat level with one always acted on. The label travels
         # with the row so the order can be argued with rather than trusted.
+        # How many *other* projects have this same rule open. The same signal
+        # the context pack gives a dispatched agent: a problem on six projects
+        # is a portfolio decision, and one on a single project is a chore. The
+        # count is portfolio-wide even when the view is filtered, because that
+        # is the whole point of knowing it.
+        elsewhere: dict[str, set[str]] = {}
+        for row in all_rows:
+            elsewhere.setdefault(row["rule"], set()).add(row["project"])
+
         for row in rank(rows, scores):
             if severity and row["severity"] != severity:
                 continue
             item = dict(row)
             item["subjects"] = json.loads(row["subjects"])
             item["precision"] = precision_label(row, scores)
+            item["also_on"] = len(elsewhere.get(row["rule"], set()) - {row["project"]})
             out.append(item)
         return out
 
