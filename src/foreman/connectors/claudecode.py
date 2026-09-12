@@ -1,14 +1,17 @@
 """Claude Code as a connector.
 
-This is the path Foreman already used, lifted out of `audit.py` and `chat.py`
-without changing what it does: a subprocess, a scratch directory, a JSON file
-written by the agent and validated here.
+A one-shot subprocess: `claude -p`, structured output back, done. Cold — every
+task pays a fresh start and the agent can only report when it exits — but it
+runs on the operator's existing Claude Code login, which is the whole point.
+Nothing here holds a credential.
 
-The file is not an affectation. `claude -p --output-format json` puts a
-transcript on stdout, so the answer has to come back some other way, and a
-scratch directory the agent is explicitly granted is the narrowest one. An API
-connector has no such problem, which is exactly why the output protocol belongs
-to the connector rather than to the task.
+The schema goes to the CLI as `--json-schema` and the answer comes back in the
+envelope's `structured_output`. That replaced an earlier arrangement where the
+prompt asked the agent to write JSON to a file in a granted scratch directory.
+Dropping it removed the scratch directory, the `--add-dir` for it, and — the
+part that matters — the `Write` tool, which existed solely so the agent could
+produce its own answer. A task that needs no capabilities is now granted no
+tools at all.
 """
 
 from __future__ import annotations
@@ -17,33 +20,19 @@ import asyncio
 import json
 import os
 import shutil
-import tempfile
-from pathlib import Path
 
 from pydantic import ValidationError
 
 from .base import REPO, SHELL, SKILLS, WEB, ConnectorError, Result, Task
 
-# Read, Grep and Glob so it can orient; Write because the answer comes back as a
-# file. Nothing here reaches a working tree — Edit and Bash are granted only
-# when a task asks for them, and no task that proposes a change does.
-BASE_TOOLS = ("Read", "Grep", "Glob", "Write")
-
+# Capability to tool names. Nothing is granted by default: reading a repository
+# is a thing a task asks for, not a courtesy.
 CAPABILITY_TOOLS = {
+    REPO: ("Read", "Grep", "Glob"),
     WEB: ("WebFetch", "WebSearch"),
     SHELL: ("Bash",),
     SKILLS: ("Task", "Skill"),
 }
-
-REPLY = """
-
-## How to reply
-
-Write your answer to {out} as JSON matching this schema exactly:
-
-{schema}
-
-Write the file even if the answer is empty. Nothing else you print is read."""
 
 
 class ClaudeCodeConnector:
@@ -58,89 +47,94 @@ class ClaudeCodeConnector:
         return shutil.which(self.binary) is not None
 
     def _tools(self, task: Task) -> str:
-        tools = list(BASE_TOOLS)
+        tools: list[str] = []
         for capability, names in CAPABILITY_TOOLS.items():
             if capability in task.needs:
                 tools.extend(names)
         return ",".join(tools)
 
+    def _command(self, task: Task) -> list[str]:
+        cmd = [
+            self.binary,
+            "-p",
+            task.instructions,
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(task.schema.model_json_schema()),
+            "--permission-mode",
+            self.permission_mode,
+            "--allowed-tools",
+            self._tools(task),
+        ]
+        for directory in task.read_dirs:
+            cmd += ["--add-dir", str(directory)]
+        if task.model:
+            cmd += ["--model", task.model]
+        return cmd
+
     async def run(self, task: Task) -> Result:
-        with tempfile.TemporaryDirectory(prefix="foreman-") as tmp:
-            out_path = Path(tmp) / "reply.json"
-            prompt = task.instructions + REPLY.format(
-                out=out_path,
-                schema=json.dumps(task.schema.model_json_schema(), indent=2),
-            )
-            cmd = [
-                self.binary,
-                "-p",
-                prompt,
-                "--output-format",
-                "json",
-                "--permission-mode",
-                self.permission_mode,
-                "--allowed-tools",
-                self._tools(task),
-                "--add-dir",
-                str(tmp),
-            ]
-            for directory in task.read_dirs:
-                cmd += ["--add-dir", str(directory)]
-            if task.model:
-                cmd += ["--model", task.model]
+        proc = await asyncio.create_subprocess_exec(
+            *self._command(task),
+            cwd=str(task.read_dirs[0]) if task.read_dirs else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            # Nested Claude Code sessions inherit this and refuse to start.
+            env={k: v for k, v in os.environ.items() if k != "CLAUDECODE"},
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=task.timeout_s)
+        except TimeoutError:
+            proc.kill()
+            raise ConnectorError(f"timed out after {task.timeout_s}s") from None
 
-            cwd = str(task.read_dirs[0]) if task.read_dirs else tmp
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                # Nested Claude Code sessions inherit this and refuse to start.
-                env={k: v for k, v in os.environ.items() if k != "CLAUDECODE"},
+        # Parsed before the return code is checked: the money is spent either
+        # way, and a ceiling that counts only successful runs is not a ceiling.
+        envelope = _envelope(stdout)
+        cost = _cost(envelope)
+        if proc.returncode != 0:
+            raise ConnectorError(
+                f"claude exited {proc.returncode}: {stderr.decode('utf-8', 'replace')[:400]}",
+                cost,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=task.timeout_s)
-            except TimeoutError:
-                proc.kill()
-                raise ConnectorError(f"timed out after {task.timeout_s}s") from None
+        if envelope.get("is_error"):
+            raise ConnectorError(
+                str(envelope.get("result"))[:400] or "the agent reported an error", cost
+            )
 
-            # Read before checking the return code: the money is spent either
-            # way, and a ceiling that only counts successful runs is not one.
-            cost = _cost(stdout)
-            if proc.returncode != 0:
-                raise ConnectorError(
-                    f"claude exited {proc.returncode}: "
-                    f"{stderr.decode('utf-8', 'replace')[:400]}",
-                    cost,
-                )
-            if not out_path.exists():
-                raise ConnectorError(
-                    "agent wrote no reply file "
-                    f"(stdout tail: {stdout.decode('utf-8', 'replace')[-300:]})",
-                    cost,
-                )
-            try:
-                value = task.schema.model_validate_json(out_path.read_text())
-            except ValidationError as exc:
-                raise ConnectorError(f"reply did not match the schema: {exc}", cost) from exc
+        payload = envelope.get("structured_output")
+        if payload is None:
+            raise ConnectorError(
+                f"no structured output (result tail: {str(envelope.get('result'))[-300:]})", cost
+            )
+        try:
+            value = task.schema.model_validate(payload)
+        except ValidationError as exc:
+            # The CLI validates against the same schema, so this means the two
+            # disagree — worth saying plainly rather than blaming the agent.
+            raise ConnectorError(
+                f"structured output did not match the schema: {exc}", cost
+            ) from exc
 
         return Result(value=value, cost_usd=cost, connector=self.name)
 
 
-def _cost(stdout: bytes) -> float:
-    """Pull the run cost out of `--output-format json`, tolerating shape drift.
-
-    Three spellings because the field has been called all three, and a cost
-    that silently reads as zero disables the budget ceiling rather than
-    erroring — the failure you would notice.
-    """
+def _envelope(stdout: bytes) -> dict:
     try:
         payload = json.loads(stdout.decode("utf-8", "replace"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return 0.0
-    if not isinstance(payload, dict):
-        return 0.0
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _cost(envelope: dict) -> float:
+    """The run cost, tolerating shape drift.
+
+    Three spellings because the field has been called all three, and a cost that
+    silently reads as zero disables the budget ceiling rather than erroring —
+    which is the failure you would actually notice.
+    """
     for key in ("total_cost_usd", "cost_usd", "totalCostUsd"):
-        if isinstance(payload.get(key), (int, float)):
-            return float(payload[key])
+        if isinstance(envelope.get(key), (int, float)):
+            return float(envelope[key])
     return 0.0

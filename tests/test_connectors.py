@@ -28,7 +28,7 @@ from foreman.connectors import (
     choose,
     describe,
 )
-from foreman.connectors.claudecode import BASE_TOOLS, ClaudeCodeConnector, _cost
+from foreman.connectors.claudecode import ClaudeCodeConnector, _cost, _envelope
 from foreman.store import SqliteStore
 
 
@@ -122,41 +122,64 @@ def test_a_failure_still_carries_what_it_spent():
 
 
 def test_cost_is_read_from_the_claude_json_envelope():
-    assert _cost(json.dumps({"total_cost_usd": 0.103612}).encode()) == pytest.approx(0.103612)
+    assert _cost({"total_cost_usd": 0.103612}) == pytest.approx(0.103612)
 
 
 def test_cost_tolerates_every_spelling_the_field_has_had():
-    assert _cost(b'{"cost_usd": 1.5}') == pytest.approx(1.5)
-    assert _cost(b'{"totalCostUsd": 2.5}') == pytest.approx(2.5)
+    assert _cost({"cost_usd": 1.5}) == pytest.approx(1.5)
+    assert _cost({"totalCostUsd": 2.5}) == pytest.approx(2.5)
 
 
 def test_cost_of_garbage_is_zero_not_a_crash():
-    assert _cost(b"not json at all") == 0.0
-    assert _cost(b'{"no": "cost here"}') == 0.0
-    assert _cost(b"[]") == 0.0
+    assert _cost(_envelope(b"not json at all")) == 0.0
+    assert _cost(_envelope(b"[]")) == 0.0
+    assert _cost({"no": "cost here"}) == 0.0
 
 
 # --- the Claude Code connector ----------------------------------------------
 
 
+def test_a_task_that_needs_nothing_is_granted_no_tools_at_all():
+    """Not a narrow allow-list — an empty one. The answer comes back through
+    --json-schema, so even Write is unnecessary, and Write was the last tool
+    granted for the agent's own convenience rather than the task's."""
+    assert ClaudeCodeConnector()._tools(_task()) == ""
+
+
 def test_tools_are_granted_only_for_what_the_task_asked_for():
     """Capability is the request; an allow-list is one harness's spelling of it."""
     connector = ClaudeCodeConnector()
-    bare = connector._tools(_task())
-    assert bare == ",".join(BASE_TOOLS)
-    assert "Bash" not in bare and "WebFetch" not in bare
+    assert connector._tools(_task(needs=frozenset({REPO}))) == "Read,Grep,Glob"
 
     full = connector._tools(_task(needs=frozenset({WEB, SHELL, SKILLS})))
     for tool in ("WebFetch", "WebSearch", "Bash", "Skill"):
         assert tool in full
+    assert "Read" not in full
 
 
-def test_nothing_ever_grants_edit():
+def test_the_schema_is_handed_to_the_cli_rather_than_asked_for_in_prose():
+    """The CLI validates it, so a reply that does not match never reaches us —
+    and nothing has to write a file to hand one back."""
+    cmd = ClaudeCodeConnector()._command(_task())
+    assert "--json-schema" in cmd
+    schema = json.loads(cmd[cmd.index("--json-schema") + 1])
+    assert "reply" in schema["properties"]
+    assert "--add-dir" not in cmd
+
+
+def test_a_repo_task_grants_the_checkout_and_nothing_else(tmp_path):
+    cmd = ClaudeCodeConnector()._command(_task(needs=frozenset({REPO}), read_dirs=(tmp_path,)))
+    assert cmd[cmd.index("--add-dir") + 1] == str(tmp_path)
+
+
+def test_nothing_ever_grants_edit_or_write():
     """Actions are the operator's. A backend that could edit a working tree
     would make the approval ledger describe something that already happened."""
     connector = ClaudeCodeConnector()
     for needs in (frozenset(), frozenset({REPO, WEB, SHELL, SKILLS})):
-        assert "Edit" not in connector._tools(_task(needs=needs))
+        granted = connector._tools(_task(needs=needs))
+        assert "Edit" not in granted
+        assert "Write" not in granted
 
 
 def test_availability_follows_the_binary():

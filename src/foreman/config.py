@@ -172,8 +172,10 @@ class ConnectorConfig(BaseModel):
 
     kind: str
     model: str | None = None
-    # Kept out of here on purpose — a key belongs in the environment, not in a
-    # file that sits next to a list of client sites.
+    # No credential field, and there will not be one. Backends are reached
+    # through a harness that already holds auth, so Foreman never has a secret
+    # to keep beside a file that lists real client sites — and work a
+    # subscription already covers is not re-billed per token.
     enabled: bool = True
 
 
