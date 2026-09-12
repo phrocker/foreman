@@ -55,3 +55,49 @@ class Finding(BaseModel):
     summary: str
     subjects: list[str] = Field(default_factory=list)
     detail: str | None = None
+
+
+def iso(value: str | None) -> str | None:
+    """A GitHub timestamp in the same canonical form as utcnow(), or None.
+
+    Events are keyed by the moment they happened, so two spellings of one
+    instant would be two events. Normalising on the way in is what makes
+    re-ingesting the same page of history a no-op instead of a duplicate.
+    """
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when.astimezone(UTC).isoformat(timespec="seconds")
+
+
+class Event(BaseModel):
+    """Something that happened, once, at a known moment.
+
+    Deliberately not an Observation. An observation is the current value of a
+    cell; it keeps a history so you can ask what it used to be, and rules read
+    the latest. An event never had another value — the sequence *is* the point.
+    Conflating them would let a second poll "correct" a merge that really did
+    happen.
+
+    Identity is (project, kind, ref, at). Re-ingesting the same event is a
+    no-op. The same subject at a later moment is a *new* event, never an
+    update: when GitHub reports a pull request differently tomorrow, that is
+    another thing that happened to it, not a revision of yesterday.
+
+    `fields` carries whatever is specific to the kind. It is deliberately a
+    flat string map rather than a schema per kind — the same reasoning that
+    flattens observations to (subject, key, value), and for the same payoff.
+    """
+
+    project: str
+    kind: str
+    # Stable identifier of the thing this happened to: a sha, a PR number, a tag.
+    ref: str
+    at: str
+    actor: str | None = None
+    title: str | None = None
+    url: str | None = None
+    fields: dict[str, str] = Field(default_factory=dict)

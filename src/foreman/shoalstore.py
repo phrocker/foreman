@@ -20,12 +20,22 @@ analytical queries over the portfolio work without a second copy. Everything
 else is an entity with fields: one row per record, one cell per field.
 
     evt:obs|<project>|<subject>   cf=<collector>  cq=<key>    ts=<observed>
+    evt:gh|<project>|<at>|<kind>|<ref>  cf=<kind>  cq=<field>  ts=<at>
     ent:run|<id>                  cf=run          cq=<field>
     ent:finding|<id>              cf=finding      cq=<field>
     ent:action|<id>               cf=action       cq=<field>
     ent:conv|<id>                 cf=conversation cq=<field>
     ent:msg|<conv>|<seq>          cf=message      cq=<field>
     ent:seq|<kind>                cf=seq          cq=n
+    ent:wm|<project>|<feed>       cf=watermark    cq=at
+
+History rows put `at` ahead of kind and ref, which the issue that asked for
+them did not. Two reasons. It makes the moment part of the row identity, so a
+pull request reported differently tomorrow lands beside today's record instead
+of versioning over it — an event never had another value, and relying on cell
+versioning to carry that would make the SQLite implementation, which has no
+such notion, mean something different. And it puts a project's history in time
+order within its prefix, which is the order every reader wants.
 
 Ids are zero-padded so a lexical row scan is also numeric order, and they stay
 small integers because `#5` in a dashboard is worth more than a UUID.
@@ -40,7 +50,7 @@ from typing import Any
 
 import grpc
 
-from .models import Finding, Observation, utcnow
+from .models import Event, Finding, Observation, utcnow
 from .shoalpb import embed_pb2 as pb
 from .shoalpb import embed_pb2_grpc as rpc
 from .store import Record
@@ -139,20 +149,45 @@ class ShoalStore:
         except grpc.RpcError:
             channel.close()
             raise
+        request = pb.CreateTableRequest(
+            table=self.table,
+            workload=pb.TABLE_WORKLOAD_OPERATIONAL,
+            splits=["ent:", "evt:"],
+        )
         try:
-            stub.CreateTableV2(
-                pb.CreateTableRequest(
-                    table=self.table,
-                    workload=pb.TABLE_WORKLOAD_OPERATIONAL,
-                    splits=["ent:", "evt:"],
-                )
-            )
+            self._create_table(stub, request)
         except grpc.RpcError:
-            # There is no create-if-absent, and a table that already exists is
-            # the expected case on every run but the first. The Status probe
-            # above is what distinguishes this from an unreachable server.
-            pass
+            channel.close()
+            raise
         self._channel, self._rpc = channel, stub
+
+    def _create_table(self, stub: rpc.ShoalEmbedStub, request: pb.CreateTableRequest) -> None:
+        """Create the table, tolerating only the two things that are not errors.
+
+        There is no create-if-absent, so ALREADY_EXISTS is the expected answer
+        on every run but the first. Everything else is raised — this used to
+        swallow every RpcError, and the one it was really hiding was a server
+        too old to have CreateTableV2. The table was never created, and the
+        first symptom was `scan: table "graph" not found` from somewhere else
+        entirely, which says nothing about the cause.
+
+        UNIMPLEMENTED gets a fallback rather than an error because it means
+        exactly one thing: a shoal build predating the V2 method. V1 takes the
+        same request and splits the same way.
+        """
+        try:
+            stub.CreateTableV2(request)
+            return
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.ALREADY_EXISTS:
+                return
+            if exc.code() != grpc.StatusCode.UNIMPLEMENTED:
+                raise
+        try:
+            stub.CreateTable(request)
+        except grpc.RpcError as exc:
+            if exc.code() != grpc.StatusCode.ALREADY_EXISTS:
+                raise
 
     def close(self) -> None:
         if self._channel is not None:
@@ -699,3 +734,114 @@ class ShoalStore:
             reverse=True,
         )
         return rows[:limit]
+
+    # --- history -----------------------------------------------------------
+
+    # actor, title and url are promoted out of `fields` because every kind has
+    # them and readers should not have to open a JSON blob for the three things
+    # they always want.
+    EVENT_HEAD = ("actor", "title", "url")
+
+    def record_events(self, events: Iterable[Event]) -> int:
+        mutations = []
+        count = 0
+        for event in events:
+            count += 1
+            row = f"evt:gh|{event.project}|{event.at}|{event.kind}|{event.ref}".encode()
+            stamp = _ms(event.at)
+            cells = {
+                "actor": event.actor,
+                "title": event.title,
+                "url": event.url,
+                **event.fields,
+            }
+            mutations.append(
+                pb.Mutation(
+                    row=row,
+                    entries=[
+                        pb.Entry(
+                            column_family=event.kind.encode(),
+                            column_qualifier=key.encode(),
+                            value=b"" if value is None else str(value).encode(),
+                            timestamp=stamp,
+                        )
+                        for key, value in cells.items()
+                    ],
+                )
+            )
+        self._write(mutations)
+        return count
+
+    def events(
+        self,
+        project: str | None = None,
+        kind: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+    ) -> list[Record]:
+        prefix = f"evt:gh|{project}|" if project else "evt:gh|"
+        rows: dict[str, tuple[Record, dict[str, str | None]]] = {}
+        for cell in self._cells(prefix):
+            row = cell.row.decode()
+            if row not in rows:
+                parts = row.split("|", 4)
+                if len(parts) != 5:
+                    continue
+                _, found, at, found_kind, ref = parts
+                rows[row] = (
+                    {
+                        "project": found,
+                        "kind": found_kind,
+                        "ref": ref,
+                        "at": at,
+                        "actor": None,
+                        "title": None,
+                        "url": None,
+                    },
+                    {},
+                )
+            record, extra = rows[row]
+            qualifier = cell.column_qualifier.decode()
+            value = cell.value.decode() or None
+            if qualifier in self.EVENT_HEAD:
+                record[qualifier] = value
+            else:
+                extra[qualifier] = value
+
+        out = []
+        for record, extra in rows.values():
+            if kind and record["kind"] != kind:
+                continue
+            if since and record["at"] < since:
+                continue
+            if until and record["at"] > until:
+                continue
+            record["fields"] = json.dumps(extra, sort_keys=True)
+            out.append(record)
+        # Two stable passes, not one reversed sort: `reverse=True` would flip
+        # the tie-breaks as well, and SQLite orders them ascending inside a
+        # descending `at`. A push lands several commits in one second, so this
+        # is the ordinary case rather than a corner.
+        out.sort(key=lambda r: (r["kind"], r["ref"]))
+        out.sort(key=lambda r: r["at"], reverse=True)
+        return out[:limit]
+
+    def _watermark_row(self, project: str, feed: str) -> str:
+        return f"ent:wm|{project}|{feed}"
+
+    def watermark(self, project: str, feed: str) -> str | None:
+        row = self._watermark_row(project, feed)
+        for cell in self._cells(row):
+            # A prefix scan would also match a longer feed name that starts with
+            # this one, so the row is compared rather than trusted.
+            if cell.row.decode() == row and cell.column_qualifier.decode() == "at":
+                return cell.value.decode() or None
+        return None
+
+    def set_watermark(self, project: str, feed: str, at: str) -> None:
+        current = self.watermark(project, feed)
+        if current is not None and at <= current:
+            return
+        row = self._watermark_row(project, feed).encode()
+        self._write([self._put(row, "watermark", {"at": at})])

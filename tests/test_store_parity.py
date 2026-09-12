@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from foreman.models import Finding, Observation, Severity
+from foreman.models import Event, Finding, Observation, Severity
 from foreman.shoalstore import ShoalStore
 from foreman.store import SqliteStore
 
@@ -36,6 +36,34 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+class _TooOld(RuntimeError):
+    pass
+
+
+def _require_primitives(store) -> None:
+    """Fail fast, and legibly, on a shoal build that predates what Foreman needs.
+
+    An older binary answers UNIMPLEMENTED to ConditionalWrite, which is how ids
+    are allocated — so every test failed deep inside an unrelated call with a
+    message about the method rather than about the binary. Twenty-one opaque
+    failures read like a broken port; one skip naming the binary does not.
+    """
+    import grpc
+
+    try:
+        # Its own counter, not start_run: the probe must not consume a run id,
+        # or the very first test — that ids start at one — fails because of the
+        # check meant to protect it.
+        store._next_id("__probe__")
+    except grpc.RpcError as exc:
+        if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+            raise _TooOld(
+                f"{BINARY} predates a primitive Foreman needs ({exc.details()}). "
+                "Rebuild shoal-embed from a current checkout."
+            ) from exc
+        raise
 
 
 @pytest.fixture
@@ -58,6 +86,15 @@ def shoal(tmp_path):
     else:
         proc.kill()
         pytest.fail("shoal-embed did not come up")
+
+    try:
+        _require_primitives(store)
+    except _TooOld as exc:
+        store.close()
+        proc.terminate()
+        proc.wait(timeout=10)
+        shutil.rmtree(data, ignore_errors=True)
+        pytest.skip(str(exc))
     yield store
     store.close()
     proc.terminate()
@@ -337,3 +374,93 @@ def test_last_run_time_agrees_across_both_stores(store):
     assert store.last_run_time("p", "audit:seo-audit") == store.sweep_times("p")[0]
     assert store.last_run_time("p", "audit:security") is None
     assert store.last_run_time("other", "crawl") is None
+
+
+# --- history ----------------------------------------------------------------
+
+
+def _ev(store, ref="abc", at="2026-09-01T10:00:00+00:00", kind="commit", **kw):
+    store.record_events([Event(project="p", kind=kind, ref=ref, at=at, **kw)])
+
+
+def test_events_round_trip(store):
+    store.record_events(
+        [
+            Event(
+                project="p",
+                kind="commit",
+                ref="abc",
+                at="2026-09-01T10:00:00+00:00",
+                actor="someone",
+                title="Fix the thing",
+                url="https://github.com/o/r/commit/abc",
+                fields={"sha": "abcdef"},
+            )
+        ]
+    )
+    (row,) = store.events()
+    assert row["project"] == "p"
+    assert row["kind"] == "commit"
+    assert row["ref"] == "abc"
+    assert row["actor"] == "someone"
+    assert row["title"] == "Fix the thing"
+    assert json.loads(row["fields"]) == {"sha": "abcdef"}
+
+
+def test_an_event_is_never_written_twice(store):
+    """Feeds are re-read from an inclusive cursor, so the boundary record comes
+    back on every run and must not accumulate."""
+    _ev(store)
+    _ev(store)
+    assert len(store.events()) == 1
+
+
+def test_the_same_subject_at_a_later_moment_is_a_separate_event(store):
+    """The whole reason events are not observations: a pull request commented
+    on today did not stop being merged yesterday."""
+    _ev(store, kind="pr", ref="7", at="2026-09-01T10:00:00+00:00", title="opened")
+    _ev(store, kind="pr", ref="7", at="2026-09-02T10:00:00+00:00", title="merged")
+    assert [r["title"] for r in store.events()] == ["merged", "opened"]
+
+
+def test_events_come_back_newest_first_and_a_limit_keeps_the_recent_end(store):
+    for day in ("01", "05", "10"):
+        _ev(store, ref=day, at=f"2026-09-{day}T00:00:00+00:00")
+    assert [r["ref"] for r in store.events()] == ["10", "05", "01"]
+    assert [r["ref"] for r in store.events(limit=1)] == ["10"]
+
+
+def test_events_narrow_by_project_kind_and_window(store):
+    _ev(store, ref="a", at="2026-09-01T00:00:00+00:00")
+    _ev(store, ref="b", at="2026-09-05T00:00:00+00:00", kind="pr")
+    store.record_events(
+        [Event(project="other", kind="commit", ref="c", at="2026-09-05T00:00:00+00:00")]
+    )
+
+    assert [r["ref"] for r in store.events(project="p")] == ["b", "a"]
+    assert [r["ref"] for r in store.events(kind="pr")] == ["b"]
+    assert [r["ref"] for r in store.events(since="2026-09-03T00:00:00+00:00", project="p")] == ["b"]
+    assert [r["ref"] for r in store.events(until="2026-09-03T00:00:00+00:00", project="p")] == ["a"]
+
+
+def test_events_in_the_same_second_order_deterministically(store):
+    """A push lands several commits at one timestamp. The two stores ordered
+    findings differently under exactly this condition once already."""
+    at = "2026-09-01T00:00:00+00:00"
+    for n in range(5):
+        _ev(store, ref=f"r{n}", at=at)
+    once = [r["ref"] for r in store.events()]
+    assert once == sorted(once)
+    assert once == [r["ref"] for r in store.events()]
+
+
+def test_a_watermark_round_trips_and_never_rewinds(store):
+    assert store.watermark("p", "gh:commits") is None
+    store.set_watermark("p", "gh:commits", "2026-09-05T00:00:00+00:00")
+    store.set_watermark("p", "gh:commits", "2026-09-01T00:00:00+00:00")
+    assert store.watermark("p", "gh:commits") == "2026-09-05T00:00:00+00:00"
+
+
+def test_watermarks_are_separate_per_feed(store):
+    store.set_watermark("p", "gh:commits", "2026-09-05T00:00:00+00:00")
+    assert store.watermark("p", "gh:issues") is None

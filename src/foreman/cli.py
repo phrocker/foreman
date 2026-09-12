@@ -19,6 +19,7 @@ from .chat import ChatError, ask
 from .collectors import COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
 from .diff import Kind, project_drift
+from .history import ingest_all
 from .migrate import migrate as copy_store
 from .models import Severity
 from .precision import label as precision_label
@@ -551,6 +552,66 @@ def migrate_cmd(
         source.close()
         destination.close()
     console.print(f"\n[green]Migrated.[/] {counts}")
+
+
+@app.command()
+def history(
+    project: str = typer.Option(None, "--project", "-P", help="Only this project id."),
+    since: str = typer.Option(
+        None,
+        "--since",
+        help="Read from this ISO-8601 moment instead of the stored cursor. "
+        "Does not rewind the cursor.",
+    ),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Retain repository history locally, so questions about it cost no API calls."""
+    reg = load_registry(registry)
+
+    async def run() -> None:
+        with open_store(db) as store:
+            total = await ingest_all(
+                reg,
+                store,
+                project=project,
+                since=since,
+                log=lambda m: console.print(f"  {m}"),
+            )
+            console.print(f"\n[bold]{total}[/] event(s) recorded.")
+
+    asyncio.run(run())
+
+
+@app.command()
+def timeline(
+    project: str = typer.Argument(None, help="Project id; omit for the whole portfolio."),
+    kind: str = typer.Option(None, "--kind", "-k", help="commit | pr | issue | release"),
+    since: str = typer.Option(None, "--since", help="ISO-8601 lower bound."),
+    limit: int = typer.Option(40, "--limit", "-n"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """What happened, oldest first."""
+    with open_store(db) as store:
+        rows = store.events(project=project, kind=kind, since=since, limit=limit)
+    if not rows:
+        console.print("[dim]No events. Run `foreman history` to ingest some.[/]")
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("when", "project", "kind", "ref", "who", "what"):
+        table.add_column(column, overflow="fold" if column == "what" else "ellipsis")
+    # Read newest-first from the store so a limit keeps the recent end, then
+    # reversed for display: a timeline is read forwards.
+    for row in reversed(rows):
+        table.add_row(
+            row["at"].replace("+00:00", "").replace("T", " "),
+            row["project"],
+            row["kind"],
+            _clip(row["ref"], 14),
+            _clip(row["actor"] or "-", 16),
+            _clip(row["title"] or "", 70),
+        )
+    console.print(table)
 
 
 @app.command()

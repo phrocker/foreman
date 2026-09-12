@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .models import Finding, Observation, utcnow
+from .models import Event, Finding, Observation, utcnow
 
 DB_NAME = "foreman.db"
 DEFAULT_DB = Path(DB_NAME)
@@ -118,6 +118,19 @@ class Store(Protocol):
     ) -> int: ...
     def conversation(self, conversation_id: int) -> list[Record]: ...
     def conversations(self, limit: int = 20) -> list[Record]: ...
+
+    # --- history ---
+    def record_events(self, events: Iterable[Event]) -> int: ...
+    def events(
+        self,
+        project: str | None = None,
+        kind: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+    ) -> list[Record]: ...
+    def watermark(self, project: str, feed: str) -> str | None: ...
+    def set_watermark(self, project: str, feed: str, at: str) -> None: ...
 
 
 # Overrides the registry's own `store:` key, for trying the other one without
@@ -268,6 +281,38 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages (conversation_id, created_at);
+
+-- Repository history, kept so that questions about it cost a range scan rather
+-- than a fan-out of API calls. Append-only: an event is never updated, because
+-- it never had another value. When GitHub reports a pull request differently on
+-- a later poll that is another thing that happened to it, recorded at its own
+-- moment, sitting alongside the first.
+CREATE TABLE IF NOT EXISTS events (
+    id      INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    kind    TEXT NOT NULL,   -- commit | pr | issue | release
+    ref     TEXT NOT NULL,   -- sha, number or tag: what it happened to
+    at      TEXT NOT NULL,   -- when: part of the identity, not a modified date
+    actor   TEXT,
+    title   TEXT,
+    url     TEXT,
+    fields  TEXT NOT NULL DEFAULT '{}'
+);
+-- Identity, and what makes re-ingesting a page of history idempotent.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_identity
+    ON events (project, kind, ref, at);
+-- Every read is "this project, this window".
+CREATE INDEX IF NOT EXISTS idx_events_window ON events (project, at);
+
+-- How far each feed has been read. Per feed rather than per event kind because
+-- it records a cursor into an endpoint, and one endpoint (issues) yields two
+-- kinds of event.
+CREATE TABLE IF NOT EXISTS watermarks (
+    project TEXT NOT NULL,
+    feed    TEXT NOT NULL,
+    at      TEXT NOT NULL,
+    PRIMARY KEY (project, feed)
+);
 """
 
 
@@ -758,3 +803,96 @@ class SqliteStore:
             "ELSE 2 END, found_at, id"
         )
         return _many(self._db.execute(sql, params))
+
+    # --- history ----------------------------------------------------------
+
+    def record_events(self, events: Iterable[Event]) -> int:
+        """Append events. Returns how many were submitted, duplicates included.
+
+        INSERT OR IGNORE against the identity index, so re-reading a page of
+        history costs a write that does nothing rather than a duplicate row.
+        The count is of what was offered rather than what was new: the shoal
+        implementation would have to scan the whole feed to tell the
+        difference, and a number that means two things on two backends is
+        worse than one that means less.
+        """
+        rows = [
+            (
+                e.project,
+                e.kind,
+                e.ref,
+                e.at,
+                e.actor,
+                e.title,
+                e.url,
+                json.dumps(e.fields, sort_keys=True),
+            )
+            for e in events
+        ]
+        if not rows:
+            return 0
+        self._db.executemany(
+            "INSERT OR IGNORE INTO events "
+            "(project, kind, ref, at, actor, title, url, fields) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._db.commit()
+        return len(rows)
+
+    def events(
+        self,
+        project: str | None = None,
+        kind: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+    ) -> list[Record]:
+        """Events in a window, newest first.
+
+        Newest first because a limit should keep the recent end: asking for 200
+        events out of 5000 means the last 200 things that happened, not the
+        first 200 of all time. Callers rendering a narrative reverse it.
+        """
+        sql = "SELECT project, kind, ref, at, actor, title, url, fields FROM events WHERE 1 = 1"
+        params: list[str | int] = []
+        if project:
+            sql += " AND project = ?"
+            params.append(project)
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if since:
+            sql += " AND at >= ?"
+            params.append(since)
+        if until:
+            sql += " AND at <= ?"
+            params.append(until)
+        # kind and ref last: `at` is second-resolution and a push lands several
+        # commits in one second, which would otherwise order arbitrarily.
+        sql += " ORDER BY at DESC, kind, ref LIMIT ?"
+        params.append(limit)
+        return _many(self._db.execute(sql, params))
+
+    def watermark(self, project: str, feed: str) -> str | None:
+        row = self._db.execute(
+            "SELECT at FROM watermarks WHERE project = ? AND feed = ?", (project, feed)
+        ).fetchone()
+        return row["at"] if row else None
+
+    def set_watermark(self, project: str, feed: str, at: str) -> None:
+        """Advance a feed cursor. Never moves it backwards.
+
+        Monotonic because the failure it guards is silent: a cursor that jumped
+        backwards merely re-reads, which the identity index absorbs, but one
+        that can be rewound by an out-of-order write invites the opposite bug.
+        Re-reading history is done by passing an explicit `since`, which does
+        not touch the cursor at all.
+        """
+        self._db.execute(
+            "INSERT INTO watermarks (project, feed, at) VALUES (?, ?, ?) "
+            "ON CONFLICT (project, feed) DO UPDATE SET at = excluded.at "
+            "WHERE excluded.at > watermarks.at",
+            (project, feed, at),
+        )
+        self._db.commit()
