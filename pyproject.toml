@@ -16,7 +16,10 @@ dependencies = [
     # without this a fresh install cannot talk to shoal at all.
     "protobuf>=4.25",
     "fastapi>=0.110",
-    "semantic-action-grammar>=1.2.2",
+    # 1.2.3 is the first release with the expression grammar ordered
+    # tightest-first. Below it, `a>=10&&b==0` binds the other way and the
+    # unattended-write gate silently means something else.
+    "semantic-action-grammar>=1.2.3",
     "uvicorn>=0.29",
 ]
 
