@@ -19,6 +19,7 @@ from .chat import ChatError, ask
 from .collectors import COLLECTORS
 from .config import DEFAULT_REGISTRY, load_registry
 from .diff import Kind, project_drift
+from .migrate import migrate as copy_store
 from .models import Severity
 from .runner import (
     apply_action,
@@ -461,6 +462,44 @@ def ask_cmd(
         console.print(f"\n[dim]conversation {conversation_id} · ${cost:.3f}[/]")
 
     asyncio.run(run())
+
+
+@app.command(name="migrate")
+def migrate_cmd(
+    to: str = typer.Argument(..., help="Destination, e.g. shoal://127.0.0.1:9880"),
+    db: Path = typer.Option(None, "--db", help="Source SQLite file."),
+    force: bool = typer.Option(False, "--force", help="Append to a non-empty destination."),
+) -> None:
+    """Copy this store's contents into another one.
+
+    Only speaks the Store protocol, so it runs in either direction — which is
+    what makes the move reversible.
+    """
+    from .shoalstore import ShoalStore
+    from .store import SqliteStore
+
+    if not to.startswith("shoal://"):
+        raise typer.BadParameter("destination must be shoal://host:port")
+
+    source = SqliteStore(db or default_db())
+    source.connect()
+    destination = ShoalStore(target=to.removeprefix("shoal://"))
+    try:
+        destination.connect()
+    except Exception as exc:
+        console.print(f"[red]cannot reach {to}[/] — is `shoal-embed serve` running? ({exc})")
+        raise typer.Exit(1) from None
+    try:
+        counts = copy_store(
+            source, destination, log=lambda m: console.print(f"  {m}"), force=force
+        )
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/]")
+        raise typer.Exit(1) from None
+    finally:
+        source.close()
+        destination.close()
+    console.print(f"\n[green]Migrated.[/] {counts}")
 
 
 @app.command()

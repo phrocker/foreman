@@ -8,6 +8,12 @@
 # Foreman can open a pull request against, not just report on. That asymmetry is
 # the whole argument for running this yourself rather than buying a seat.
 
+# Where Foreman keeps state. `sqlite` needs nothing running and is the default;
+# `shoal://host:port` uses a `shoal-embed serve` you start yourself, which buys
+# cell versioning, point-in-time reads and compare-and-set at the cost of a
+# daemon. Both are held to the same parity tests.
+store: sqlite
+
 projects:
   - id: mfa
     name: MyFinanceAdvisor

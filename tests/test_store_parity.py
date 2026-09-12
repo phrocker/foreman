@@ -306,3 +306,22 @@ def test_messages_do_not_leak_between_conversations(store):
     store.add_message(second, "user", "b")
     assert len(store.conversation(first)) == 1
     assert store.conversation(second)[0]["content"] == "b"
+
+
+def test_findings_recorded_in_the_same_second_still_order_deterministically(store):
+    """found_at is second-resolution, so same-sweep findings tie. Without a
+    final tie-break the two stores returned them in different orders, which is
+    how a worklist quietly stops being reproducible."""
+    run_id = _sweep(store)
+    store.record_findings(
+        run_id,
+        [_finding(rule=f"r{n}", severity=Severity.MEDIUM) for n in range(5)],
+    )
+    once = [r["rule"] for r in store.open_findings()]
+    assert once == sorted(once, key=lambda r: int(r[1:]))
+    assert once == [r["rule"] for r in store.open_findings()]
+
+
+def test_proposals_made_in_the_same_second_still_order_deterministically(store):
+    ids = [_propose(store, digest=f"d{n}", class_key=f"k{n}") for n in range(5)]
+    assert [r["id"] for r in store.pending_actions()] == ids

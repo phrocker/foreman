@@ -90,10 +90,21 @@ homepage shell. Foreman asks for URLs that should not exist and compares.
   FOREMAN_STORE=shoal://127.0.0.1:9876 foreman status
   ```
 
-  Point it at a server of its own; sharing one with another application means
-  sharing a table. Both implementations are held to the same 38 parity tests,
-  which drive an identical sequence through each and compare what comes back —
-  the only check that catches a divergence nobody thought to test for. Foreman's
+  Set it in `foreman.yaml` (`store: shoal://…`) so the choice travels with the
+  projects it describes; `FOREMAN_STORE` overrides it for trying the other one.
+  Point it at a server of its own — sharing one with another application means
+  sharing a table.
+
+  Both implementations are held to the same 42 parity tests, which drive an
+  identical sequence through each and compare what comes back. `foreman migrate`
+  moves between them and speaks only the protocol, so it runs in either
+  direction — being able to copy back is what makes the move reversible. It
+  refuses a destination that already holds findings, because it appends with
+  fresh ids and a doubled ledger looks plausible.
+
+  It carries current state, not version history: drift restarts after the next
+  sweep. Copying every version of every cell is possible but the protocol does
+  not expose it, and the current value is what rules read. Foreman's
   observation model turned out to be a cell store reinvented in SQL (project and
   subject are a row, the collector a column family, the key a column qualifier,
   `observed_at` a cell timestamp), so moving it onto one is a real prospect. The
@@ -134,6 +145,7 @@ foreman collect --collector render
 | `foreman approve` / `reject` | Decide one |
 | `foreman apply-eligible` | Apply what a class has earned under its policy |
 | `foreman ask "…"` | Ask about the portfolio; read-only |
+| `foreman migrate shoal://…` | Copy this store into another one |
 | `foreman verify` | Ask each project's checks whether applied actions held up |
 | `foreman precision` | Which rules earn their findings |
 | `foreman serve` | Dashboard on loopback (default `:8765`) |

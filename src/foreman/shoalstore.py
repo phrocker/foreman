@@ -396,7 +396,13 @@ class ShoalStore:
             if not r.get("resolved_at") and (not project or r.get("project") == project)
         ]
         rank = {"high": 0, "medium": 1, "low": 2}
-        rows.sort(key=lambda r: (rank.get(r.get("severity", ""), 3), r.get("found_at") or ""))
+        rows.sort(
+            key=lambda r: (
+                rank.get(r.get("severity", ""), 3),
+                r.get("found_at") or "",
+                int(r["id"]),
+            )
+        )
         return rows
 
     def set_finding_outcome(self, finding_id: int, outcome: str) -> None:
@@ -524,7 +530,7 @@ class ShoalStore:
             and r.get("outcome") is None
             and (not project or r.get("project") == project)
         ]
-        rows.sort(key=lambda r: r.get("proposed_at") or "")
+        rows.sort(key=lambda r: (r.get("proposed_at") or "", int(r["id"])))
         for row in rows:
             if row.get("finding_id") is not None:
                 row["finding_id"] = int(row["finding_id"])

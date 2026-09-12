@@ -119,14 +119,16 @@ class Store(Protocol):
     def conversations(self, limit: int = 20) -> list[Record]: ...
 
 
-# Where the store lives. `sqlite` (the default, a file beside foreman.yaml) or
-# `shoal://host:port` for a running `shoal-embed serve`.
+# Overrides the registry's own `store:` key, for trying the other one without
+# editing the file.
 STORE_ENV = "FOREMAN_STORE"
 
 
 def open_store(path: Path | None = None) -> Store:
     """Open the configured store. The one place a substrate is chosen."""
-    target = os.environ.get(STORE_ENV, "").strip()
+    from .config import configured_store
+
+    target = (os.environ.get(STORE_ENV) or "").strip() or configured_store()
     if target.startswith("shoal://"):
         from .shoalstore import ShoalStore
 
@@ -568,7 +570,7 @@ class SqliteStore:
         if project:
             sql += " AND project = ?"
             params = (project,)
-        return _many(self._db.execute(sql + " ORDER BY proposed_at", params))
+        return _many(self._db.execute(sql + " ORDER BY proposed_at, id", params))
 
     def decide_action(self, action_id: int, decision: str, decided_by: str = "human") -> None:
         self._db.execute(
@@ -722,8 +724,11 @@ class SqliteStore:
         if project:
             sql += " AND project = ?"
             params = (project,)
+        # id last, always: found_at is second-resolution, so findings recorded in
+        # the same second tie and their order is otherwise whatever the engine
+        # happens to return.
         sql += (
             " ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 "
-            "ELSE 2 END, found_at DESC"
+            "ELSE 2 END, found_at, id"
         )
         return _many(self._db.execute(sql, params))

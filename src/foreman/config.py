@@ -163,6 +163,9 @@ class Project(BaseModel):
 
 
 class Registry(BaseModel):
+    # Where state lives: "sqlite" (a file beside this one) or
+    # "shoal://host:port" for a running `shoal-embed serve`.
+    store: str = "sqlite"
     projects: list[Project]
 
     @property
@@ -175,6 +178,23 @@ class Registry(BaseModel):
                 return project
         known = ", ".join(p.id for p in self.projects) or "none"
         raise KeyError(f"no project {project_id!r} in registry (known: {known})")
+
+
+def configured_store() -> str:
+    """The store this registry asks for, without loading the whole thing.
+
+    Read from the registry file rather than an environment variable so the
+    choice travels with the projects it describes; the variable stays as an
+    override for trying the other one.
+    """
+    path = find_registry()
+    if path is None:
+        return "sqlite"
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError:
+        return "sqlite"
+    return str(data.get("store") or "sqlite")
 
 
 def load_registry(path: Path | None = None) -> Registry:
