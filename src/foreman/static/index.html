@@ -227,14 +227,45 @@
   .was { color: var(--high); }
   .now { color: var(--good); }
 
-  /* Chat */
-  #chatLog { max-height: 440px; overflow-y: auto; }
+  /* Chat pane */
+  .shell { display: flex; align-items: flex-start; }
+  .chat-pane {
+    flex: 0 0 380px; align-self: stretch; position: sticky; top: 0;
+    height: 100vh; display: flex; flex-direction: column;
+    background: var(--surface); border-right: 1px solid var(--border);
+  }
+  .shell[data-chat="closed"] .chat-pane { display: none; }
+  .chat-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 18px 16px 14px; border-bottom: 1px solid var(--border);
+  }
+  .chat-title { font-weight: 650; font-size: 15px; }
+  #chatClose { margin-left: auto; }
+  .chat-form { display: flex; gap: 8px; padding: 12px 16px 6px; border-top: 1px solid var(--border); }
+  .chat-form input { flex: 1; min-width: 0; }
+  .chat-foot { padding: 0 16px 14px; color: var(--text-3); font-size: 12px; }
+  #chatLog { flex: 1; overflow-y: auto; }
+  /* The pane is narrow, so prose inside it needs to breathe differently from
+     prose in the main column. */
+  .turn-body p { margin: 0 0 9px; }
+  .turn-body p:last-child { margin-bottom: 0; }
+  .turn-body ul, .turn-body ol { margin: 0 0 9px; padding-left: 20px; }
+  .turn-body li { margin-bottom: 3px; }
+  .turn-body code {
+    font: 12px ui-monospace, Menlo, monospace; background: var(--surface-alt);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  .turn-body a { color: var(--accent); }
+  @media (max-width: 900px) {
+    /* No room for both; the pane takes the screen when open. */
+    .chat-pane { position: fixed; inset: 0; z-index: 10; flex-basis: auto; width: 100%; }
+  }
   .turn { padding: 13px 16px; border-bottom: 1px solid var(--border); }
   .turn:last-child { border-bottom: none; }
   .turn-role { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em;
                color: var(--text-3); margin-bottom: 5px; }
   .turn.user { background: var(--surface-alt); }
-  .turn-body { white-space: pre-wrap; max-width: 70ch; }
+  .turn-body { max-width: 70ch; }
   /* Provenance, again: an answer with no references is an opinion, and the
      reader has to be able to see which kind they were given. */
   .turn-refs { margin-top: 9px; display: flex; gap: 6px; flex-wrap: wrap; }
@@ -258,10 +289,26 @@
 </style>
 </head>
 <body>
+<div class="shell" id="shell" data-chat="closed">
+
+<aside class="chat-pane" id="chatPane" aria-label="Ask Foreman">
+  <div class="chat-head">
+    <span class="chat-title">Ask Foreman</span>
+    <button id="chatClose" class="icon" title="Collapse" aria-label="Collapse chat">›</button>
+  </div>
+  <div id="chatLog"></div>
+  <form id="chatForm" class="chat-form">
+    <input type="search" id="chatInput" placeholder="What needs me today?" autocomplete="off">
+    <button class="primary" id="chatSend" type="submit">Ask</button>
+  </form>
+  <div class="chat-foot">Read-only. It can suggest an approval; only you can grant one.</div>
+</aside>
+
 <div class="wrap">
   <header>
     <div class="brand">Foreman <span id="lastRun">—</span></div>
     <div class="spacer"></div>
+    <button id="chatToggle">Ask Foreman</button>
     <button id="runBtn" class="primary">Run sweep</button>
     <button id="themeBtn" class="icon" title="Toggle theme" aria-label="Toggle theme"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1a7 7 0 0 0 0 14z" fill="currentColor"/></svg></button>
   </header>
@@ -285,7 +332,6 @@
     <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
     <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
     <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
-    <button class="tab" data-tab="chat"     role="tab" aria-selected="false">Chat</button>
   </nav>
 
   <section id="panel-findings" role="tabpanel">
@@ -324,14 +370,7 @@
     <div class="panel scroll"><div id="precisionList"></div></div>
   </section>
 
-  <section id="panel-chat" role="tabpanel" hidden>
-    <div class="panel"><div id="chatLog"></div></div>
-    <form id="chatForm" class="filters" style="margin-top:12px">
-      <input type="search" id="chatInput" placeholder="Ask about the portfolio…  e.g. what needs me today?" autocomplete="off">
-      <button class="primary" id="chatSend" type="submit">Ask</button>
-    </form>
-    <div class="hint" style="margin-top:6px">Read-only. It can suggest an approval; only you can grant one.</div>
-  </section>
+</div>
 </div>
 
 <script>
@@ -347,6 +386,49 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+/** Minimal markdown, applied *after* escaping.
+ *
+ *  The content is written by a model, so it is escaped first and only then are
+ *  a handful of inline forms turned back into tags. Rendering first and
+ *  escaping after would be an injection waiting to happen; pulling in a full
+ *  markdown library for bold and backticks would be a dependency waiting to
+ *  happen. */
+function md(text) {
+  const escaped = esc(text ?? "");
+  const inline = (t) =>
+    t
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  const out = [];
+  let list = null;
+  for (const raw of escaped.split("\n")) {
+    const line = raw.trimEnd();
+    const bullet = line.match(/^\s*[-*]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const item = bullet || numbered;
+    if (item) {
+      const tag = bullet ? "ul" : "ol";
+      if (list !== tag) {
+        if (list) out.push(`</${list}>`);
+        out.push(`<${tag}>`);
+        list = tag;
+      }
+      out.push(`<li>${inline(item[1])}</li>`);
+      continue;
+    }
+    if (list) {
+      out.push(`</${list}>`);
+      list = null;
+    }
+    out.push(line ? `<p>${inline(line)}</p>` : "");
+  }
+  if (list) out.push(`</${list}>`);
+  return out.join("");
+}
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -703,7 +785,7 @@ function renderChat(pending) {
         <button class="sg-reject" data-id="${sg.action_id}">Reject</button></div>`).join("");
     return `<div class="turn ${esc(t.role)}">
       <div class="turn-role">${t.role === "user" ? "you" : "foreman"}</div>
-      <div class="turn-body">${esc(t.content)}</div>
+      <div class="turn-body">${md(t.content)}</div>
       ${refs ? `<div class="turn-refs">${refs}</div>` : ""}
       ${suggests ? `<div class="suggests">${suggests}</div>` : ""}
     </div>`;
@@ -745,13 +827,34 @@ $("chatForm").addEventListener("submit", async (e) => {
   }
 });
 
+function setChat(open) {
+  $("shell").dataset.chat = open ? "open" : "closed";
+  try { localStorage.setItem("foreman-chat", open ? "open" : "closed"); } catch {}
+  if (open) $("chatInput").focus();
+}
+
+$("chatToggle").addEventListener("click", () => setChat($("shell").dataset.chat !== "open"));
+$("chatClose").addEventListener("click", () => setChat(false));
+document.addEventListener("keydown", (e) => {
+  // Escape closes the pane before it clears expanded rows, since when the pane
+  // is open that is what Escape obviously means.
+  if (e.key === "Escape" && $("shell").dataset.chat === "open" && document.activeElement !== $("search")) {
+    setChat(false);
+  }
+});
+try {
+  setChat(localStorage.getItem("foreman-chat") === "open");
+} catch {
+  setChat(false);
+}
+
 // --- tabs ------------------------------------------------------------------
 
 function showTab(name) {
   state.tab = name;
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute("aria-selected", String(t.dataset.tab === name)));
-  for (const panel of ["findings", "actions", "drift", "rules", "chat"]) {
+  for (const panel of ["findings", "actions", "drift", "rules"]) {
     $("panel-" + panel).hidden = panel !== name;
   }
   try { localStorage.setItem("foreman-tab", name); } catch {}

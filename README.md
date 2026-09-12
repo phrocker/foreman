@@ -239,7 +239,7 @@ renewal is.
 foreman ask "what are the two most important things for me to do today?"
 ```
 
-Same thing in the dashboard's Chat tab. The whole portfolio state — projects,
+Same thing in the dashboard's left pane ("Ask Foreman", or Escape to collapse). The whole portfolio state — projects,
 open findings, pending actions with their class evidence, rule precision — is a
 few thousand tokens, so it is assembled and handed over rather than offered as
 tools to go and fetch. That costs one round trip and removes every question
