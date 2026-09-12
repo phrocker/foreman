@@ -491,6 +491,8 @@
     <button class="tab" data-tab="settings" role="tab" aria-selected="false">Settings</button>
   </nav>
 
+  <p id="staleBar" class="warn" hidden></p>
+
   <section id="panel-findings" role="tabpanel">
     <div class="filters">
       <button class="chip" data-sev="high"   aria-pressed="false"><span class="glyph sev-high">▲</span> High</button>
@@ -652,25 +654,49 @@ function ago(iso) {
   return Math.round(secs / 86400) + "d ago";
 }
 
+/** One endpoint, and a fallback if it cannot be read.
+ *
+ *  index.html is served off disk while the Python is whatever was loaded when
+ *  the process started, so a dashboard left running across an upgrade is a new
+ *  page talking to an old server. Under Promise.all a single 404 rejected the
+ *  lot and every panel came up empty — a page that says nothing about a stale
+ *  server, which is the one thing it needed to say.
+ */
+async function fetchPart(path, fallback) {
+  try {
+    const res = await fetch(path);
+    if (!res.ok) throw new Error(String(res.status));
+    return await res.json();
+  } catch (err) {
+    stale.push(path);
+    console.error(`could not read ${path}`, err);
+    return fallback;
+  }
+}
+
+let stale = [];
+
 async function load() {
+  stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
          settings] =
     await Promise.all([
-    fetch("/api/overview").then((r) => r.json()),
-    fetch("/api/findings").then((r) => r.json()),
-    fetch("/api/actions").then((r) => r.json()),
-    fetch("/api/drift").then((r) => r.json()),
-    fetch("/api/precision").then((r) => r.json()),
-    fetch("/api/history").then((r) => r.json()),
-    fetch("/api/connectors").then((r) => r.json()),
-    fetch("/api/skills").then((r) => r.json()),
-    fetch("/api/memories").then((r) => r.json()),
-    fetch("/api/settings").then((r) => r.json()),
+    fetchPart("/api/overview", null),
+    fetchPart("/api/findings", []),
+    fetchPart("/api/actions", []),
+    fetchPart("/api/drift", []),
+    fetchPart("/api/precision", []),
+    fetchPart("/api/history", []),
+    fetchPart("/api/connectors", []),
+    fetchPart("/api/skills", []),
+    fetchPart("/api/memories", []),
+    fetchPart("/api/settings", null),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
     connectors, skills, memories, settings,
   });
+  renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
   // load(), so a single bad reference blanked the whole page instead of one
   // section — a failure mode that is much harder to notice than an empty panel.
@@ -689,6 +715,18 @@ async function load() {
       console.error(`render failed: ${name}`, err);
     }
   }
+}
+
+/** Say so when the server could not answer, rather than showing empty panels.
+ *  Most often this is a dashboard left running across an upgrade. */
+function renderStale() {
+  const bar = $("staleBar");
+  if (!stale.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML =
+    `<strong>${stale.length} endpoint(s) could not be read</strong> — ${
+      stale.map(esc).join(", ")
+    }. If you upgraded Foreman while this was running, the page is newer than the server: restart <code>foreman serve</code>.`;
 }
 
 function renderCounts() {

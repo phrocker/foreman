@@ -104,7 +104,16 @@ class Status:
 
 
 def _backend():
-    import keyring
+    try:
+        import keyring
+    except ModuleNotFoundError as exc:
+        # Its own answer rather than an exception escaping: callers already
+        # handle "no usable keyring", and letting this through turned a missing
+        # dependency into a 500 on the one page meant to explain the problem.
+        raise SecretsUnavailable(
+            "the keyring package is not installed, so credentials cannot be "
+            "stored. Reinstall Foreman to pick it up."
+        ) from exc
 
     backend = keyring.get_keyring()
     name = f"{type(backend).__module__}.{type(backend).__name__}"

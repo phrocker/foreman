@@ -141,3 +141,33 @@ def test_a_credential_can_be_removed_from_where_it_was_added(client, vault):
     client.put("/api/settings/github_token", json={"value": SECRET})
     assert client.delete("/api/settings/github_token").json()["removed"] is True
     assert secrets.status("github_token").set is False
+
+
+def test_a_missing_keyring_package_reports_as_unavailable_not_as_a_crash(monkeypatch):
+    """A dashboard left running across an upgrade hits this, and the page that
+    would have explained it returned a 500 instead."""
+    import builtins
+
+    real = builtins.__import__
+
+    def refuse(name, *args, **kwargs):
+        if name == "keyring":
+            raise ModuleNotFoundError("No module named 'keyring'")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse)
+    with pytest.raises(secrets.SecretsUnavailable, match="not installed"):
+        secrets.backend_name()
+
+
+def test_the_settings_page_still_answers_without_a_keyring(monkeypatch, tmp_path):
+    """It is the page that explains the problem, so it must not be the page
+    that fails with it."""
+    monkeypatch.setattr(
+        secrets, "_backend", lambda: (_ for _ in ()).throw(secrets.SecretsUnavailable("nope"))
+    )
+    client = TestClient(create_app(db_path=tmp_path / "t.db"))
+    body = client.get("/api/settings").json()
+    assert body["usable"] is False
+    assert "nope" in body["keyring"]
+    assert all(c["set"] is False for c in body["credentials"])
