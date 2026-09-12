@@ -30,7 +30,7 @@ from .runner import (
     propose_actions,
     reject_action,
 )
-from .store import Store, default_db, open_store
+from .store import Store, open_store
 
 STATIC = Path(__file__).parent / "static"
 
@@ -63,7 +63,7 @@ class Job:
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
-    db = db_path or default_db()
+    db = db_path
     job = Job()
 
     def store() -> Store:

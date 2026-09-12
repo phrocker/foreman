@@ -86,7 +86,7 @@ def collect(
         raise typer.BadParameter(f"unknown collector {collector!r} (have: {', '.join(COLLECTORS)})")
 
     async def run() -> None:
-        with open_store(db or default_db()) as store:
+        with open_store(db) as store:
             total = await collect_all(
                 reg,
                 store,
@@ -107,7 +107,7 @@ def check(
 ) -> None:
     """Evaluate the deterministic rules against the latest snapshot."""
     reg = load_registry(registry)
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         check_all(reg, store, project=project, log=lambda m: console.print(f"[bold]{m}[/]"))
         for row in store.open_findings(project):
             style = SEVERITY_STYLE.get(row["severity"], "")
@@ -122,7 +122,7 @@ def status(
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """What needs attention, across the whole portfolio."""
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         rows = store.open_findings(project)
     if not rows:
         console.print("[green]Nothing open.[/]")
@@ -162,7 +162,7 @@ def audit(
     budget = Budget(limit_usd=budget_usd)
 
     async def run() -> None:
-        with open_store(db or default_db()) as store:
+        with open_store(db) as store:
             for target in targets:
                 if budget.remaining <= 0:
                     console.print(
@@ -201,7 +201,7 @@ def diff(
     targets = [reg.get(project)] if project else reg.active
     quiet = True
 
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         for target in targets:
             changes, newest, previous = project_drift(store, target.id)
             if newest is None:
@@ -250,7 +250,7 @@ def actions(
 ) -> None:
     """Pending actions, each with the approval record of its class."""
     reg = load_registry(registry)
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         if propose:
             found = propose_actions(reg, store, project=project)
             console.print(f"[dim]{found} new proposal(s).[/]\n")
@@ -318,7 +318,7 @@ def approve(
 ) -> None:
     """Approve and apply one action."""
     reg = load_registry(registry)
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         try:
             written = apply_action(reg, store, action_id)
         except Stale as exc:
@@ -334,7 +334,7 @@ def reject(
     db: Path = typer.Option(None, "--db"),
 ) -> None:
     """Reject an action, and by default dismiss the finding behind it."""
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         reject_action(store, action_id, dismiss_finding=not keep)
     console.print("[dim]Rejected.[/]")
 
@@ -353,7 +353,7 @@ def apply_eligible_cmd(
     automation never becomes evidence for more automation.
     """
     reg = load_registry(registry)
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         applied, skipped = apply_eligible(
             reg,
             store,
@@ -385,7 +385,7 @@ def verify(
     reg = load_registry(registry)
 
     async def run() -> None:
-        with open_store(db or default_db()) as store:
+        with open_store(db) as store:
             good, bad = await verify_applied(
                 reg, store, project=project, log=lambda m: console.print(f"  {m}")
             )
@@ -400,7 +400,7 @@ def verify(
 @app.command()
 def precision(db: Path = typer.Option(None, "--db")) -> None:
     """How often each rule's findings were acted on rather than dismissed."""
-    with open_store(db or default_db()) as store:
+    with open_store(db) as store:
         rows = store.rule_precision()
     if not rows:
         console.print(
@@ -440,7 +440,7 @@ def ask_cmd(
     reg = load_registry(registry)
 
     async def run() -> None:
-        with open_store(db or default_db()) as store:
+        with open_store(db) as store:
             try:
                 conversation_id, reply, cost = await ask(
                     store, reg, question, conversation, model=model
@@ -490,9 +490,7 @@ def migrate_cmd(
         console.print(f"[red]cannot reach {to}[/] — is `shoal-embed serve` running? ({exc})")
         raise typer.Exit(1) from None
     try:
-        counts = copy_store(
-            source, destination, log=lambda m: console.print(f"  {m}"), force=force
-        )
+        counts = copy_store(source, destination, log=lambda m: console.print(f"  {m}"), force=force)
     except ValueError as exc:
         console.print(f"[yellow]{exc}[/]")
         raise typer.Exit(1) from None
@@ -516,7 +514,7 @@ def serve(
     from .web import create_app
 
     console.print(f"[bold]Foreman[/] → [link]http://{host}:{port}[/]")
-    uvicorn.run(create_app(registry, db or default_db()), host=host, port=port, log_level="warning")
+    uvicorn.run(create_app(registry, db), host=host, port=port, log_level="warning")
 
 
 def main() -> None:

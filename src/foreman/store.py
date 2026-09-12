@@ -125,20 +125,30 @@ STORE_ENV = "FOREMAN_STORE"
 
 
 def open_store(path: Path | None = None) -> Store:
-    """Open the configured store. The one place a substrate is chosen."""
+    """Open the configured store. The one place a substrate is chosen.
+
+    An explicit `path` names a SQLite file and settles it. Letting ambient
+    configuration override a path the caller passed by hand is how a test that
+    asked for a file got a gRPC client.
+    """
     from .config import configured_store
+
+    if path is not None:
+        store: Store = SqliteStore(path)
+        store.connect()
+        return store
 
     target = (os.environ.get(STORE_ENV) or "").strip() or configured_store()
     if target.startswith("shoal://"):
         from .shoalstore import ShoalStore
 
-        store: Store = ShoalStore(target=target.removeprefix("shoal://"))
+        store = ShoalStore(target=target.removeprefix("shoal://"))
     elif target and target != "sqlite":
         raise ValueError(
             f"{STORE_ENV}={target!r} is not a store. Use 'sqlite' or 'shoal://host:port'."
         )
     else:
-        store = SqliteStore(path)
+        store = SqliteStore(default_db())
     store.connect()
     return store
 
