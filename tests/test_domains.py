@@ -8,9 +8,9 @@ from foreman.domains import DOMAINS, collectors_for, ops_for
 def test_seo_is_one_trade_among_several():
     """The registry exists so no single domain is structurally privileged. If
     this ever shrinks back to web-only domains, the tool has drifted."""
-    assert set(DOMAINS) >= {"seo", "security", "performance", "dependencies", "delivery"}
+    assert set(DOMAINS) >= {"seo", "security", "performance", "dependencies", "delivery", "cloud"}
     non_web = {n for n, d in DOMAINS.items() if "web" not in d.surfaces}
-    assert non_web >= {"dependencies", "delivery"}
+    assert non_web >= {"dependencies", "delivery", "cloud"}
 
 
 def test_a_library_with_no_website_still_has_trades():
@@ -28,9 +28,23 @@ def test_a_brochure_site_with_no_repository_still_has_trades():
     assert "dependencies" not in site.active_domains
 
 
-def test_a_project_with_both_surfaces_gets_everything():
-    both = Project(id="both", web={"url": "https://b.test"}, github={"owner": "o", "repo": "r"})
-    assert set(both.active_domains) == set(DOMAINS)
+def test_a_cloud_account_with_no_repository_and_no_website_still_has_a_trade():
+    """The case issue #7 was about: a project could name a GCP account and be
+    reported as having nothing to answer for, because no collector stood behind
+    the surface and so no rule ever had a fact to judge."""
+    account = Project(id="acct", cloud={"provider": "gcp", "account": "acme-prod"})
+    assert account.surface_names == ("cloud",)
+    assert set(account.active_domains) == {"cloud"}
+
+
+def test_a_project_with_every_surface_gets_everything():
+    everything = Project(
+        id="all",
+        web={"url": "https://b.test"},
+        github={"owner": "o", "repo": "r"},
+        cloud={"provider": "gcp", "account": "acme-prod"},
+    )
+    assert set(everything.active_domains) == set(DOMAINS)
 
 
 def test_a_project_with_no_surfaces_has_nothing_to_do():

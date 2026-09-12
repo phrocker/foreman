@@ -2,8 +2,9 @@
 
 A domain is one body of expertise: what to observe, what counts as a problem,
 and what can be done about it. Search visibility is one. Dependency health,
-delivery health, transport security and page performance are others, and cloud
-spend and advertising are others still that nothing here collects yet.
+delivery health, transport security, page performance and cloud account
+health are others, and advertising is another still that nothing here collects
+yet.
 
 Declaring them in one table is the point. Before this existed the domains were a
 hardcoded tuple and the rules lived in one module, so the shape of the tool was
@@ -48,6 +49,7 @@ class Domain:
 def _registry() -> dict[str, Domain]:
     # Imported inside the function so a domain's rules can import config without
     # a cycle back through here.
+    from .rules import cloud as cloud_rules
     from .rules import delivery as delivery_rules
     from .rules import dependencies as dependencies_rules
     from .rules import performance as performance_rules
@@ -84,6 +86,13 @@ def _registry() -> dict[str, Domain]:
             surfaces=("web",),
             collectors=("render",),
             evaluate=performance_rules.evaluate,
+        ),
+        Domain(
+            name="cloud",
+            summary="Cloud account state, access and credential hygiene",
+            surfaces=("cloud",),
+            collectors=("gcloud",),
+            evaluate=cloud_rules.evaluate,
         ),
         Domain(
             name="seo",

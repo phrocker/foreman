@@ -12,6 +12,7 @@ page feeds both performance and search visibility; neither owns it.
 from __future__ import annotations
 
 from .crawl import CrawlCollector
+from .gcloud import GcloudCollector
 from .github import DependabotCollector, GitHubActivityCollector
 from .render import RenderCollector
 from .tls import TlsCollector
@@ -24,6 +25,7 @@ COLLECTORS = {
         RenderCollector(),
         DependabotCollector(),
         GitHubActivityCollector(),
+        GcloudCollector(),
     )
 }
 
@@ -36,6 +38,7 @@ __all__ = [
     "OPTIONAL",
     "CrawlCollector",
     "DependabotCollector",
+    "GcloudCollector",
     "GitHubActivityCollector",
     "RenderCollector",
     "TlsCollector",

@@ -42,3 +42,16 @@ projects:
     domains: [security]
     tags: [internal]
     # No web surface. Crawl and TLS collectors skip it; security rules still apply.
+
+  - id: platform
+    name: The cloud account everything runs in
+    domains: [cloud]
+    tags: [internal]
+    cloud:
+      provider: gcp        # gcp | aws | azure
+      account: acme-prod   # the GCP project id
+    # Read through the already-authenticated `gcloud` CLI, the same way the
+    # GitHub collectors read through `gh`. aws and azure are accepted and have
+    # no collector — they report themselves as unmonitored rather than quietly
+    # contributing nothing, because that is the half of the report you would
+    # otherwise mistake for good news.

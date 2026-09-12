@@ -58,10 +58,16 @@ run's row with the same `(project, subject, key)`. Add a collector, get drift
 detection free.
 
 **Rules are partitioned by domain, projects opt in.** `rules/seo.py`,
-`rules/security.py`, `rules/performance.py`. A project is evaluated on the
-intersection of the surfaces it has and the domains it asked for, so a library
-never accrues SEO findings. Adding a domain — costs, dependency freshness,
-uptime — means a module here and a collector to feed it, and nothing else changes.
+`rules/security.py`, `rules/performance.py`, `rules/cloud.py`. A project is
+evaluated on the intersection of the surfaces it has and the domains it asked
+for, so a library never accrues SEO findings. Adding a domain — costs, uptime —
+means a module here and a collector to feed it, and nothing else changes.
+
+**A surface with no collector reports itself.** The dangerous direction is not a
+missed finding, it is an account nobody reads looking exactly like an account in
+order. So the cloud domain records what it *could not* see — the CLI was not
+authenticated, the provider has no collector, APIs are enabled whose resources
+nothing here inspects — and each of those is a finding in its own right.
 
 **Render only to compare.** The crawl collector reads what the server sends,
 because that is what a non-JS crawler indexes. The optional `render` collector
