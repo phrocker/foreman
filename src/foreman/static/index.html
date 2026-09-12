@@ -392,22 +392,38 @@ async function load() {
 }
 
 function renderCounts() {
-  $("countFindings").textContent = state.findings.length || "";
-  $("countActions").textContent = state.actions.length || "";
-  const drift = state.decisiveOnly ? state.drift.filter((d) => d.decisive) : state.drift;
-  $("countDrift").textContent = drift.length || "";
+  $("countFindings").textContent = visible().length || "";
+  $("countActions").textContent = visibleActions().length || "";
+  $("countDrift").textContent = visibleDrift().length || "";
+}
+
+/** One filter, every panel. Re-rendering only findings is what made clicking a
+ *  project look like it had done nothing on the other tabs. */
+function applyFilters() {
+  renderFindings();
+  renderActions();
+  renderDrift();
+  renderCounts();
 }
 
 // --- actions ---------------------------------------------------------------
 
+function visibleActions() {
+  return state.actions.filter((a) => !state.project || a.project === state.project);
+}
+
 function renderActions() {
   const list = $("actionList");
-  if (!state.actions.length) {
-    list.innerHTML =
-      '<div class="panel"><div class="empty">Nothing pending. Recompute proposals after a sweep.</div></div>';
+  const actions = visibleActions();
+  if (!actions.length) {
+    list.innerHTML = `<div class="panel"><div class="empty">${
+      state.actions.length
+        ? `No pending actions for ${esc(state.project)}.`
+        : "Nothing pending. Recompute proposals after a sweep."
+    }</div></div>`;
     return;
   }
-  list.innerHTML = state.actions.map((a) => {
+  list.innerHTML = actions.map((a) => {
     const s = a.stats;
     // Both claims, kept apart: class_key counts "the same kind of action",
     // patch_digest counts "byte-identical to what you approved".
@@ -464,12 +480,20 @@ async function decide(id, verb) {
 
 // --- drift -----------------------------------------------------------------
 
+function visibleDrift() {
+  return state.drift.filter(
+    (d) => (!state.decisiveOnly || d.decisive) && (!state.project || d.project === state.project),
+  );
+}
+
 function renderDrift() {
-  const rows = state.decisiveOnly ? state.drift.filter((d) => d.decisive) : state.drift;
+  const rows = visibleDrift();
   const list = $("driftList");
   if (!rows.length) {
     list.innerHTML = `<div class="empty">${
-      state.drift.length ? "No decisive changes. Untick to see measurements." : "No drift since the previous snapshot."
+      state.drift.length
+        ? "Nothing here under the current filters."
+        : "No drift since the previous snapshot."
     }</div>`;
     return;
   }
@@ -551,10 +575,13 @@ function renderProjects() {
 
   document.querySelectorAll(".project-row").forEach((el) =>
     el.addEventListener("click", () => {
-      $("projectFilter").value = el.dataset.project;
-      state.project = el.dataset.project;
-      renderFindings();
-      document.querySelector("section").scrollIntoView({ behavior: "smooth", block: "start" });
+      // Clicking the project you are already filtered to clears it, so the
+      // list doubles as the way back out.
+      const next = state.project === el.dataset.project ? "" : el.dataset.project;
+      state.project = next;
+      $("projectFilter").value = next;
+      applyFilters();
+      document.querySelector(".tabs").scrollIntoView({ behavior: "smooth", block: "start" });
     }));
 }
 
@@ -604,8 +631,12 @@ document.querySelectorAll(".chip").forEach((chip) =>
     state.sevs.has(sev) ? state.sevs.delete(sev) : state.sevs.add(sev);
     chip.setAttribute("aria-pressed", String(state.sevs.has(sev)));
     renderFindings();
+    renderCounts();
   }));
-$("projectFilter").addEventListener("change", (e) => { state.project = e.target.value; renderFindings(); });
+$("projectFilter").addEventListener("change", (e) => {
+  state.project = e.target.value;
+  applyFilters();
+});
 $("search").addEventListener("input", (e) => { state.q = e.target.value.toLowerCase().trim(); renderFindings(); });
 document.addEventListener("keydown", (e) => {
   if (e.key === "/" && document.activeElement !== $("search")) { e.preventDefault(); $("search").focus(); }
@@ -732,8 +763,7 @@ document.querySelectorAll(".tab").forEach((t) =>
 $("decisiveOnly").addEventListener("click", () => {
   state.decisiveOnly = !state.decisiveOnly;
   $("decisiveOnly").setAttribute("aria-pressed", String(state.decisiveOnly));
-  renderDrift();
-  renderCounts();
+  applyFilters();
 });
 
 $("proposeBtn").addEventListener("click", async () => {
