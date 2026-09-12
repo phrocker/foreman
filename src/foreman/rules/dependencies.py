@@ -52,6 +52,18 @@ def evaluate(pages: Pages, add: Add) -> None:
                 "the two to mistake.",
             )
 
+        if facts.get("update_config") == "absent":
+            add(
+                "dependabot_not_configured",
+                Severity.MEDIUM,
+                "no dependabot.yml — nothing is opening dependency updates",
+                [subject],
+                "Alerts tell you a dependency is vulnerable. Updates are what "
+                "produce the pull request that fixes it, and without a config "
+                "there is nothing to merge. The two are separate switches and "
+                "only one of them is on here.",
+            )
+
         severity = facts.get("alert_severity")
         if severity:
             patched = facts.get("alert_patched")

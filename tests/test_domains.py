@@ -67,11 +67,14 @@ def test_collectors_are_deduplicated_across_domains():
 
 def test_a_project_only_gets_ops_from_its_own_domains():
     library = Project(id="lib", repo=None, github={"owner": "o", "repo": "r"})
-    assert ops_for(library.active_domains) == ()
+    library_verbs = {op.verb for op in ops_for(library.active_domains)}
+    assert "enable_dependabot" in library_verbs
+    assert "anchor_asset_disallow" not in library_verbs
 
     site = Project(id="site", web={"url": "https://s.test"})
-    verbs = {op.verb for op in ops_for(site.active_domains)}
-    assert "anchor_asset_disallow" in verbs
+    site_verbs = {op.verb for op in ops_for(site.active_domains)}
+    assert "anchor_asset_disallow" in site_verbs
+    assert "enable_dependabot" not in site_verbs
 
 
 def test_every_domain_declares_collectors_that_exist():

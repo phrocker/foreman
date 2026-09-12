@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .actions.base import Op
+from .actions.dependabot import EnableDependabot
 from .actions.nginx import AddSecurityHeader
 from .actions.robots import AddSitemapReference, AnchorAssetDisallow
 from .rules.common import Add, Pages
@@ -60,7 +61,7 @@ def _registry() -> dict[str, Domain]:
             surfaces=("github",),
             collectors=("dependabot",),
             evaluate=dependencies_rules.evaluate,
-            ops=(),
+            ops=(EnableDependabot(),),
         ),
         Domain(
             name="delivery",

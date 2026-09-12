@@ -150,3 +150,107 @@ def test_ops_only_answer_their_own_findings(tmp_path):
     out, so an unrelated finding produces nothing."""
     project = project_with(tmp_path, {"nginx.conf": NGINX, "public/robots.txt": ROBOTS_NO_SITEMAP})
     assert propose(project, [{"id": 1, "rule": "slow_lcp"}]) == []
+
+
+# --- enable dependabot ------------------------------------------------------
+
+DEPENDABOT_FINDING = {"id": 1, "rule": "dependabot_not_configured"}
+
+
+def gh_project(tmp_path, files, pid="p"):
+    for name, content in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return Project(id=pid, repo=tmp_path, github={"owner": "o", "repo": pid})
+
+
+def test_ecosystems_come_from_manifests_that_are_actually_present(tmp_path):
+    project = gh_project(
+        tmp_path,
+        {
+            "pyproject.toml": "[project]\n",
+            "frontend/package.json": "{}",
+            ".github/workflows/ci.yml": "on: push\n",
+        },
+    )
+    (action,) = propose(project, [DEPENDABOT_FINDING])
+    config = action.patch.edits[0].after
+    assert 'package-ecosystem: "pip"' in config
+    assert 'package-ecosystem: "npm"' in config
+    assert 'package-ecosystem: "github-actions"' in config
+    assert 'directory: "/frontend"' in config
+    # Nothing invented for ecosystems with no manifest.
+    assert "maven" not in config and "cargo" not in config
+
+
+def test_updates_are_grouped(tmp_path):
+    """Forty repositories each filing one pull request per package is how a
+    dependency queue becomes wallpaper."""
+    project = gh_project(tmp_path, {"go.mod": "module x\n"})
+    (action,) = propose(project, [DEPENDABOT_FINDING])
+    config = action.patch.edits[0].after
+    assert "groups:" in config and "gomod-dependencies:" in config
+
+
+def test_an_existing_config_is_never_touched(tmp_path):
+    """A mature dependabot.yml carries project-specific ignores with reasons
+    attached, none of which are derivable from outside."""
+    for name in (".github/dependabot.yml", ".github/dependabot.yaml"):
+        project = gh_project(
+            tmp_path / name.replace("/", "_"),
+            {
+                "pyproject.toml": "[project]\n",
+                name: "version: 2\nupdates: []\n",
+            },
+        )
+        assert propose(project, [DEPENDABOT_FINDING]) == []
+
+
+def test_a_repository_with_no_recognisable_manifests_gets_nothing(tmp_path):
+    project = gh_project(tmp_path, {"README.md": "# hi\n"})
+    assert propose(project, [DEPENDABOT_FINDING]) == []
+
+
+def test_the_config_is_a_creation_so_a_late_arrival_is_refused(tmp_path):
+    from foreman.actions import apply
+
+    project = gh_project(tmp_path, {"go.mod": "module x\n"})
+    (action,) = propose(project, [DEPENDABOT_FINDING])
+    assert action.patch.edits[0].before == ""
+
+    # Someone commits a config between proposal and approval.
+    (tmp_path / ".github").mkdir(exist_ok=True)
+    (tmp_path / ".github" / "dependabot.yml").write_text("version: 2\n")
+    with pytest.raises(OpNotApplicable):
+        apply(project, action)
+
+
+def test_applying_creates_the_directory(tmp_path):
+    from foreman.actions import apply
+
+    project = gh_project(tmp_path, {"go.mod": "module x\n"})
+    (action,) = propose(project, [DEPENDABOT_FINDING])
+    assert apply(project, action) == [".github/dependabot.yml"]
+    assert (tmp_path / ".github" / "dependabot.yml").is_file()
+
+
+def test_every_repository_shares_one_class(tmp_path):
+    """ "Start receiving dependency updates" is one decision whatever ecosystems
+    the repository turns out to contain."""
+    a = gh_project(tmp_path / "a", {"go.mod": "module x\n"}, pid="a")
+    b = gh_project(tmp_path / "b", {"pyproject.toml": "[project]\n"}, pid="b")
+    (first,) = propose(a, [DEPENDABOT_FINDING])
+    (second,) = propose(b, [DEPENDABOT_FINDING])
+    assert first.class_key == second.class_key
+    # Different ecosystems mean different bytes: the same kind of action without
+    # being the identical one.
+    assert first.patch_digest != second.patch_digest
+
+
+def test_enabling_updates_needs_no_build_verification(tmp_path):
+    from foreman.actions import AUTO_POLICY_EXPR
+
+    project = gh_project(tmp_path, {"go.mod": "module x\n"})
+    (action,) = propose(project, [DEPENDABOT_FINDING])
+    assert AUTO_POLICY_EXPR in action.statement

@@ -130,6 +130,15 @@ class DependabotCollector:
                 project=project.id, collector=self.name, subject=subject, key=key, value=value
             )
 
+        # Whether updates are configured is a separate question from whether
+        # alerts are enabled: a repository can be told about vulnerabilities and
+        # still have nothing opening the pull requests that fix them.
+        try:
+            await gh_api(f"repos/{slug}/contents/.github/dependabot.yml")
+            out_config = "present"
+        except GitHubError:
+            out_config = "absent"
+
         try:
             alerts = await gh_api(
                 f"repos/{slug}/dependabot/alerts?state=open&per_page=100", paginate=True
@@ -137,10 +146,16 @@ class DependabotCollector:
         except GitHubError as exc:
             # Recorded rather than raised: a repository with alerts disabled is a
             # fact about the project, and one worth seeing in the report.
-            return [ob(slug, "dependabot_error", str(exc))]
+            return [
+                ob(slug, "dependabot_error", str(exc)),
+                ob(slug, "update_config", out_config),
+            ]
 
         alerts = [a for a in (alerts or []) if isinstance(a, dict)]
-        out = [ob(slug, "open_alerts", str(len(alerts)))]
+        out = [
+            ob(slug, "open_alerts", str(len(alerts))),
+            ob(slug, "update_config", out_config),
+        ]
 
         # One package can carry several advisories. They are collapsed to the
         # worst severity and the highest fix, because the decision — bump it —

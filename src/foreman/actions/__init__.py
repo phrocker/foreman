@@ -19,13 +19,27 @@ from typing import Any
 
 from ..config import Project
 from .base import FileEdit, Op, OpNotApplicable, Patch, class_key, class_statement
-from .nginx import AddSecurityHeader
-from .robots import AddSitemapReference, AnchorAssetDisallow
 from .sagform import action_text, canonical, policy_allows, precondition_holds
 
-OPS: dict[str, Op] = {
-    op.verb: op for op in (AnchorAssetDisallow(), AddSitemapReference(), AddSecurityHeader())
-}
+
+def _ops() -> dict[str, Op]:
+    """Operations, gathered from the domains that declare them."""
+    from ..domains import DOMAINS
+
+    return {op.verb: op for domain in DOMAINS.values() for op in domain.ops}
+
+
+def __getattr__(name: str) -> object:
+    """Resolve OPS on first use rather than at import.
+
+    `domains` imports the op modules, which runs this package's __init__ first,
+    so binding OPS here at import time reads a half-built registry — it silently
+    returned three of four operations, with no error. Deferring until first
+    access means the registry is complete whichever module is imported first.
+    """
+    if name == "OPS":
+        return _ops()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # The condition under which a class stops needing a human. Stored as text and
 # evaluated deterministically, so the rule that governs automation is itself
@@ -56,11 +70,13 @@ class ActionProposal:
 
     @property
     def summary(self) -> str:
-        return OPS[self.verb].summary
+        return _ops()[self.verb].summary
 
     def still_applies(self, project: Project) -> tuple[bool, str | None]:
         """Re-evaluate the BECAUSE clause against the world as it is now."""
-        return precondition_holds(self.statement, OPS[self.verb].state(project, self.params))
+        return precondition_holds(
+            self.statement, _ops()[self.verb].state(project, self.params)
+        )
 
     def auto_eligible(self, **stats: int) -> bool:
         """Whether this action's own policy clause is satisfied by its class.
@@ -154,11 +170,15 @@ def apply(project: Project, proposal: ActionProposal) -> list[str]:
         if not edit.changed:
             continue
         path = project.repo / edit.path
-        current = path.read_text()
+        # An empty `before` is a creation. Reading a missing file as "" keeps the
+        # same check honest in both directions: a file that appeared in the
+        # meantime still fails rather than being clobbered.
+        current = path.read_text() if path.is_file() else ""
         if current != edit.before:
             raise OpNotApplicable(
                 f"{edit.path} changed since this action was computed; re-propose it"
             )
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(edit.after)
         written.append(edit.path)
     return written
@@ -178,7 +198,7 @@ def rehydrate(project: Project, row: Any) -> ActionProposal:
     """
     import json as _json
 
-    op = OPS.get(row["verb"])
+    op = _ops().get(row["verb"])
     if op is None:
         raise Stale(f"no op named {row['verb']!r} is registered any more")
     fresh = build(project, op, _json.loads(row["params"]), row["finding_id"])

@@ -182,6 +182,11 @@ The class statement carries only signature fields — `prefix`, not `file` — s
 the same decision in ten differently-laid-out repositories is ten data points
 for one class rather than ten classes of one.
 
+Operations prefer turning on a system that already exists over reimplementing
+it. `enable_dependabot` writes the config that starts dependency updates rather
+than editing manifests itself, because Dependabot already regenerates lockfiles
+correctly per ecosystem and already runs CI on what it proposes.
+
 ```bash
 foreman actions --propose     # what could be done, with each class's record
 foreman approve 11            # re-checks the guardrail, then applies
