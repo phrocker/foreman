@@ -14,6 +14,7 @@ from __future__ import annotations
 from .crawl import CrawlCollector
 from .gcloud import GcloudCollector
 from .github import DependabotCollector, GitHubActivityCollector
+from .godaddy import GoDaddyCollector
 from .render import RenderCollector
 from .tls import TlsCollector
 
@@ -26,6 +27,7 @@ COLLECTORS = {
         DependabotCollector(),
         GitHubActivityCollector(),
         GcloudCollector(),
+        GoDaddyCollector(),
     )
 }
 
@@ -39,6 +41,7 @@ __all__ = [
     "CrawlCollector",
     "DependabotCollector",
     "GcloudCollector",
+    "GoDaddyCollector",
     "GitHubActivityCollector",
     "RenderCollector",
     "TlsCollector",

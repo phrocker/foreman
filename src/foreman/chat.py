@@ -164,7 +164,64 @@ def portfolio_state(store: Store, registry: Registry) -> str:
     else:
         lines.append("\n### Rule precision\nNot yet measured — no findings decided.")
 
+    lines.append(_domains(store))
     lines.append(_graph(store, findings))
+    return "\n".join(lines)
+
+
+# A registrar account is an asset inventory, not just a source of findings:
+# which names are held, which are doing something, which are parked. That is a
+# question worth asking an assistant, and it cannot be answered from findings
+# alone because a parked domain is not a problem.
+PARKING_HOSTS = ("domaincontrol.com", "afternic.com")
+DOMAIN_LIST_LIMIT = 160
+
+
+def _domains(store: Store) -> str:
+    rows: dict[str, dict[str, str | None]] = {}
+    for project in {r["project"] for r in store.project_summary()}:
+        for cell in store.latest_observations(project):
+            subject = str(cell["subject"])
+            if subject.startswith("domain:"):
+                rows.setdefault(subject.removeprefix("domain:"), {})[str(cell["key"])] = cell[
+                    "value"
+                ]
+    if not rows:
+        return ""
+
+    live = {name: facts for name, facts in rows.items() if facts.get("status") == "ACTIVE"}
+    if not live:
+        return f"\n### Domains\n{len(rows)} held, none active."
+
+    def provider(facts: dict[str, str | None]) -> str:
+        servers = (facts.get("nameservers") or "").split(",")
+        if not servers or not servers[0]:
+            return "(nothing answers)"
+        return ".".join(servers[0].split(".")[-2:])
+
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for name, facts in sorted(live.items()):
+        grouped.setdefault(provider(facts), []).append((name, (facts.get("expires") or "")[:10]))
+
+    parked = sum(
+        n for host, names in grouped.items() for n in [len(names)] if host in PARKING_HOSTS
+    )
+    lines = [
+        f"\n### Domains ({len(rows)} held, {len(live)} active, {parked} parked at the registrar)",
+        "Grouped by who answers for them in public DNS. A domain on the registrar's own",
+        "nameservers is parked — held but not serving anything, which is a decision",
+        "rather than a fault, and the pool to draw on when considering what to build.",
+    ]
+    shown = 0
+    for host, names in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        note = " — parked" if host in PARKING_HOSTS else ""
+        lines.append(f"\n**{host}** ({len(names)}){note}")
+        for name, expires in names:
+            if shown >= DOMAIN_LIST_LIMIT:
+                lines.append(f"  - … and {len(live) - shown} more")
+                return "\n".join(lines)
+            lines.append(f"  - {name} (expires {expires})")
+            shown += 1
     return "\n".join(lines)
 
 

@@ -80,6 +80,25 @@ class CloudSurface(BaseModel):
     regions: list[str] = Field(default_factory=list)
 
 
+class RegistrarSurface(BaseModel):
+    """A registrar account, and which of its domains belong to this project.
+
+    Domains sit awkwardly in a project-shaped model: one account here holds 159
+    of them against three projects. So `match` exists — a project claims the
+    domains it is actually about, and one project claims the rest by leaving it
+    empty. Without that, every expiry finding would be filed against whichever
+    project happened to declare the account.
+    """
+
+    provider: str = "godaddy"
+    # Substrings; a domain matching any of them belongs to this project. Empty
+    # means all of them, which is what a portfolio-level project wants.
+    match: list[str] = Field(default_factory=list)
+
+    def claims(self, domain: str) -> bool:
+        return not self.match or any(m.lower() in domain.lower() for m in self.match)
+
+
 class AdsSurface(BaseModel):
     """An advertising account. Declared, not yet collected from."""
 
@@ -89,7 +108,7 @@ class AdsSurface(BaseModel):
 
 # Every surface a project can have. Collectors name one of these keys, so adding
 # a surface type is this table plus a field below.
-SURFACES = ("web", "github", "cloud", "ads")
+SURFACES = ("web", "github", "cloud", "ads", "registrar")
 
 
 class Project(BaseModel):
@@ -106,6 +125,7 @@ class Project(BaseModel):
     github: GitHubSurface | None = None
     cloud: CloudSurface | None = None
     ads: AdsSurface | None = None
+    registrar: RegistrarSurface | None = None
 
     # Empty means "every domain whose surfaces this project has", which is
     # almost always what you want and stops the registry from needing an edit
