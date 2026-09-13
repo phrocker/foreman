@@ -99,7 +99,9 @@ def evaluate(pages: Pages, add: Add) -> None:
                 "window in which that is recoverable.",
             )
 
-        if facts.get("nameservers") == "":
+        # Falsy rather than == "": a cell that was never written means the same
+        # thing here as one written empty — nothing answers for this domain.
+        if not facts.get("nameservers"):
             add(
                 "domain_not_delegated",
                 Severity.MEDIUM,

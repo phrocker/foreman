@@ -844,3 +844,21 @@ def test_retiring_a_memory_nobody_wrote_changes_nothing(store):
 def test_a_memory_can_only_be_about_something_foreman_reasons_with(store):
     with pytest.raises(ValueError, match="cannot be about"):
         store.remember("a thought", ["skill|seo-audit"])
+
+
+def test_an_empty_observation_value_is_not_the_same_as_a_missing_one(store):
+    """A cell holds bytes, so shoal wrote both as b"" and read both back as
+    None. Six real findings went missing because a domain with an empty
+    nameserver list read as one nobody had looked up."""
+    run_id = store.start_run("p", "crawl")
+    store.record(
+        run_id,
+        [
+            Observation(project="p", collector="crawl", subject="s", key="empty", value=""),
+            Observation(project="p", collector="crawl", subject="s", key="absent", value=None),
+        ],
+    )
+    store.finish_run(run_id, ok=True)
+    values = {c["key"]: c["value"] for c in store.latest_observations("p")}
+    assert values["empty"] == ""
+    assert values["absent"] is None

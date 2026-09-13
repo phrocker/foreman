@@ -164,8 +164,25 @@ async def test_a_project_without_the_surface_collects_nothing(api):
 
 
 def _judge(facts):
+    """Judge these facts, filling in a healthy default for anything unstated.
+
+    Stating every field in every case buried what each one is actually about,
+    and leaving them out made a test of expiry quietly also a test of
+    delegation.
+    """
+    healthy = {
+        "status": "ACTIVE",
+        "expires": _in(400),
+        "renew_auto": "True",
+        "locked": "True",
+        "nameservers": "ns1.example.net,ns2.example.net",
+    }
+    filled = {
+        subject: (fields if "registrar_error" in fields else {**healthy, **fields})
+        for subject, fields in facts.items()
+    }
     found = []
-    evaluate(facts, lambda rule, sev, summary, subjects, detail=None: found.append((rule, sev)))
+    evaluate(filled, lambda rule, sev, summary, subjects, detail=None: found.append((rule, sev)))
     return dict(found)
 
 

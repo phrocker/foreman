@@ -126,6 +126,12 @@ FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 TABLE = "graph"
+# A cell holds bytes, so an absent value and an empty one were both written as
+# b"" and both came back as None — while SQLite keeps them apart. That cost six
+# real findings: a domain whose nameserver list is empty read as a domain whose
+# nameservers were never looked up. A byte that cannot occur in any value Foreman
+# stores marks the first case, so "" survives as "".
+NULL = b"\x00"
 # Retries for a contended counter. Contention needs two writers, which a
 # single-operator tool does not have; this is here so a race fails loudly
 # rather than silently reusing an id.
@@ -429,7 +435,7 @@ class ShoalStore:
                 pb.Entry(
                     column_family=ob.collector.encode(),
                     column_qualifier=ob.key.encode(),
-                    value=b"" if ob.value is None else ob.value.encode(),
+                    value=NULL if ob.value is None else ob.value.encode(),
                     timestamp=stamp,
                 )
             )
@@ -443,7 +449,7 @@ class ShoalStore:
             {
                 "subject": cell.row.decode().split("|", 2)[2],
                 "key": cell.column_qualifier.decode(),
-                "value": cell.value.decode() or None,
+                "value": None if cell.value == NULL else cell.value.decode(),
             }
             for cell in self._cells(prefix, as_of)
         ]
