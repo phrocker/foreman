@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
 from . import secrets
-from .actions import Stale, target_label
+from .actions import Stale, effect_of, target_label
 from .actions.sagform import automatable, policy_allows
 from .chat import ChatError, ask
 from .config import load_registry
@@ -179,6 +179,11 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         # whose effect is a merge has no files, and a blank cell there reads as
         # "this changes nothing".
         item["target"] = target_label(row["verb"], item["params"], item["files"])
+        # The word for what approving does, and the sentence saying what it
+        # costs. Read off the op rather than inferred from whether there are
+        # files: an action with no files was a merge while there were two kinds
+        # of effect, and is not one now that a record set is a third.
+        item["effect"], item["consequence"] = effect_of(row["verb"])
         stats = store.class_stats(row["class_key"], row["patch_digest"])
         decided = stats["approvals"] + stats["rejections"]
         item["stats"] = stats

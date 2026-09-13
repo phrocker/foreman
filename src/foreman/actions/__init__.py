@@ -18,7 +18,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import Project
-from .base import FileEdit, Merge, Op, OpNotApplicable, Patch, class_key, class_statement
+from .base import (
+    FileEdit,
+    Merge,
+    Op,
+    OpNotApplicable,
+    Patch,
+    RecordSet,
+    class_key,
+    class_statement,
+)
 from .sagform import action_text, canonical, policy_allows, precondition_holds
 
 
@@ -63,16 +72,32 @@ VERIFIED_POLICY_EXPR = "(class.verified>=10)&&(class.rejections==0)&&(class.brok
 NEVER_POLICY = "never"
 
 
-def policy_expr_for(op: Op) -> str | None:
+def reversible_for(op: Op, params: dict[str, Any] | None = None) -> bool:
+    """Whether re-running Foreman could put this class's effect back.
+
+    An op's flat `reversible` is the answer wherever its effect is the same
+    every time. Where a parameter decides — a DNS record at ten minutes and the
+    same record at a week are not one risk — the op says so with
+    `reversible_for`, and it is asked per class rather than once. Asked without
+    parameters, which is what a caller inspecting the registry does, the flat
+    answer stands.
+    """
+    refine = getattr(op, "reversible_for", None)
+    if params is not None and refine is not None:
+        return bool(refine(params))
+    return getattr(op, "reversible", True)
+
+
+def policy_expr_for(op: Op, params: dict[str, Any] | None = None) -> str | None:
     """The policy expression an op's actions carry, or None for `P:never`."""
-    if not getattr(op, "reversible", True):
+    if not reversible_for(op, params):
         return None
     return VERIFIED_POLICY_EXPR if op.requires_verification else AUTO_POLICY_EXPR
 
 
-def policy_for(op: Op) -> tuple[str, str | None]:
+def policy_for(op: Op, params: dict[str, Any] | None = None) -> tuple[str, str | None]:
     """The whole policy clause: its label and its expression."""
-    expression = policy_expr_for(op)
+    expression = policy_expr_for(op, params)
     return (AUTO_POLICY if expression else NEVER_POLICY), expression
 
 
@@ -121,6 +146,19 @@ class ActionProposal:
         return target_label(self.verb, self.params, self.files)
 
 
+def effect_of(verb: str) -> tuple[str, str]:
+    """The verb for what approving does, and what it costs.
+
+    Both come off the op rather than being inferred from whether the patch has
+    files. That inference was right while there were two kinds of effect and
+    wrong the moment there were three: an action with no files is not therefore
+    a merge, and a prompt saying it lands on a default branch when it lands on
+    the public internet is worse than a prompt saying nothing.
+    """
+    op = _ops().get(verb)
+    return getattr(op, "effect", "apply"), getattr(op, "consequence", "")
+
+
 def target_label(verb: str, params: dict[str, Any], files: Sequence[str]) -> str:
     """What a pending action will touch, named in one line.
 
@@ -151,7 +189,7 @@ def build(
         return None
     if patch.empty:
         return None
-    policy, policy_expr = policy_for(op)
+    policy, policy_expr = policy_for(op, params)
     statement = canonical(
         action_text(
             op.verb,
@@ -229,10 +267,52 @@ def apply(project: Project, proposal: ActionProposal) -> list[str]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(edit.after)
         written.append(edit.path)
-    # Merges last, deliberately. Should an action ever carry both kinds of
-    # effect, the recoverable half goes first: a half-applied action that wrote
-    # a file is fixed by re-running, and one that merged is not.
-    return written + _merge_all(proposal)
+    # Least recoverable last, deliberately. Should an action ever carry more
+    # than one kind of effect, a half-applied one should have stopped at the
+    # part that can be redone: a file is fixed by re-running, a record is fixed
+    # by another write that the world learns about at the speed of its TTL, and
+    # a merge is fixed by a human writing a revert.
+    return written + _set_all(proposal) + _merge_all(proposal)
+
+
+def _set_all(proposal: ActionProposal) -> list[str]:
+    """Set the DNS records a proposal names, re-reading each one first.
+
+    The read is the same check a file edit makes against `before`, done as late
+    as it can be. It cannot be done atomically — a registrar offers no
+    compare-and-set — so what it buys is the difference between refusing a
+    change somebody else made an hour ago and overwriting it.
+    """
+    from ..collectors.godaddy import GoDaddyError
+
+    # Aliased: this module's `canonical` is SAG's, and two of them in one
+    # function is how the wrong one gets called.
+    from ..collectors.godaddy_dns import canonical as record_set_text
+    from ..collectors.godaddy_dns import read_records, replace_records
+    from ..secrets import SecretsUnavailable, get_secret
+
+    written = []
+    for record in proposal.patch.records:
+        if not record.changed:
+            continue
+        try:
+            token = get_secret("godaddy_pat")
+            if not token:
+                raise GoDaddyError("no GoDaddy token is set")
+            live = record_set_text(read_records(record.domain, record.type, record.name, token))
+            if live != record.before:
+                raise GoDaddyError(
+                    f"it now reads {live or 'as unset'} rather than "
+                    f"{record.before or 'as unset'}"
+                )
+            replace_records(record.domain, record.type, record.name, record.data, record.ttl, token)
+        except (GoDaddyError, SecretsUnavailable) as exc:
+            # Refused rather than failed, in the same sense a changed file is.
+            # The commonest reason is that the record moved, which means the
+            # thing approved is not the thing that would be replaced.
+            raise OpNotApplicable(f"{record.label} could not be set — {exc}") from None
+        written.append(f"{record.label} → {record.data}")
+    return written
 
 
 def _merge_all(proposal: ActionProposal) -> list[str]:
@@ -292,12 +372,15 @@ __all__ = [
     "Op",
     "OpNotApplicable",
     "Patch",
+    "RecordSet",
     "apply",
     "VERIFIED_POLICY_EXPR",
     "class_key",
     "class_statement",
+    "effect_of",
     "policy_expr_for",
     "policy_for",
+    "reversible_for",
     "propose",
     "target_label",
 ]

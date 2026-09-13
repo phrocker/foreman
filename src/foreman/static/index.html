@@ -836,6 +836,12 @@ function renderHistory() {
 
 // --- actions ---------------------------------------------------------------
 
+/** A verb at the start of a sentence. */
+function titled(verb) {
+  const word = verb || "apply";
+  return word[0].toUpperCase() + word.slice(1);
+}
+
 function visibleActions() {
   return state.actions.filter((a) => !state.project || a.project === state.project);
 }
@@ -925,10 +931,17 @@ function actionCard(group, index) {
   // wrapped row. When the paths differ, each one is named, because "which file
   // in which project" is then part of what you are approving.
   const sameTarget = new Set(members.map((m) => m.target)).size === 1;
+  // One member per project was true while every op edited a project's files.
+  // A registrar account holds many domains inside one project, so the count
+  // names what there are many of rather than assuming it is projects.
+  const projects = new Set(members.map((m) => m.project)).size;
+  const scale = projects === members.length
+    ? `${members.length} projects`
+    : `${members.length} changes`;
   const head = one
     ? `<span class="project-cell">${esc(first.project)}</span>
        <span class="action-target">${esc(first.target)}</span>`
-    : `<span class="class-count">${members.length} projects</span>
+    : `<span class="class-count">${scale}</span>
        ${sameTarget ? `<span class="action-target">${esc(first.target)}</span>` : ""}`;
 
   // What you are deciding. For a class of one that is the instance statement,
@@ -951,7 +964,7 @@ function actionCard(group, index) {
         </li>`).join("")}</ul>`;
 
   const perProject = one ? "" : `<details class="per-project">
-      <summary>Each project's statement (${members.length})</summary>
+      <summary>Each statement in full (${members.length})</summary>
       ${members.map((m) => `<div class="member-name">${esc(m.project)}</div>
         <div class="statement">${esc(m.statement)}</div>`).join("")}
     </details>`;
@@ -974,12 +987,13 @@ function actionCard(group, index) {
 
   // "…to 0 projects" is not a label anyone needs: when nothing is approvable the
   // button is disabled and the note beside it says why. The verb follows the
-  // effect: "apply" is what happens to a working tree, and calling a merge an
-  // apply understates what the button does.
-  const doing = members.some((m) => m.files.length) ? "apply" : "merge";
+  // effect, and the op is what knows it: "apply" is what happens to a working
+  // tree, and calling a merge or a DNS write an apply understates the button.
+  const doing = first.effect || "apply";
+  const unit = projects === members.length ? "project" : "change";
   const approveLabel = one || !fresh.length ? `Approve &amp; ${doing}`
-    : `Approve &amp; ${doing} for ${fresh.length} project${fresh.length === 1 ? "" : "s"}`;
-  const rejectLabel = one ? "Reject" : `Reject for ${members.length} projects`;
+    : `Approve &amp; ${doing} for ${fresh.length} ${unit}${fresh.length === 1 ? "" : "s"}`;
+  const rejectLabel = one ? "Reject" : `Reject for ${members.length} ${unit}s`;
 
   return `<div class="action" data-group="${index}">
     <div class="action-head">
@@ -1039,16 +1053,18 @@ function approveGroup(group) {
   // Approving acts, so it asks first — and a prompt that cannot say what it
   // will touch, or whose, is not a confirmation. What it will touch differs in
   // kind: a file edit lands in a working tree and can be reverted from one, a
-  // merge lands on a default branch and cannot. The prompt says which.
-  const writes = fresh.some((m) => m.files.length);
-  const lines = writes ? [
+  // merge lands on a default branch and a record lands on the public internet.
+  // The op supplies the sentence for the two that are not a working tree,
+  // rather than the page guessing from an empty file list.
+  const consequence = fresh[0].consequence;
+  const lines = !consequence ? [
     `Apply ${fresh.length} action${fresh.length === 1 ? "" : "s"} to ` +
       `${fresh.length === 1 ? "this working tree" : "these working trees"}?`,
     "",
     fresh.map((m) => m.project).join(", "),
   ] : [
-    `Merge ${fresh.length} pull request${fresh.length === 1 ? "" : "s"}? ` +
-      `This lands on the default branch and Foreman cannot undo it.`,
+    `${titled(fresh[0].effect)} ${fresh.length} ` +
+      `${fresh.length === 1 ? "change" : "changes"}? ${consequence}`,
     "",
     fresh.map((m) => `${m.project} — ${m.target}`).join("\n"),
   ];
@@ -1063,9 +1079,10 @@ function rejectGroup(group) {
   const members = group.members;
   // Rejecting writes nothing but the ledger, and one instance stays as cheap as
   // it was. Several are a judgement about every project at once, so that asks.
+  const many = new Set(members.map((m) => m.project)).size === members.length
+    ? members.map((m) => m.project) : members.map((m) => m.target);
   if (members.length > 1 &&
-      !confirm(`Reject this for ${members.length} projects?\n\n` +
-               members.map((m) => m.project).join(", "))) return;
+      !confirm(`Reject this for ${members.length} of them?\n\n` + many.join(", "))) return;
   decideMany(members.map((m) => m.id), "reject");
 }
 
@@ -1102,8 +1119,8 @@ async function decide(id, verb) {
   // the action is looked up rather than described generically, because "apply
   // to the working tree" is the wrong sentence for a merge.
   const action = state.actions.find((a) => a.id === id);
-  const question = action && !action.files.length
-    ? `Merge ${action.target}? This lands on the default branch and Foreman cannot undo it.`
+  const question = action && action.consequence
+    ? `${titled(action.effect)} ${action.target}? ${action.consequence}`
     : "Apply this change to the working tree?";
   if (verb === "approve" && !confirm(question)) return;
   const res = await fetch(`/api/actions/${id}/${verb}`, { method: "POST" });

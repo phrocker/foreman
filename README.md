@@ -291,6 +291,28 @@ keeps its record. Learning that a pip patch bump has been approved forty times
 and broken the build zero times is the useful part; the leap from that to
 merging without being asked is not Foreman's to take.
 
+**And some are graded rather than refused.** `set_dns_record` points one record
+at one value at a registrar, which is the first effect that lands on the public
+internet. It is not a merge — the previous value is recorded in the action and
+setting it back is a write Foreman already knows how to make — but it is not a
+file either, because what cannot be recalled is every resolver that answered
+while the record was wrong. So the TTL decides, and the TTL is a signature
+field: a class at ten minutes can accumulate towards acting unattended, pinned
+as it is to one type, one scope, one value and one TTL, and refusing to act
+unless the record still reads as it did when it was proposed. A class at a day
+carries `P:never`, because a mistake that outlives the working day it was made
+in is not one to make while nobody is watching.
+
+The signature is where the portfolio scales. Eighteen domains pointed at one
+host is one decision applied eighteen times, so the domain and the hostname are
+per-instance and the class is the record type, how far it reaches, the value and
+the TTL. The value is in the signature deliberately: "approve any patch bump" is
+a sentence an operator means, and "approve an A record change, to anywhere" is
+consent to be repointed at an address nobody named. And the operation is
+narrower than the credential it uses — the token grants
+`domains.nameserver:update` and this will not write a nameserver record, because
+delegation cannot be corrected through the zone it broke.
+
 Two further guards worth knowing about. A policy-approved action is recorded as
 `decided_by='policy:auto'` and **excluded from class statistics**, so automation
 can never become evidence for more automation. And a stale action is recorded as

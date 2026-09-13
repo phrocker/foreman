@@ -22,8 +22,10 @@ no credential, no transfer secret pulled into memory, and it reports what the
 world actually resolves rather than what the registrar has on file. The two
 disagreeing would itself be worth knowing.
 
-Nothing here writes. A token may well hold `domains.dns:update`, because that is
-the next piece of work; a change is still an action with a decision behind it.
+Nothing here writes, and the claim is meant to be checkable by reading this one
+file. The write path is the sibling module `godaddy_dns.py`, reached only
+through a `set_dns_record` action somebody approved, and narrower than the token
+it uses: it will not touch a nameserver record whatever the credential permits.
 """
 
 from __future__ import annotations

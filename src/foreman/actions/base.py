@@ -66,22 +66,76 @@ class Merge:
 
 
 @dataclass(frozen=True)
+class RecordSet:
+    """One DNS record, replaced at a registrar.
+
+    The third kind of effect, and the first whose before-state is nobody's to
+    keep but ours. A `FileEdit` can re-read its `before` from disk at apply
+    time; a `Merge` hands the equivalent check to GitHub as a head commit. A
+    registrar offers neither — there is no compare-and-set, and once the PUT
+    lands the previous value is gone from the only place it was written down. So
+    `before` is carried here, recorded in the action, and re-read immediately
+    ahead of the write.
+
+    That makes this the operator's undo. Not an automatic one: putting the old
+    value back is another write, and it reaches the world at the speed of the
+    TTL rather than at once. But a record that was replaced without its previous
+    value being recorded cannot be restored at all, and DNS is the surface where
+    that difference is the whole game.
+
+    `after` is rendered rather than stored so the text the digest hashes and the
+    values the registrar is sent cannot drift apart.
+    """
+
+    domain: str
+    name: str
+    type: str
+    before: str
+    data: str
+    ttl: int
+
+    @property
+    def after(self) -> str:
+        # The same sentence `godaddy_dns.record_text` writes, which is what
+        # `before` was read through. A test holds the two together.
+        return f"{self.data} ttl={self.ttl}"
+
+    @property
+    def fqdn(self) -> str:
+        return self.domain if self.name == "@" else f"{self.name}.{self.domain}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.fqdn} {self.type}"
+
+    @property
+    def changed(self) -> bool:
+        return self.before != self.after
+
+
+@dataclass(frozen=True)
 class Patch:
     """Everything one action does.
 
-    Two kinds of effect, not one, because the second kind was going to arrive
-    whatever shape this started in: some fixes are an edit to a file you have
-    checked out, and some are a decision taken on a service. Both still have to
-    be identified, digested and re-checked the same way, so they share a
+    Several kinds of effect, not one, because the second kind was going to
+    arrive whatever shape this started in and the third proved it: some fixes
+    are an edit to a file you have checked out, some are a decision taken on a
+    service, and some are a value set on the public internet. All of them still
+    have to be identified, digested and re-checked the same way, so they share a
     container rather than growing a parallel ledger.
     """
 
     edits: tuple[FileEdit, ...] = ()
     merges: tuple[Merge, ...] = ()
+    records: tuple[RecordSet, ...] = ()
 
     @property
     def empty(self) -> bool:
-        return not self.merges and not any(e.changed for e in self.edits)
+        return (
+            not self.merges
+            and not any(e.changed for e in self.edits)
+            and not any(r.changed for r in self.records)
+        )
 
     def digest(self, *, anchored: bool = False) -> str:
         """Content hash of the change.
@@ -101,6 +155,19 @@ class Patch:
         bumps are never byte-identical, so "identical to N of them" is always
         one for this kind of action. The evidence that accumulates is the class,
         not the bytes.
+
+        A record carries its own name in both forms, which is the one exception
+        and worth saying why. Unanchored means "wherever this lives", and what
+        it drops for a file is the project the file sits in. A record has no
+        project to drop: eighteen domains are eighteen targets inside one
+        project, and the store keeps one open proposal per project, class and
+        digest — so dropping the domain would let seventeen of the eighteen
+        collide and be silently discarded as duplicates of the first.
+
+        The cost is the same one a merge pays and is named the same way: two
+        domains are never byte-identical, so "identical to N of them" is always
+        one for this kind of action. The evidence that accumulates is the class,
+        which is where the eighteen belong together anyway.
         """
         h = hashlib.sha256()
         for edit in sorted(self.edits, key=lambda e: e.path):
@@ -116,6 +183,20 @@ class Patch:
                 h.update(merge.label.encode())
             h.update(b"\x00")
             h.update(merge.head.encode())
+            h.update(b"\x00")
+        for record in sorted(self.records, key=lambda r: r.label):
+            # Tagged, so a record whose before and after happen to read like a
+            # file's cannot collide with it. The tag is new rather than applied
+            # to every kind, because adding one to the others would change
+            # digests already recorded in the ledger.
+            h.update(b"dns\x00")
+            # Named in both forms — see above. The domain is the target rather
+            # than somewhere the target happens to live.
+            h.update(record.label.encode())
+            h.update(b"\x00")
+            h.update(record.before.encode())
+            h.update(b"\x00")
+            h.update(record.after.encode())
             h.update(b"\x00")
         return h.hexdigest()
 
@@ -149,7 +230,22 @@ class Op(Protocol):
     # with a revert, if at all. The ledger still records what an irreversible
     # class has earned — that record is how you learn which bumps are boring —
     # but it never converts into permission to act unattended.
+    #
+    # A flat answer is right whenever the effect is the same every time. Where a
+    # parameter decides instead, an op may also offer
+    # `reversible_for(params) -> bool` and have the question asked per class: a
+    # DNS record at a ten-minute TTL is corrected before most of the world has
+    # cached it and the same record at a week's TTL is not, and those are not
+    # one class with one answer. `policy_expr_for` prefers it when it exists.
     reversible: bool = True
+    # The verb for what approving does, for a button and a prompt to use.
+    # "apply" is the truth for a working tree and a lie everywhere else: a merge
+    # lands on somebody's default branch, and a record lands on the internet.
+    effect: str = "apply"
+    # One sentence a confirmation prompt adds, for an effect that does not land
+    # in a working tree. Empty for ops that edit files, where "apply this to the
+    # working tree" already says the whole of it.
+    consequence: str = ""
 
     def reason(self, params: dict) -> str:
         """The BECAUSE expression asserting the state this op transforms.

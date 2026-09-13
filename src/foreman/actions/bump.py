@@ -226,6 +226,9 @@ class BumpDependency:
     requires_verification = True
     # See the module docstring. A merge is undone by a human writing a revert.
     reversible = False
+    # "Apply" is the word for a working tree, and this is not one.
+    effect = "merge"
+    consequence = "This lands on the default branch and Foreman cannot undo it."
     answers = ("vulnerable_dependency",)
 
     def propose(self, project: Project, finding: dict) -> list[dict]:

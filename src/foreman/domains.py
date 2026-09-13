@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from .actions.base import Op
 from .actions.bump import BumpDependency
 from .actions.dependabot import EnableDependabot
+from .actions.dns import SetDnsRecord
 from .actions.nginx import AddSecurityHeader
 from .actions.robots import AddSitemapReference, AnchorAssetDisallow
 from .rules.common import Add, Pages
@@ -102,6 +103,7 @@ def _registry() -> dict[str, Domain]:
             surfaces=("registrar",),
             collectors=("godaddy",),
             evaluate=domain_rules.evaluate,
+            ops=(SetDnsRecord(),),
         ),
         Domain(
             name="seo",
