@@ -633,20 +633,30 @@ class SqliteStore:
         the latest sweep leaves the previous value as the latest *known* value,
         and a rule should judge that rather than treat the cell as absent.
         """
+        # One row per (subject, key): a fact is the newest value anybody
+        # observed, whoever observed it. Two collectors writing the same key on
+        # one subject is real — a migration filed every copied observation under
+        # its own name — and a rule reading rows into a dict would otherwise
+        # take whichever came last. Ties break on collector so the winner is the
+        # same on every read: an arbitrary winner is worse than a wrong one,
+        # because it cannot be reproduced.
         sql = """
-            SELECT subject, key, value, collector FROM observations o
-            WHERE project = ? AND observed_at = (
-                SELECT MAX(observed_at) FROM observations i
-                WHERE i.project = o.project AND i.subject = o.subject AND i.key = o.key
+            SELECT subject, key, value, collector FROM (
+                SELECT subject, key, value, collector,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY subject, key
+                           ORDER BY observed_at DESC, collector DESC, id DESC
+                       ) AS rank
+                FROM observations
+                WHERE project = ?
         """
         params: list[str] = [project]
         if as_of:
-            sql += " AND i.observed_at <= ?"
-            params.append(as_of)
-        sql += ")"
-        if as_of:
             sql += " AND observed_at <= ?"
             params.append(as_of)
+        sql += """
+            ) WHERE rank = 1
+        """
         return _many(self._db.execute(sql, params))
 
     # --- findings ---------------------------------------------------------

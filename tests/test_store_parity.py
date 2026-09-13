@@ -963,19 +963,27 @@ def test_an_observation_says_which_collector_produced_it(store):
     assert row["collector"] == "crawl"
 
 
-def test_two_collectors_can_hold_the_same_key_without_colliding(store):
-    """`pulls_error` and `dependabot_error` live on one subject and belong to
-    different collectors; so can any other pair."""
-    run_id = store.start_run("p", "a")
-    store.record(
-        run_id, [Observation(project="p", collector="a", subject="s", key="note", value="1")]
-    )
-    store.finish_run(run_id, ok=True)
-    run_id = store.start_run("p", "b")
-    store.record(
-        run_id, [Observation(project="p", collector="b", subject="s", key="note", value="2")]
-    )
-    store.finish_run(run_id, ok=True)
+def test_one_fact_per_subject_and_key_however_many_collectors_wrote_it(store):
+    """A fact is the newest value anybody observed, whoever observed it.
 
-    by_collector = {r["collector"]: r["value"] for r in store.latest_observations("p")}
-    assert by_collector == {"a": "1", "b": "2"}
+    Two collectors writing one key on one subject is real: a migration filed
+    every copied observation under its own name, so a stale `update_config
+    absent` sat beside a fresh `present` and the rule reported a repository as
+    unconfigured while looking straight at its config. A rule reading rows into
+    a dict takes whichever came last, so the store has to decide rather than
+    leaving it to iteration order.
+    """
+    for collector, value in (("a", "1"), ("b", "2")):
+        run_id = store.start_run("p", collector)
+        store.record(
+            run_id,
+            [Observation(project="p", collector=collector, subject="s", key="note", value=value)],
+        )
+        store.finish_run(run_id, ok=True)
+
+    rows = store.latest_observations("p")
+    assert len(rows) == 1
+    # The same answer on every read, which is the half that matters: an
+    # arbitrary winner is worse than a wrong one because it cannot be
+    # reproduced.
+    assert rows == store.latest_observations("p")

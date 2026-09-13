@@ -458,19 +458,39 @@ class ShoalStore:
         return sum(len(e) for e in by_row.values())
 
     def latest_observations(self, project: str, as_of: str | None = None) -> list[Record]:
+        """The newest value of every fact, one row per (subject, key).
+
+        A cell's identity here includes the column family, so two collectors
+        writing the same key on the same subject are two cells and a plain scan
+        returns both. SQLite collapses them — a fact is (subject, key) and the
+        newest write wins — and a rule reading rows into a dict silently takes
+        whichever happened to come last.
+
+        That is not theoretical. A migration filed every copied observation
+        under a collector named "migration", so a stale `update_config=absent`
+        sat beside a fresh `present` and the rule reported a repository as
+        unconfigured while looking straight at its config.
+        """
         prefix = f"evt:obs|{project}|"
-        return [
-            {
-                "subject": cell.row.decode().split("|", 2)[2],
-                "key": cell.column_qualifier.decode(),
-                # The column family *is* the collector, and it is part of the
-                # cell's identity — so a retraction written under a different
-                # one lands beside the error instead of replacing it.
-                "collector": cell.column_family.decode(),
-                "value": None if cell.value == NULL else cell.value.decode(),
-            }
-            for cell in self._cells(prefix, as_of)
-        ]
+        newest: dict[tuple[str, str], tuple[int, Record]] = {}
+        for cell in self._cells(prefix, as_of):
+            key = (cell.row.decode().split("|", 2)[2], cell.column_qualifier.decode())
+            # Ties broken by column family so the winner is the same on every
+            # read; an arbitrary winner is worse than a wrong one, because it
+            # cannot be reproduced.
+            rank = (cell.timestamp, cell.column_family.decode())
+            if key in newest and rank <= newest[key][0]:
+                continue
+            newest[key] = (
+                rank,
+                {
+                    "subject": key[0],
+                    "key": key[1],
+                    "value": None if cell.value == NULL else cell.value.decode(),
+                    "collector": cell.column_family.decode(),
+                },
+            )
+        return [record for _, record in newest.values()]
 
     # --- findings ----------------------------------------------------------
 

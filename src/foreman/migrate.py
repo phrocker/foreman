@@ -59,7 +59,17 @@ def migrate(
             [
                 Observation(
                     project=project,
-                    collector="migration",
+                    # The collector that actually observed it, not the
+                    # migration. In shoal the collector is the column family
+                    # and so part of a cell's identity, which means a copy
+                    # filed under "migration" is a *different* cell: the
+                    # original collector can never overwrite or retract it, and
+                    # an error it reported once outlives every fix.
+                    #
+                    # That is not hypothetical. This portfolio carried a
+                    # `--slurp` failure for a day after the bug was fixed,
+                    # because the copy of it belonged to nobody.
+                    collector=str(row.get("collector") or "migration"),
                     subject=row["subject"],
                     key=row["key"],
                     value=row["value"],
