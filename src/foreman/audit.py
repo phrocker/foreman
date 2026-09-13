@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .budget import Budget
 from .config import Project
@@ -104,6 +104,44 @@ def _charge(budget: Budget | None, cost: float, project: Project, log) -> None:
         log(f"{project.id}: over ceiling — ${budget.spent:.2f} spent of ${budget.limit_usd:.2f}")
 
 
+def _finding_from(item: dict, project_id: str, skill: str) -> Finding | None:
+    """One agent finding, or None if it is not one yet.
+
+    Items arrive half-written while the agent is still typing, so a validation
+    failure here is ordinary rather than exceptional — the final result carries
+    the authoritative list and catches anything this dropped.
+    """
+    try:
+        parsed = AgentFinding.model_validate(item)
+    except ValidationError:
+        return None
+    return Finding(
+        project=project_id,
+        # Namespaced so an agent finding is never mistaken for a deterministic
+        # one — they have very different reliability.
+        rule=f"{skill}/{parsed.rule}",
+        severity=parsed.severity,
+        summary=parsed.summary,
+        subjects=parsed.subjects,
+        detail=parsed.detail,
+    )
+
+
+def _claim(seen: set, project_id: str, finding: Finding) -> bool:
+    """Take this finding unless something has taken it already.
+
+    One set does both jobs — what an earlier sweep knew, and what this run has
+    already landed — because they are the same question about the same identity.
+    Keeping two would let a streamed finding be recorded a second time from the
+    final result.
+    """
+    key = _fingerprint(project_id, finding.rule, finding.subjects)
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
 def _fingerprint(project: str, rule: str, subjects: Sequence[str]) -> tuple:
     """What makes two findings the same finding.
 
@@ -172,6 +210,11 @@ async def run_audit(
             read_dirs=(project.repo,) if project.fixable else (),
             model=model,
             hints={"skill": skill},
+            # Land each finding as it is written rather than all at exit. An
+            # audit runs for twenty minutes; without this a sibling dispatched
+            # beside it learns nothing until it finishes, and a run that dies at
+            # minute nineteen throws away everything it found.
+            stream_items="findings",
         )
         connector = choose(connectors, task)
         backend = connector.name
@@ -181,8 +224,25 @@ async def run_audit(
         # money and then fell over, which are the ones worth remembering.
         store.relate(skill_run_edges(run_id, skill, project.id, backend))
         log(f"{project.id}: /{skill} via {backend} …")
+
+        landed: list[Finding] = []
+
+        def land(item: dict) -> None:
+            """Record one finding the moment the agent finishes writing it.
+
+            A malformed item is dropped rather than raised on: this is a view of
+            work in progress and the final result is authoritative. The write is
+            synchronous and brief, and it is what makes the finding visible to
+            anything else reading the store while this run is still going.
+            """
+            finding = _finding_from(item, project.id, skill)
+            if finding is None or not _claim(already, project.id, finding):
+                return
+            store.record_findings(run_id, [finding], source=f"agent:{skill}")
+            landed.append(finding)
+
         try:
-            result = await connector.run(task)
+            result = await connector.run(task, on_item=land)
         except ConnectorError as exc:
             # charge(), not spend(): the agent has already run and the money is
             # already gone, so the only question is whether the ledger records
@@ -190,36 +250,40 @@ async def run_audit(
             # and left the ceiling intact for every remaining project.
             spent = exc.cost_usd
             _charge(budget, exc.cost_usd, project, log)
+            if landed:
+                # The run failed; what it had already found is still true and is
+                # already stored. Say so rather than letting it look lost.
+                log(f"{project.id}: kept {len(landed)} finding(s) found before it failed")
             raise AuditError(str(exc)) from exc
 
         cost = spent = result.cost_usd
         _charge(budget, cost, project, log)
         report = result.value
 
+        # The final answer is authoritative, and anything streamed was claimed
+        # on the way in, so this records only what streaming did not reach. A
+        # backend that cannot stream lands everything here, exactly as before.
         findings = []
         duplicates = 0
         for f in report.findings:
-            # Namespaced so an agent finding is never mistaken for a
-            # deterministic one — they have very different reliability.
-            rule = f"{skill}/{f.rule}"
-            if _fingerprint(project.id, rule, f.subjects) in already:
+            finding = _finding_from(f.model_dump(), project.id, skill)
+            if finding is None:
+                continue
+            if not _claim(already, project.id, finding):
                 duplicates += 1
                 continue
-            findings.append(
-                Finding(
-                    project=project.id,
-                    rule=rule,
-                    severity=f.severity,
-                    summary=f.summary,
-                    subjects=f.subjects,
-                    detail=f.detail,
-                )
-            )
+            findings.append(finding)
 
-        store.record_findings(run_id, findings, source=f"agent:{skill}")
+        if findings:
+            store.record_findings(run_id, findings, source=f"agent:{skill}")
+        findings = landed + findings
         store.finish_run(run_id, ok=True, cost_usd=cost, connector=backend)
+        # Duplicates are what the agent repeated or what a sweep already knew,
+        # never a finding this run landed twice — those were claimed on the way
+        # in and so never reach the count.
         repeated = f", {duplicates} already known" if duplicates else ""
-        log(f"{project.id}: {len(findings)} finding(s){repeated}, ${cost:.2f}")
+        streamed = f" ({len(landed)} as they arrived)" if landed else ""
+        log(f"{project.id}: {len(findings)} finding(s){streamed}{repeated}, ${cost:.2f}")
         return len(findings), cost
     except Exception as exc:
         store.finish_run(

@@ -84,9 +84,15 @@ class ClaudeCodeConnector:
             cmd += ["--model", task.model]
         return cmd
 
-    async def run(self, task: Task, on_text: Callable[[str], None] | None = None) -> Result:
+    async def run(
+        self,
+        task: Task,
+        on_text: Callable[[str], None] | None = None,
+        on_item: Callable[[dict], None] | None = None,
+    ) -> Result:
+        watching = on_text is not None or on_item is not None
         proc = await asyncio.create_subprocess_exec(
-            *self._command(task, streaming=on_text is not None),
+            *self._command(task, streaming=watching),
             cwd=str(task.read_dirs[0]) if task.read_dirs else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -97,12 +103,12 @@ class ClaudeCodeConnector:
             env={k: v for k, v in os.environ.items() if k != "CLAUDECODE"},
         )
         try:
-            if on_text is None:
+            if not watching:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=task.timeout_s)
                 envelope = _envelope(stdout)
             else:
                 envelope, stderr = await asyncio.wait_for(
-                    self._stream(proc, on_text, task.stream_field), timeout=task.timeout_s
+                    self._stream(proc, on_text, on_item, task), timeout=task.timeout_s
                 )
         except TimeoutError:
             proc.kill()
@@ -138,7 +144,11 @@ class ClaudeCodeConnector:
         return Result(value=value, cost_usd=cost, connector=self.name)
 
     async def _stream(
-        self, proc, on_text: Callable[[str], None], field: str | None = None
+        self,
+        proc,
+        on_text: Callable[[str], None] | None,
+        on_item: Callable[[dict], None] | None,
+        task: Task,
     ) -> tuple[dict, bytes]:
         """Read NDJSON as it arrives, forwarding the answer and keeping the result.
 
@@ -155,6 +165,8 @@ class ClaudeCodeConnector:
         envelope: dict = {}
         structured = ""
         sent = 0
+        handed = 0
+        field, items_field = task.stream_field, task.stream_items
         while True:
             line = await proc.stdout.readline()
             if not line:
@@ -171,9 +183,17 @@ class ClaudeCodeConnector:
 
             delta = (event.get("event") or {}).get("delta") or {}
             kind = delta.get("type")
-            if kind == "text_delta" and delta.get("text"):
+            if kind == "text_delta" and delta.get("text") and on_text:
                 on_text(delta["text"])
-            elif kind == "input_json_delta" and field:
+            elif kind == "input_json_delta" and items_field and on_item:
+                # Each finding handed over the moment it is complete, so a
+                # sibling can see it and a run that dies keeps what it found.
+                structured += delta.get("partial_json") or ""
+                finished = _complete_items(structured, items_field)
+                for item in finished[handed:]:
+                    on_item(item)
+                handed = len(finished)
+            elif kind == "input_json_delta" and field and on_text:
                 # The answer is being written into the structured output rather
                 # than narrated, so it is pulled out of the partial JSON as it
                 # grows. Everything here tolerates a half-written document,
@@ -250,3 +270,56 @@ def _partial_string(document: str, field: str) -> str:
         out.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt))
         i += 2
     return "".join(out)
+
+
+def _complete_items(document: str, field: str) -> list[dict]:
+    """Whatever elements of `field`'s array are finished in a half-written document.
+
+    The point of reading a half-written answer at all: an audit takes twenty
+    minutes and used to hand back everything at once, so a sibling running
+    beside it learned nothing until it exited, and a run that timed out at
+    minute nineteen threw away everything it had found.
+
+    Scanning for balanced braces rather than repairing the JSON and parsing it:
+    a repair guesses at what has not arrived yet, and a guess that parses is
+    worse than one that does not.
+    """
+    start = document.find(f'"{field}"')
+    if start < 0:
+        return []
+    bracket = document.find("[", start)
+    if bracket < 0:
+        return []
+
+    items: list[dict] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    begin = -1
+    for i in range(bracket + 1, len(document)):
+        char = document[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                begin = i
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0 and begin >= 0:
+                try:
+                    items.append(json.loads(document[begin : i + 1]))
+                except json.JSONDecodeError:
+                    pass
+                begin = -1
+        elif char == "]" and depth == 0:
+            break
+    return items

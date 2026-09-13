@@ -88,6 +88,12 @@ class Task:
     # narrates nothing, so there is no prose to stream — naming the field is
     # what lets the answer itself be streamed as it is written.
     stream_field: str | None = None
+    # Name of an array field whose elements should be handed over as each one
+    # finishes, rather than all of them at the end. An audit takes twenty
+    # minutes; without this a sibling running beside it learns nothing until it
+    # exits, and a run that dies at minute nineteen discards everything it
+    # found.
+    stream_items: str | None = None
     # Free-form and connector-specific: a skill name, a temperature. A
     # connector ignores what it does not understand rather than failing, so
     # that one task can be offered to several.
@@ -119,13 +125,22 @@ class Connector(Protocol):
         """Whether this could run right now — binary installed, key present."""
         ...
 
-    async def run(self, task: Task, on_text: Callable[[str], None] | None = None) -> Result:
-        """Run the task. If `on_text` is given, call it with text as it arrives.
+    async def run(
+        self,
+        task: Task,
+        on_text: Callable[[str], None] | None = None,
+        on_item: Callable[[dict], None] | None = None,
+    ) -> Result:
+        """Run the task, optionally reporting progress as it happens.
 
-        Optional on purpose: a backend that cannot stream simply never calls it,
-        and the caller gets the same Result either way. Nothing downstream may
-        depend on having seen the partial text — it is a view of the work in
-        progress, and `Result.value` is the answer.
+        `on_text` receives the answer as it is written; `on_item` receives each
+        element of `task.stream_items` as it completes.
+
+        Both optional on purpose: a backend that cannot stream never calls them
+        and the caller gets the same Result. Nothing may *depend* on having seen
+        them — they are a view of work in progress, and `Result.value` is the
+        answer. A caller acting on an item must therefore tolerate seeing it
+        again in the final result.
         """
         ...
 

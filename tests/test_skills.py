@@ -219,7 +219,9 @@ class Fake:
     def available(self) -> bool:
         return True
 
-    async def run(self, task: Task) -> Result:
+    async def run(self, task: Task, on_text=None, on_item=None) -> Result:
+        # A backend that cannot stream never calls either, and the caller gets
+        # the same Result — which is what the optional arguments are for.
         if self.fail is not None:
             raise ConnectorError(self.fail, self.cost)
         return Result(value=self.value, cost_usd=self.cost, connector=self.name)
