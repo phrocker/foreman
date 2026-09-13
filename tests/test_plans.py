@@ -9,7 +9,19 @@ opposite things.
 
 from __future__ import annotations
 
-from foreman.plans import GATES, Phase, Standing, progress, standing, summarise
+import json
+
+from foreman.plans import (
+    GATES,
+    Phase,
+    Standing,
+    pending_work,
+    phase_op_params,
+    plan_proposals,
+    progress,
+    standing,
+    summarise,
+)
 
 
 def _phase(position=1, gate="dns_resolves", **params):
@@ -151,3 +163,147 @@ def test_the_summary_counts_every_subject_in_every_phase():
     (line,) = summarise(rows, phases)
     assert line["passed"] == 1 and line["pending"] == 1
     assert line["phase"] == "P1"
+
+
+# --- a plan that acts -------------------------------------------------------
+
+
+class _Surface:
+    def claims(self, name):
+        return True
+
+
+class _Project:
+    id = "domains"
+    registrar = _Surface()
+    active_domains = ("domains",)
+
+
+class _Registry:
+    active = (_Project(),)
+
+
+class _Store:
+    """Just enough store to drive the bridge."""
+
+    def __init__(self, phases, subjects, facts, status="active"):
+        self._phases = phases
+        self._subjects = subjects
+        self._facts = facts
+        self._status = status
+
+    def plans(self, status=None):
+        if status and status != self._status:
+            return []
+        return [{"id": 1, "status": self._status}]
+
+    def plan(self, plan_id):
+        return {
+            "id": 1,
+            "status": self._status,
+            "subjects": json.dumps(self._subjects),
+            "goal": "g",
+        }
+
+    def phases(self, plan_id):
+        return [
+            {
+                "id": i,
+                "plan_id": 1,
+                "position": p.position,
+                "name": p.name,
+                "gate": p.gate,
+                "params": json.dumps(p.params),
+            }
+            for i, p in enumerate(self._phases, start=1)
+        ]
+
+    def project_summary(self):
+        return [{"project": "domains"}]
+
+    def latest_observations(self, project, as_of=None):
+        return [
+            {"subject": subject, "key": key, "value": value}
+            for subject, facts in self._facts.items()
+            for key, value in facts.items()
+        ]
+
+
+def test_only_the_subject_whose_turn_it_is_gets_work():
+    """Proposing the content change for a domain whose DNS has not moved is
+    work nobody can do, and a pending list nobody can act on is how people stop
+    reading it."""
+    phases = [_phase(1, nameserver_suffix="host.test"), _phase(2, gate="serves")]
+    store = _Store(
+        phases,
+        ["domain:moved.test", "domain:parked.test"],
+        {
+            "domain:moved.test": {"nameservers": "ns1.host.test"},
+            "domain:parked.test": {"nameservers": "ns1.domaincontrol.com"},
+        },
+    )
+    work = pending_work(store, 1)
+    # moved.test passed DNS and its Serve gate has no evidence, so it is not
+    # pending — unknown is not a reason to act.
+    assert [(s, p.name) for s, p in work] == [("domain:parked.test", "P1")]
+
+
+def test_a_finished_plan_proposes_nothing():
+    phases = [_phase(1, nameserver_suffix="host.test")]
+    store = _Store(
+        phases, ["domain:a.test"], {"domain:a.test": {"nameservers": "x"}}, status="done"
+    )
+    assert pending_work(store, 1) == []
+
+
+def test_a_phase_with_no_operation_is_tracked_but_not_proposed():
+    """Foreman is not the only thing that can do work, and a phase closed by a
+    person is still worth watching."""
+    phases = [_phase(1, nameserver_suffix="host.test")]
+    store = _Store(phases, ["domain:a.test"], {"domain:a.test": {"nameservers": "ns1.other.test"}})
+    assert pending_work(store, 1)
+    assert plan_proposals(store, _Registry()) == []
+
+
+def test_gate_parameters_are_not_handed_to_the_operation():
+    """`nameserver_suffix` tells the gate what to look for and means nothing to
+    the op; passing it on would be a confusing TypeError at the worst moment."""
+    phase = _phase(1, nameserver_suffix="host.test", op="set_dns_record", data="203.0.113.1")
+    assert "nameserver_suffix" not in phase_op_params(phase)
+    assert phase_op_params(phase) == {"data": "203.0.113.1"}
+
+
+def test_one_subject_failing_does_not_cost_the_others(monkeypatch):
+    """A registrar that will not answer for one domain must not take the
+    seventeen queued behind it down with it."""
+    from foreman import plans as plans_module
+
+    calls: list[str] = []
+
+    class Flaky:
+        verb = "set_dns_record"
+
+        def plan(self, project, domain):
+            calls.append(domain)
+            if domain == "bad.test":
+                raise RuntimeError("the registrar could not be read")
+            return []
+
+    monkeypatch.setattr(plans_module, "phase_op_params", lambda phase: {})
+    import foreman.actions as actions_module
+
+    monkeypatch.setattr(actions_module, "OPS", {"set_dns_record": Flaky()}, raising=False)
+
+    phases = [_phase(1, nameserver_suffix="host.test", op="set_dns_record")]
+    store = _Store(
+        phases,
+        ["domain:bad.test", "domain:good.test"],
+        {
+            "domain:bad.test": {"nameservers": "ns1.parked.test"},
+            "domain:good.test": {"nameservers": "ns1.parked.test"},
+        },
+    )
+    said: list[str] = []
+    plan_proposals(store, _Registry(), log=said.append)
+    assert calls == ["bad.test", "good.test"]
+    assert any("registrar could not be read" in line for line in said)

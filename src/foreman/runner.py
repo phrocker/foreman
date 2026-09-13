@@ -11,6 +11,7 @@ from .actions.sagform import policy_allows
 from .collectors import COLLECTORS, OPTIONAL
 from .config import Project, Registry
 from .domains import collectors_for
+from .plans import plan_proposals
 from .rules import evaluate
 from .store import Store
 
@@ -118,6 +119,25 @@ def propose_actions(
     """Compute actions for open findings and record them as pending."""
     targets = [registry.get(project)] if project else registry.active
     recorded = 0
+
+    # A plan proposes the work that closes its next gate, through this same
+    # ledger and the same `build`. It is the half that makes a plan act rather
+    # than report, and it can no more skip an approval than a finding can.
+    for proposal in plan_proposals(store, registry, log=log):
+        if store.record_proposal(
+            project=proposal.project,
+            finding_id=proposal.finding_id,
+            verb=proposal.verb,
+            statement=proposal.statement,
+            class_statement=proposal.class_statement,
+            class_key=proposal.class_key,
+            params=proposal.params,
+            patch_digest=proposal.patch_digest,
+            files=proposal.files,
+        ):
+            recorded += 1
+            log(f"plan: {proposal.summary} ({proposal.target})")
+
     for target in targets:
         findings = store.open_findings(target.id)
         for proposal in propose(target, findings):

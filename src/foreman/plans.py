@@ -22,6 +22,7 @@ doing it.
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -275,3 +276,116 @@ def plan_progress(store: Any, plan_id: int) -> dict[str, Any]:
         "subjects": {s: [str(x) for x in standings] for s, standings in rows.items()},
         "summary": summarise(rows, phases),
     }
+
+
+# The key in a phase's params naming the operation that closes its gate. Params
+# are op-specific anyway — the gate reads what it needs and the op reads what it
+# needs — so the alternative was a column that would mean nothing for a phase
+# whose gate closes by somebody doing something Foreman cannot do.
+OP_KEY = "op"
+# Params the gate reads and the op must not be handed.
+GATE_ONLY = frozenset({"nameserver_suffix", "min_chars", "min_words"})
+
+
+def phase_op_params(phase: Phase) -> dict[str, str]:
+    return {k: v for k, v in phase.params.items() if k != OP_KEY and k not in GATE_ONLY}
+
+
+def pending_work(store: Any, plan_id: int) -> list[tuple[str, Phase]]:
+    """Every subject sitting at a phase that is its turn and not passing.
+
+    Only the first unpassed phase per subject: proposing the content change for
+    a domain whose DNS has not moved would be work nobody can do yet, and a
+    pending list nobody can act on is the thing that makes people stop reading
+    it.
+    """
+    row = store.plan(plan_id)
+    if row is None or row["status"] != "active":
+        return []
+    phases = sorted((phase_from_row(p) for p in store.phases(plan_id)), key=lambda p: p.position)
+    subjects = json.loads(row["subjects"] or "[]")
+    facts = facts_by_subject(store)
+
+    out: list[tuple[str, Phase]] = []
+    for subject in subjects:
+        earlier = True
+        for phase in phases:
+            here = standing(phase, facts.get(subject, {}), earlier)
+            if here is Standing.PENDING:
+                out.append((subject, phase))
+                break
+            if here is not Standing.PASSED:
+                break
+            earlier = True
+    return out
+
+
+def plan_proposals(store: Any, registry: Any, log=lambda _: None) -> list[Any]:
+    """What every active plan would have done next, as proposals.
+
+    A plan that only reports is half a plan; this is the half that acts. It
+    builds through the same `build` a finding-driven action uses, so a plan gets
+    the same SAG statement, the same equivalence class, the same guardrail and
+    the same approval — and can no more skip one than a finding can.
+
+    Imported here rather than at module scope: actions reach back into the
+    domain registry, which reaches into rules, and one of those will eventually
+    want to read a plan.
+    """
+    from .actions import OPS, build
+
+    out: list[Any] = []
+    for plan_row in store.plans(status="active"):
+        for subject, phase in pending_work(store, int(plan_row["id"])):
+            verb = phase.params.get(OP_KEY)
+            if not verb:
+                # A phase whose gate closes by hand. Legitimate, and the plan
+                # still tracks it — Foreman is not the only thing that can do
+                # work.
+                continue
+            op = OPS.get(verb)
+            if op is None or not hasattr(op, "plan"):
+                log(f"{subject}: phase {phase.name!r} names {verb!r}, which cannot be planned")
+                continue
+
+            project = _project_for(registry, subject)
+            if project is None:
+                log(f"{subject}: no project claims it, so nothing can act on it")
+                continue
+
+            supplied = {
+                "domain": subject.split(":", 1)[-1],
+                "subject": subject,
+                **phase_op_params(phase),
+            }
+            # Bound to what the op actually accepts, so a phase carrying a
+            # parameter meant for a different op fails loudly rather than
+            # quietly doing something else.
+            accepted = set(inspect.signature(op.plan).parameters)
+            kwargs = {k: v for k, v in supplied.items() if k in accepted}
+            try:
+                for params in op.plan(project, **kwargs):
+                    proposal = build(project, op, params, None)
+                    if proposal is not None:
+                        out.append(proposal)
+            except Exception as exc:  # noqa: BLE001 - one subject must not stop the rest
+                # A registrar that will not answer, a record that moved, a
+                # domain no project claims. One subject failing must not cost
+                # the seventeen queued behind it.
+                log(f"{subject}: {type(exc).__name__}: {exc}")
+    return out
+
+
+def _project_for(registry: Any, subject: str) -> Any:
+    """Which project owns this subject, so the action lands somewhere.
+
+    A plan names domains; an action belongs to a project. The registrar surface
+    is what connects them, and a domain no project claims is a plan nobody can
+    execute — said out loud rather than silently skipped.
+    """
+    name = subject.split(":", 1)[-1]
+    for project in registry.active:
+        surface = getattr(project, "registrar", None)
+        if surface is not None and surface.claims(name):
+            return project
+    return None
