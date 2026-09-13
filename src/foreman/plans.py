@@ -90,13 +90,18 @@ def _serves(facts: Facts, params: dict[str, str]) -> bool:
     Status alone is not enough. A parked page and a live site both return 200,
     and the difference between them is the entire project — so a body floor is
     part of the gate rather than a refinement of it.
+
+    The cells are the ones `siteprobe` writes per domain. A certificate counts
+    as valid only if it both verified and is for this name: a host that answers
+    with somebody else's certificate shows every visitor a full-page warning,
+    which is not a phase anybody would call done.
     """
-    if str(facts.get("https_status") or "") != "200":
+    if str(facts.get("https_apex_status") or "") != "200":
         return False
-    if not _truthy(facts.get("cert_valid")):
+    if facts.get("cert_error") or not _truthy(facts.get("cert_covers_name")):
         return False
     try:
-        return int(facts.get("body_chars") or 0) >= int(params.get("min_chars", 400))
+        return int(facts.get("body_text_chars") or 0) >= int(params.get("min_chars", 400))
     except (TypeError, ValueError):
         return False
 
@@ -130,7 +135,7 @@ GATES: dict[str, Gate] = {
             "serves",
             "HTTPS answers 200 with a valid certificate and a real body",
             _serves,
-            needs=("https_status",),
+            needs=("https_apex_status",),
         ),
         Gate(
             "distinct",

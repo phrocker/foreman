@@ -62,15 +62,21 @@ def test_a_domain_nothing_answers_for_has_not_passed_dns():
 def test_serving_needs_a_body_and_not_just_a_status():
     """A parked page and a live site both return 200, and the difference between
     them is the entire project."""
-    live = {"https_status": "200", "cert_valid": "true", "body_chars": "5000"}
-    parked = {"https_status": "200", "cert_valid": "true", "body_chars": "120"}
+    live = {"https_apex_status": "200", "cert_covers_name": "true", "body_text_chars": "5000"}
+    parked = {"https_apex_status": "200", "cert_covers_name": "true", "body_text_chars": "120"}
     assert GATES["serves"].check(live, {})
     assert not GATES["serves"].check(parked, {})
 
 
 def test_serving_needs_a_certificate_that_is_actually_valid():
-    facts = {"https_status": "200", "cert_valid": "false", "body_chars": "5000"}
-    assert not GATES["serves"].check(facts, {})
+    """Both halves of valid. A certificate that failed to verify and one issued
+    for somebody else land the visitor on the same full-page warning, and a
+    phase nobody can reach past is not a phase that is done."""
+    served = {"https_apex_status": "200", "body_text_chars": "5000"}
+    assert not GATES["serves"].check({**served, "cert_covers_name": "false"}, {})
+    assert not GATES["serves"].check(
+        {**served, "cert_covers_name": "true", "cert_error": "certificate has expired"}, {}
+    )
 
 
 def test_a_page_duplicating_its_siblings_has_not_passed_substance():
@@ -91,7 +97,7 @@ def test_a_gate_reading_a_number_it_cannot_parse_does_not_pass():
     """Unparseable is not success. Guessing here would mark a phase done on the
     strength of a typo."""
     assert not GATES["serves"].check(
-        {"https_status": "200", "cert_valid": "true", "body_chars": "lots"}, {}
+        {"https_apex_status": "200", "cert_covers_name": "true", "body_text_chars": "lots"}, {}
     )
 
 
@@ -119,9 +125,9 @@ def test_each_subject_travels_the_phases_independently():
     facts = {
         "moved": {
             "nameservers": "ns1.host.test",
-            "https_status": "200",
-            "cert_valid": "true",
-            "body_chars": "5000",
+            "https_apex_status": "200",
+            "cert_covers_name": "true",
+            "body_text_chars": "5000",
         },
         "parked": {"nameservers": "ns1.domaincontrol.com"},
     }
