@@ -71,6 +71,7 @@ from .graph import (
     SEP,
     SUPERSEDES,
     edges_for,
+    grounding_edges,
     kind_of,
     memory_edges,
     node,
@@ -797,6 +798,10 @@ class ShoalStore:
                 )
             ]
         )
+        # What the answer rested on, as edges. The JSON stays — it is what the
+        # turn displays — but a blob cannot be walked, and walking is how a
+        # finding gets to know what has been said about it.
+        self.relate(grounding_edges(conversation_id, refs or {}))
         return message_id
 
     def conversation(self, conversation_id: int) -> list[Record]:

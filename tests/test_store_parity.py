@@ -26,9 +26,11 @@ from foreman.graph import (
     AUDITED,
     CONCERNS,
     COVERS,
+    DISCUSSED_IN,
     FOUND_BY,
     FROM_RULE,
     FROM_SKILL,
+    GROUNDED_IN,
     HAS_FINDING,
     PLANNED_IN,
     RAN,
@@ -912,3 +914,36 @@ def test_a_plan_can_be_finished_without_being_deleted(store):
 def test_plans_made_in_the_same_second_still_order_deterministically(store):
     ids = [store.create_plan(f"g{n}", []) for n in range(4)]
     assert [p["id"] for p in store.plans()] == list(reversed(ids))
+
+
+def test_what_an_answer_rested_on_becomes_edges_not_just_a_blob(store):
+    """ "What has been said about this finding" is the useful direction, and a
+    JSON list held on a message cannot answer it."""
+    conversation_id = store.start_conversation("what needs me?")
+    store.add_message(
+        conversation_id,
+        "assistant",
+        "the stale key first",
+        refs={"findings": [7, 9], "projects": ["mfa"]},
+    )
+    conversation = node("conv", conversation_id)
+    assert store.neighbors([conversation], [GROUNDED_IN]) == [
+        node("finding", 7),
+        node("finding", 9),
+        "project|mfa",
+    ]
+    assert store.neighbors([node("finding", 7)], [DISCUSSED_IN]) == [conversation]
+
+
+def test_a_reference_that_is_not_an_id_does_not_become_a_node(store):
+    """A model writing prose where a number belongs is a bad reference, not a
+    new finding."""
+    conversation_id = store.start_conversation("q")
+    store.add_message(conversation_id, "assistant", "a", refs={"findings": ["", "  "]})
+    assert store.neighbors([node("conv", conversation_id)], [GROUNDED_IN]) == []
+
+
+def test_an_answer_resting_on_nothing_relates_to_nothing(store):
+    conversation_id = store.start_conversation("q")
+    store.add_message(conversation_id, "user", "hello")
+    assert store.neighbors([node("conv", conversation_id)], [GROUNDED_IN]) == []

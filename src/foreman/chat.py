@@ -70,14 +70,19 @@ used. Leave a list empty rather than padding it.
 `suggest` is usually empty. Offer an approval or rejection only when the state
 plainly supports it, with one sentence saying why.
 
-`remember` is emptier still. Propose a memory only when this conversation has
-settled something durable — a rule the operator has just called noise for a
-class of project, a decision not to fix something, a constraint that will still
-hold next month. Never a summary of what was said, and never a restatement of a
-finding: a finding is a problem and a memory is a judgement about how this
-portfolio works. Name what it bears on in `about` as `project|<id>`,
-`rule|<name>` or `finding|<id>`. You cannot write one; it is offered to the
-operator, who decides."""
+`remember` is how this conversation stops having to happen again. Offer one
+whenever the operator tells you something you could not have read from the state
+above — a constraint, a decision, a preference, or the reason something is the
+way it is. Those are exactly the facts that get explained again next week
+because nothing wrote them down, so look for them rather than waiting for one to
+be obvious.
+
+Keep the bar, though. Not a summary of what was said, and not a restatement of a
+finding: a finding is a problem, a memory is a judgement about how this
+portfolio works. One sentence, still true next month. Name what it bears on in
+`about` as `project|<id>`, `rule|<name>` or `finding|<id>`.
+
+You cannot write one. It is offered, and the operator decides."""
 
 
 class Suggestion(BaseModel):

@@ -21,7 +21,15 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .graph import HAS_PHASE, SUPERSEDES, edges_for, memory_edges, node, plan_edges
+from .graph import (
+    HAS_PHASE,
+    SUPERSEDES,
+    edges_for,
+    grounding_edges,
+    memory_edges,
+    node,
+    plan_edges,
+)
 from .models import Event, Finding, Observation, utcnow
 
 DB_NAME = "foreman.db"
@@ -860,6 +868,10 @@ class SqliteStore:
             ),
         )
         self._db.commit()
+        # What the answer rested on, as edges. The JSON stays — it is what the
+        # turn displays — but a blob cannot be walked, and walking is how a
+        # finding gets to know what has been said about it.
+        self.relate(grounding_edges(conversation_id, refs or {}))
         return int(cur.lastrowid)
 
     def conversation(self, conversation_id: int) -> list[Record]:

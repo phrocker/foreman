@@ -11,6 +11,7 @@ from .actions.sagform import policy_allows
 from .collectors import COLLECTORS, OPTIONAL
 from .config import Project, Registry
 from .domains import collectors_for
+from .models import Observation
 from .plans import plan_proposals
 from .rules import evaluate
 from .store import Store
@@ -58,10 +59,56 @@ async def collect_project(
             store.finish_run(run_id, ok=False, error=f"{type(exc).__name__}: {exc}")
             log(f"{project.id}/{name} failed: {exc}")
             continue
+        observations = list(observations)
+        observations += _cleared_errors(store, project.id, name, observations)
         total += store.record(run_id, observations)
         store.finish_run(run_id, ok=True)
         log(f"{project.id}/{name}: {len(observations)} observations")
     return total
+
+
+# Collectors record a failure as an observation rather than raising, so an
+# unreadable surface looks different from a clean one. The convention is a key
+# ending `_error`.
+ERROR_SUFFIX = "_error"
+
+
+def _cleared_errors(
+    store: Store, project_id: str, collector: str, observations: Sequence[Observation]
+) -> list[Observation]:
+    """Retract the errors this collector reported last time and not this time.
+
+    A collector writes `*_error` when it fails and simply omits the key when it
+    succeeds — and `latest_observations` returns the newest value of each cell,
+    so an omitted key leaves the old error standing. A problem that was fixed
+    months ago goes on being reported forever, which is worse than never having
+    reported it: it teaches you that the board is wrong.
+
+    Seen for real. `gh api --slurp` was fixed early on, and the failure it had
+    caused was still on the dashboard afterwards because no later run ever said
+    otherwise.
+
+    Done here rather than in each collector because every one of them has this
+    shape and the twelfth would forget. A collector that raised is excluded by
+    the caller: it wrote nothing, so it knows nothing, and silence is not the
+    same as recovery.
+    """
+    said = {(o.subject, o.key) for o in observations}
+    subjects = {o.subject for o in observations}
+    return [
+        Observation(
+            project=project_id,
+            collector=collector,
+            subject=row["subject"],
+            key=row["key"],
+            value=None,
+        )
+        for row in store.latest_observations(project_id)
+        if str(row["key"]).endswith(ERROR_SUFFIX)
+        and row["value"]
+        and row["subject"] in subjects
+        and (row["subject"], row["key"]) not in said
+    ]
 
 
 async def collect_all(

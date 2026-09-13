@@ -123,9 +123,28 @@ def _distinct(facts: Facts, params: dict[str, str]) -> bool:
         return False
 
 
+def _controls_dns(facts: Facts, params: dict[str, str]) -> bool:
+    """Foreman's token is being served for this zone.
+
+    The first gate any buildout should pass, and the cheapest: it proves the
+    write path works before anything depends on it. Read from public DNS, so it
+    answers "did the change reach the world" rather than "did the registrar
+    accept it" — which are different questions, and only the first one matters
+    to a visitor.
+    """
+    wanted = params.get("token", "").strip()
+    return bool(wanted) and (facts.get("control_token") or "").strip() == wanted
+
+
 GATES: dict[str, Gate] = {
     g.name: g
     for g in (
+        Gate(
+            "controls_dns",
+            "Foreman's token is served at _foreman for this domain",
+            _controls_dns,
+            needs=("control_token",),
+        ),
         Gate(
             "dns_resolves",
             "public DNS answers for this name",

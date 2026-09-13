@@ -397,6 +397,17 @@
   .chat-form input { flex: 1; min-width: 0; }
   .chat-foot { padding: 0 16px 14px; color: var(--text-3); font-size: 12px; }
   #chatLog { flex: 1; overflow-y: auto; }
+  /* Earlier conversations. They were always stored — fifteen of them before
+     anything could show one — and unreachable, which is the same as lost. */
+  #chatPast { max-height: 46%; overflow-y: auto; border-bottom: 1px solid var(--border);
+    background: var(--surface-alt); }
+  .past { display: block; width: 100%; text-align: left; padding: 8px 12px;
+    border: 0; border-top: 1px solid var(--border); background: none;
+    color: var(--text); font: inherit; cursor: pointer; }
+  .past:hover { background: var(--surface); }
+  .past[aria-current="true"] { border-left: 3px solid var(--accent); }
+  .past-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .past-when { color: var(--text-3); font-size: 11px; }
   /* The pane is narrow, so prose inside it needs to breathe differently from
      prose in the main column. */
   .turn-body p { margin: 0 0 9px; }
@@ -469,8 +480,11 @@
 <aside class="chat-pane" id="chatPane" aria-label="Ask Foreman">
   <div class="chat-head">
     <span class="chat-title">Ask Foreman</span>
+    <button id="chatHistory" class="icon" title="Earlier conversations" aria-label="Earlier conversations" aria-expanded="false">☰</button>
+    <button id="chatNew" class="icon" title="Start a new conversation" aria-label="New conversation">+</button>
     <button id="chatClose" class="icon" title="Collapse" aria-label="Collapse chat">‹</button>
   </div>
+  <div id="chatPast" hidden></div>
   <div id="chatLog"></div>
   <form id="chatForm" class="chat-form">
     <input type="search" id="chatInput" placeholder="What needs me today?" autocomplete="off">
@@ -1666,7 +1680,62 @@ runBtn.addEventListener("click", async () => {
 // --- chat ------------------------------------------------------------------
 
 let conversationId = null;
-const turns = [];
+let past = [];
+
+/** Earlier conversations, so a question asked yesterday can be picked up.
+ *  They were being stored from the first day and there was no way to reach one,
+ *  which is the same as not storing them. */
+async function loadPast() {
+  past = await fetchPart("/api/conversations", []);
+  renderPast();
+}
+
+function renderPast() {
+  const box = $("chatPast");
+  if (!past.length) {
+    box.innerHTML = '<div class="empty">Nothing earlier yet.</div>';
+    return;
+  }
+  box.innerHTML = past.map((c) => `
+    <button class="past" data-id="${c.id}" aria-current="${String(c.id === conversationId)}">
+      <span class="past-title">${esc(c.title || "(untitled)")}</span>
+      <span class="past-when">${esc(ago(c.last_at || c.started_at))}${
+        c.turns ? ` · ${c.turns} turn${c.turns === 1 ? "" : "s"}` : ""
+      }</span>
+    </button>`).join("");
+  box.querySelectorAll(".past").forEach((b) =>
+    b.addEventListener("click", () => resume(Number(b.dataset.id))));
+}
+
+async function resume(id) {
+  const rows = await fetchPart(`/api/conversations/${id}`, []);
+  conversationId = id;
+  turns = rows.map((t) => ({
+    role: t.role,
+    content: t.content,
+    refs: typeof t.refs === "string" ? JSON.parse(t.refs || "{}") : (t.refs || {}),
+    suggest: [],
+  }));
+  renderChat(false);
+  renderPast();
+}
+
+$("chatHistory").addEventListener("click", () => {
+  const box = $("chatPast");
+  box.hidden = !box.hidden;
+  $("chatHistory").setAttribute("aria-expanded", String(!box.hidden));
+  if (!box.hidden) loadPast();
+});
+
+$("chatNew").addEventListener("click", () => {
+  conversationId = null;
+  turns = [];
+  partial = "";
+  renderChat(false);
+  renderPast();
+  $("chatInput").focus();
+});
+let turns = [];
 
 // What has arrived so far this turn. The final answer replaces it — the stream
 // is the model writing, and `reply` is what it decided to say.
@@ -1778,6 +1847,8 @@ $("chatForm").addEventListener("submit", async (e) => {
     if (failed) throw new Error(failed);
     if (!done) throw new Error("the answer ended without arriving");
     conversationId = done.conversation_id;
+    // So a conversation started just now is reachable from the list.
+    if (!$("chatPast").hidden) loadPast();
     turns.push({ role: "assistant", content: done.reply, refs: done.refs,
                  suggest: done.suggest, remember: done.remember });
   } catch (err) {

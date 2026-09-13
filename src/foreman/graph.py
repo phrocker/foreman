@@ -50,6 +50,11 @@ CONCERNS = "concerns"
 HAS_PHASE = "has_phase"
 COVERS = "covers"
 PLANNED_IN = "planned_in"
+# What an answer rested on. Stored as edges, not only as the JSON the turn
+# carries, so the question can be asked from the other end: "what has been said
+# about this finding" is the useful direction and a blob cannot answer it.
+GROUNDED_IN = "grounded_in"
+DISCUSSED_IN = "discussed_in"
 # A skill's track record, as relationships rather than a tally kept beside the
 # graph. Dispatching a skill costs money, so the run it produced is the unit
 # that carries the evidence: what it cost, where it was aimed, which backend
@@ -247,4 +252,32 @@ def plan_edges(plan_id: int, subjects) -> list[Edge]:
         target = subject if "|" in str(subject) else node("subject", subject)
         edges.append((plan_node, COVERS, target))
         edges.append((target, PLANNED_IN, plan_node))
+    return edges
+
+
+# How a chat turn names what it used, and what kind of node each list holds.
+REF_KINDS = {"findings": "finding", "actions": "action", "projects": "project"}
+
+
+def grounding_edges(conversation_id: int, refs: dict) -> list[Edge]:
+    """A conversation and the things one of its answers rested on.
+
+    Related to the conversation rather than the individual turn on purpose. The
+    question worth asking is "what has been said about this finding", and the
+    answer is a conversation somebody can read — a single message out of context
+    is rarely the thing you wanted.
+
+    Ids that are not ids are skipped rather than guessed at: a model writing
+    prose where a number belongs is a bad reference, not a new node.
+    """
+    conversation = node("conv", conversation_id)
+    edges: list[Edge] = []
+    for key, kind in REF_KINDS.items():
+        for value in refs.get(key) or []:
+            text = str(value).strip()
+            if not text:
+                continue
+            target = node(kind, int(text)) if text.isdigit() else node(kind, text)
+            edges.append((conversation, GROUNDED_IN, target))
+            edges.append((target, DISCUSSED_IN, conversation))
     return edges

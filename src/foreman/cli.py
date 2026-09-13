@@ -95,7 +95,7 @@ def collect(
         raise typer.BadParameter(f"unknown collector {collector!r} (have: {', '.join(COLLECTORS)})")
 
     async def run() -> None:
-        with open_store(db) as store:
+        with open_store(db, registry=registry) as store:
             total = await collect_all(
                 reg,
                 store,
@@ -116,7 +116,7 @@ def check(
 ) -> None:
     """Evaluate the deterministic rules against the latest snapshot."""
     reg = load_registry(registry)
-    with open_store(db) as store:
+    with open_store(db, registry=registry) as store:
         check_all(reg, store, project=project, log=lambda m: console.print(f"[bold]{m}[/]"))
         for row in store.open_findings(project):
             style = SEVERITY_STYLE.get(row["severity"], "")
@@ -187,7 +187,7 @@ def audit(
     budget = Budget(limit_usd=budget_usd)
 
     async def run() -> None:
-        with open_store(db) as store:
+        with open_store(db, registry=registry) as store:
             if not targets:
                 console.print("[yellow]No active projects to audit.[/]")
                 return
@@ -265,7 +265,7 @@ def diff(
     targets = [reg.get(project)] if project else reg.active
     quiet = True
 
-    with open_store(db) as store:
+    with open_store(db, registry=registry) as store:
         for target in targets:
             changes, newest, previous = project_drift(store, target.id)
             if newest is None:
@@ -314,7 +314,7 @@ def actions(
 ) -> None:
     """Pending actions, each with the approval record of its class."""
     reg = load_registry(registry)
-    with open_store(db) as store:
+    with open_store(db, registry=registry) as store:
         if propose:
             found = propose_actions(reg, store, project=project)
             console.print(f"[dim]{found} new proposal(s).[/]\n")
@@ -392,7 +392,7 @@ def approve(
 ) -> None:
     """Approve and apply one action."""
     reg = load_registry(registry)
-    with open_store(db) as store:
+    with open_store(db, registry=registry) as store:
         try:
             written = apply_action(reg, store, action_id)
         except Stale as exc:
@@ -427,7 +427,7 @@ def apply_eligible_cmd(
     automation never becomes evidence for more automation.
     """
     reg = load_registry(registry)
-    with open_store(db) as store:
+    with open_store(db, registry=registry) as store:
         applied, skipped = apply_eligible(
             reg,
             store,
@@ -459,7 +459,7 @@ def verify(
     reg = load_registry(registry)
 
     async def run() -> None:
-        with open_store(db) as store:
+        with open_store(db, registry=registry) as store:
             good, bad = await verify_applied(
                 reg, store, project=project, log=lambda m: console.print(f"  {m}")
             )
@@ -556,7 +556,7 @@ def ask_cmd(
     reg = load_registry(registry)
 
     async def run() -> None:
-        with open_store(db) as store:
+        with open_store(db, registry=registry) as store:
             try:
                 conversation_id, reply, cost = await ask(
                     store,
@@ -637,7 +637,7 @@ def history(
     reg = load_registry(registry)
 
     async def run() -> None:
-        with open_store(db) as store:
+        with open_store(db, registry=registry) as store:
             total = await ingest_all(
                 reg,
                 store,

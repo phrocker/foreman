@@ -56,6 +56,11 @@ FLAGS = ("renewAuto", "locked", "privacy", "transferProtected", "expirationProte
 # Enough lookups in flight to finish 150 domains quickly, few enough not to look
 # like abuse to a resolver.
 DNS_CONCURRENCY = 16
+# Where Foreman writes the token that proves it can change this zone. One
+# well-known name, the same convention every service uses for domain
+# verification, and a record that routes nothing — so proving control cannot
+# take anything down.
+CONTROL_NAME = "_foreman"
 DNS_TIMEOUT_S = 5
 
 
@@ -106,6 +111,41 @@ def _all_domains(token: str) -> list[dict]:
         if not marker:
             break
     return out
+
+
+async def _dig(domain: str, record: str, limiter: asyncio.Semaphore) -> list[str]:
+    """One public DNS lookup. Nothing here needs a credential."""
+    async with limiter:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "dig",
+                "+short",
+                f"+time={DNS_TIMEOUT_S}",
+                "+tries=1",
+                record,
+                domain,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=DNS_TIMEOUT_S + 2)
+        except (FileNotFoundError, TimeoutError, OSError):
+            return []
+    return [
+        line.strip().strip('"')
+        for line in out.decode("utf-8", "replace").splitlines()
+        if line.strip() and not line.startswith(";")
+    ]
+
+
+async def _control_token(domain: str, limiter: asyncio.Semaphore) -> str:
+    """What Foreman has written at the control name, as the world sees it.
+
+    Read from public DNS rather than from the registrar deliberately. The
+    registrar will happily report a record it has accepted and not yet served;
+    what matters is whether the change actually reached anybody.
+    """
+    answers = await _dig(f"{CONTROL_NAME}.{domain}", "TXT", limiter)
+    return answers[0] if answers else ""
 
 
 async def _nameservers(domain: str, limiter: asyncio.Semaphore) -> list[str]:
@@ -207,7 +247,12 @@ class GoDaddyCollector:
         live = [
             str(r.get("domain")) for r in claimed if r.get("status") == "ACTIVE" and r.get("domain")
         ]
-        resolved = await asyncio.gather(*(_nameservers(d, limiter) for d in live))
+        resolved, tokens = await asyncio.gather(
+            asyncio.gather(*(_nameservers(d, limiter) for d in live)),
+            asyncio.gather(*(_control_token(d, limiter) for d in live)),
+        )
+        for name, token in zip(live, tokens, strict=True):
+            out.append(ob(f"domain:{name}", "control_token", token))
         for name, servers in zip(live, resolved, strict=True):
             # Joined so a nameserver change is one changed cell rather than four,
             # and sorted so reordering alone is not drift.
