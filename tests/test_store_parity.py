@@ -987,3 +987,37 @@ def test_one_fact_per_subject_and_key_however_many_collectors_wrote_it(store):
     # arbitrary winner is worse than a wrong one because it cannot be
     # reproduced.
     assert rows == store.latest_observations("p")
+
+
+def test_a_decision_survives_the_sweep_that_re_derives_it(store):
+    """SQLite deleted open rule findings and shoal resolved them, so whether a
+    dismissal survived the night depended on which store you were running."""
+    run_id = _sweep(store)
+    store.record_findings(run_id, [_finding(rule="noisy")])
+    finding_id = store.open_findings()[0]["id"]
+    store.set_finding_outcome(finding_id, "dismissed")
+
+    store.retire_rule_findings("p")
+    assert store.finding(finding_id)["outcome"] == "dismissed"
+    assert [r["rule"] for r in store.dismissals("p")] == ["noisy"]
+    assert store.open_findings("p") == []
+
+
+def test_a_decision_can_be_taken_back(store):
+    run_id = _sweep(store)
+    store.record_findings(run_id, [_finding(rule="noisy")])
+    finding_id = store.open_findings()[0]["id"]
+    store.set_finding_outcome(finding_id, "dismissed")
+    store.set_finding_outcome(finding_id, None)
+    assert store.finding(finding_id)["outcome"] is None
+    assert store.dismissals("p") == []
+
+
+def test_dismissals_are_scoped_to_their_project(store):
+    for project in ("a", "b"):
+        run_id = _sweep(store, project=project)
+        store.record_findings(run_id, [_finding(project=project, rule="noisy")])
+    first = store.open_findings("a")[0]["id"]
+    store.set_finding_outcome(first, "dismissed")
+    assert [r["project"] for r in store.dismissals("a")] == ["a"]
+    assert store.dismissals("b") == []

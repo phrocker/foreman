@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Sequence
 
 from .actions import OpNotApplicable, Stale, propose, rehydrate
@@ -31,6 +32,15 @@ def _facts(store: Store, project: str) -> dict[str, dict[str, str | None]]:
     for row in store.latest_observations(project):
         facts.setdefault(row["subject"], {})[row["key"]] = row["value"]
     return facts
+
+
+def _finding_key(rule: str, subjects: Sequence[str]) -> tuple:
+    """What makes two findings the same finding across sweeps.
+
+    Sorted subjects, because a rule listing the same pages in a different order
+    has not found something new.
+    """
+    return (rule, tuple(sorted(subjects)))
 
 
 async def collect_project(
@@ -156,9 +166,25 @@ def check_all(
             continue
         store.retire_rule_findings(target.id)
         findings = evaluate(target, rows)
-        store.record_findings(latest_run, findings)
-        total += len(findings)
-        log(f"{target.id}: {len(findings)} finding(s)")
+
+        # A rule re-derives the same finding every night, so a dismissal has to
+        # survive re-derivation or dismissing something means dismissing it
+        # again tomorrow — which teaches you to stop dismissing things, and
+        # then precision has nothing to measure.
+        #
+        # Matched on rule *and* subjects: dismissing "thin content on /pricing"
+        # is not a judgement about /careers, and suppressing a whole rule
+        # because one instance was noise is how a real problem goes unseen.
+        dismissed = {
+            _finding_key(row["rule"], json.loads(row["subjects"] or "[]"))
+            for row in store.dismissals(target.id)
+        }
+        kept = [f for f in findings if _finding_key(f.rule, f.subjects) not in dismissed]
+        store.record_findings(latest_run, kept)
+        total += len(kept)
+        suppressed = len(findings) - len(kept)
+        note = f", {suppressed} dismissed earlier" if suppressed else ""
+        log(f"{target.id}: {len(kept)} finding(s){note}")
     return total
 
 

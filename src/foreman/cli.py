@@ -706,6 +706,35 @@ def plan_new(
     console.print(f"[dim]{len(subject or [])} subject(s), {len(phase)} phase(s)[/]")
 
 
+@app.command()
+def decide(
+    finding_id: int = typer.Argument(..., help="Which finding."),
+    outcome: str = typer.Argument(
+        ..., help="acted | dismissed | undo — whether it was worth acting on."
+    ),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Say whether a finding was worth acting on.
+
+    The input rule precision has been waiting for. A dismissal also keeps the
+    finding off later sweeps, matched on rule and subjects.
+    """
+    if outcome not in {"acted", "dismissed", "undo"}:
+        raise typer.BadParameter("outcome must be 'acted', 'dismissed' or 'undo'")
+    with open_store(db) as store:
+        row = store.finding(finding_id)
+        if row is None:
+            console.print(f"[red]no finding {finding_id}[/]")
+            raise typer.Exit(1)
+        store.set_finding_outcome(finding_id, None if outcome == "undo" else outcome)
+    if outcome == "undo":
+        console.print(f"#{finding_id} is undecided again.")
+    else:
+        console.print(f"#{finding_id} marked [bold]{outcome}[/] — {row['summary']}")
+        if outcome == "dismissed":
+            console.print("[dim]It will stay off later sweeps until you undo it.[/]")
+
+
 @app.command(name="plans")
 def plans_cmd(
     plan_id: int = typer.Argument(None, help="Show one plan's matrix."),

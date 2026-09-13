@@ -541,6 +541,15 @@ class ShoalStore:
         self._write([self._put(row.encode(), "finding", {"resolved_at": now}) for row in retired])
         return len(retired)
 
+    def dismissals(self, project: str | None = None) -> list[Record]:
+        rows = [
+            r
+            for r in self._entities("ent:finding|").values()
+            if r.get("outcome") == "dismissed" and (not project or r.get("project") == project)
+        ]
+        rows.sort(key=lambda r: (str(r.get("outcome_at") or ""), int(r["id"])), reverse=True)
+        return rows
+
     def finding(self, finding_id: int) -> Record | None:
         found = self._entities(f"ent:finding|{_pad(finding_id)}")
         return next(iter(found.values()), None)
@@ -561,7 +570,7 @@ class ShoalStore:
         )
         return rows
 
-    def set_finding_outcome(self, finding_id: int, outcome: str) -> None:
+    def set_finding_outcome(self, finding_id: int, outcome: str | None) -> None:
         self._write(
             [
                 self._put(

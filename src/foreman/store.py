@@ -105,7 +105,8 @@ class Store(Protocol):
 
     def finding(self, finding_id: int) -> Record | None: ...
     def open_findings(self, project: str | None = None) -> list[Record]: ...
-    def set_finding_outcome(self, finding_id: int, outcome: str) -> None: ...
+    def set_finding_outcome(self, finding_id: int, outcome: str | None) -> None: ...
+    def dismissals(self, project: str | None = None) -> list[Record]: ...
     def rule_precision(self) -> list[Record]: ...
     def project_summary(self) -> list[Record]: ...
 
@@ -692,17 +693,21 @@ class SqliteStore:
         return len(recorded)
 
     def retire_rule_findings(self, project: str) -> int:
-        """Drop a project's open rule findings so a sweep can re-derive them.
+        """Close a project's open rule findings so a sweep can re-derive them.
+
+        Resolved, not deleted. This deleted them, and a deleted finding takes
+        its decision with it — `rule_precision` reads this table, so every
+        dismissal was erased by the next sweep and precision could never measure
+        anything at all. The shoal implementation already resolved, so the two
+        stores disagreed about whether a decision survived the night.
 
         Scoped to source='rule' on purpose: agent findings cost money and come
-        from their own run, so a nightly sweep must never delete them. This
-        lives here rather than in the runner because it is the only place a
-        caller was reaching past the interface into a connection — which is
-        exactly the leak that makes a substrate unswappable.
+        from their own run, so a nightly sweep must never touch them.
         """
         cur = self._db.execute(
-            "DELETE FROM findings " "WHERE project = ? AND resolved_at IS NULL AND source = 'rule'",
-            (project,),
+            "UPDATE findings SET resolved_at = ? "
+            "WHERE project = ? AND resolved_at IS NULL AND source = 'rule'",
+            (utcnow(), project),
         )
         self._db.commit()
         return cur.rowcount
@@ -712,13 +717,34 @@ class SqliteStore:
             self._db.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
         )
 
-    def set_finding_outcome(self, finding_id: int, outcome: str) -> None:
-        """Record whether a finding was worth acting on ('acted' | 'dismissed')."""
+    def set_finding_outcome(self, finding_id: int, outcome: str | None) -> None:
+        """Record whether a finding was worth acting on.
+
+        'acted' | 'dismissed', or None to undo. A judgement you cannot take back
+        is a trap rather than a tool, and a dismissal suppresses the finding on
+        every later sweep — which is exactly the kind of thing worth being able
+        to reverse.
+        """
         self._db.execute(
             "UPDATE findings SET outcome = ?, outcome_at = ? WHERE id = ?",
             (outcome, utcnow(), finding_id),
         )
         self._db.commit()
+
+    def dismissals(self, project: str | None = None) -> list[Record]:
+        """Findings the operator said were not worth acting on.
+
+        Read back at sweep time so a dismissal survives re-derivation. Without
+        this, a rule re-derives the same finding every night and dismissing it
+        means dismissing it again tomorrow — which teaches you to stop
+        dismissing things.
+        """
+        sql = "SELECT * FROM findings WHERE outcome = 'dismissed'"
+        params: tuple[str, ...] = ()
+        if project:
+            sql += " AND project = ?"
+            params = (project,)
+        return _many(self._db.execute(sql + " ORDER BY outcome_at DESC, id DESC", params))
 
     def rule_precision(self) -> list[Record]:
         """Per rule: how often it was acted on versus dismissed.

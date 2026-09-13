@@ -212,6 +212,11 @@
   /* The same rule open elsewhere: a problem on six projects is a portfolio
      decision, one on a single project is a chore. The context pack tells
      dispatched agents the same thing. */
+  .decide, .decided { margin-top: 10px; display: flex; gap: 8px; align-items: center;
+    flex-wrap: wrap; font-size: 13px; }
+  .decide-note { color: var(--text-3); font-size: 12px; }
+  .decided { color: var(--text-2); }
+
   .elsewhere { color: var(--text-2); font-size: 11px; letter-spacing: .02em;
     border: 1px solid var(--border-firm); border-radius: 999px; padding: 1px 7px;
     margin-left: 8px; white-space: nowrap; }
@@ -1594,10 +1599,20 @@ function renderFindings() {
   $("findingRows").innerHTML = rows.map((f) => {
     const s = SEV[f.severity] || { glyph: "•", label: f.severity };
     const open = state.open.has(f.id);
+    const decided = f.outcome
+      ? `<div class="decided">Marked <strong>${esc(f.outcome)}</strong>${
+          f.outcome === "dismissed" ? " — it will stay off later sweeps" : ""
+        } <button class="undo" data-id="${f.id}">Undo</button></div>`
+      : `<div class="decide">
+          <button class="decide-acted" data-id="${f.id}">I fixed this</button>
+          <button class="decide-dismissed" data-id="${f.id}">Not worth it</button>
+          <span class="decide-note">Either answer teaches the rule whether it earns its keep.</span>
+        </div>`;
     const detail = open ? `<tr class="detail"><td colspan="4"><div class="detail-inner">
         ${f.detail ? `<p>${esc(f.detail)}</p>` : ""}
         <div class="rule-tag">${esc(f.rule)}</div>
         <ul class="subjects">${f.subjects.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>
+        ${decided}
       </div></td></tr>` : "";
     return `<tr class="row" data-id="${f.id}">
         <td><span class="sev sev-${esc(f.severity)}"><span class="glyph">${s.glyph}</span><span class="txt">${esc(s.label)}</span></span></td>
@@ -1609,6 +1624,26 @@ function renderFindings() {
         <td class="num">${f.subjects.length}</td>
       </tr>${detail}`;
   }).join("");
+
+  // A decision is the input the whole precision machinery waits on: until one
+  // exists every rule reads "unmeasured", which is honest and useless.
+  const decide = (id, outcome) => fetch(`/api/findings/${id}/decide`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ outcome }),
+  }).then((r) => { if (!r.ok) throw new Error(r.status); return load(); })
+    .catch((err) => alert(`Could not record that: ${err.message}`));
+
+  document.querySelectorAll(".decide-acted").forEach((b) =>
+    b.addEventListener("click", (e) => { e.stopPropagation(); decide(b.dataset.id, "acted"); }));
+  document.querySelectorAll(".decide-dismissed").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!confirm("Dismiss this finding? It will stay off later sweeps until you undo it.")) return;
+      decide(b.dataset.id, "dismissed");
+    }));
+  document.querySelectorAll(".undo").forEach((b) =>
+    b.addEventListener("click", (e) => { e.stopPropagation(); decide(b.dataset.id, ""); }));
 
   document.querySelectorAll("tr.row").forEach((el) =>
     el.addEventListener("click", () => {

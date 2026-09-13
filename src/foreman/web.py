@@ -415,6 +415,33 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             raise HTTPException(503, str(exc)) from None
         return {"name": name, "removed": removed, "set": False}
 
+    @app.post("/api/findings/{finding_id}/decide")
+    def decide_finding(finding_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Say whether a finding was worth acting on.
+
+        The input the whole precision machinery has been waiting for. Every
+        finding on the dashboard reads "unmeasured" because nothing could decide
+        one — the store has recorded outcomes since the beginning and nothing
+        ever offered a way to set one.
+
+        A dismissal also suppresses the finding on later sweeps, matched on rule
+        *and* subjects. Without that a rule re-derives it every night and
+        dismissing means dismissing again tomorrow.
+        """
+        outcome = str(payload.get("outcome") or "").strip()
+        if outcome not in {"acted", "dismissed", ""}:
+            raise HTTPException(400, "outcome must be 'acted', 'dismissed' or empty to undo")
+        s = store()
+        try:
+            if s.finding(finding_id) is None:
+                raise HTTPException(404, f"no finding {finding_id}")
+            # An empty outcome undoes the decision: a dismissal is a judgement,
+            # and a judgement you cannot take back is a trap rather than a tool.
+            s.set_finding_outcome(finding_id, outcome or None)
+            return dict(s.finding(finding_id) or {})
+        finally:
+            s.close()
+
     @app.get("/api/plans")
     def plans() -> list[dict[str, Any]]:
         """Every plan, with where its subjects stand.
