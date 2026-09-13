@@ -64,7 +64,18 @@ from typing import Any
 
 import grpc
 
-from .graph import EDGE_CF, ID_WIDTH, SEP, SUPERSEDES, edges_for, kind_of, memory_edges, node
+from .graph import (
+    EDGE_CF,
+    HAS_PHASE,
+    ID_WIDTH,
+    SEP,
+    SUPERSEDES,
+    edges_for,
+    kind_of,
+    memory_edges,
+    node,
+    plan_edges,
+)
 from .models import Event, Finding, Observation, utcnow
 from .shoalpb import embed_pb2 as pb
 from .shoalpb import embed_pb2_grpc as rpc
@@ -120,6 +131,8 @@ FIELDS: dict[str, tuple[str, ...]] = {
         "verified_at",
         "verification_ref",
     ),
+    "plan": ("goal", "status", "created_at", "subjects"),
+    "phase": ("plan_id", "position", "name", "gate", "params"),
     "conv": ("title", "started_at"),
     "memory": ("statement", "created_at", "retired_at", "retired_because"),
     "msg": ("conversation_id", "role", "content", "created_at", "refs", "cost_usd"),
@@ -864,6 +877,76 @@ class ShoalStore:
         )
         if superseded_by is not None:
             self.relate([(node("memory", superseded_by), SUPERSEDES, node("memory", memory_id))])
+
+    # --- plans ---------------------------------------------------------------
+
+    def create_plan(self, goal: str, subjects: Sequence[str]) -> int:
+        plan_id = self._next_id("plan")
+        self._write(
+            [
+                self._put(
+                    _rid("plan", _pad(plan_id)),
+                    "plan",
+                    {
+                        "goal": goal,
+                        "status": "active",
+                        "created_at": utcnow(),
+                        "subjects": json.dumps(list(subjects)),
+                    },
+                )
+            ]
+        )
+        self.relate(plan_edges(plan_id, subjects))
+        return plan_id
+
+    def add_phase(
+        self, plan_id: int, position: int, name: str, gate: str, params: dict[str, str]
+    ) -> int:
+        phase_id = self._next_id("phase")
+        self._write(
+            [
+                self._put(
+                    _rid("phase", _pad(phase_id)),
+                    "phase",
+                    {
+                        "plan_id": plan_id,
+                        "position": position,
+                        "name": name,
+                        "gate": gate,
+                        "params": json.dumps(params or {}, sort_keys=True),
+                    },
+                )
+            ]
+        )
+        self.relate([(node("plan", plan_id), HAS_PHASE, node("phase", phase_id))])
+        return phase_id
+
+    def plans(self, status: str | None = None) -> list[Record]:
+        rows = [
+            r
+            for r in self._entities("ent:plan|").values()
+            if not status or r.get("status") == status
+        ]
+        # id last, always: created_at is second-resolution, so plans made in the
+        # same second tie and their order is otherwise whatever comes back.
+        rows.sort(key=lambda r: (str(r.get("created_at") or ""), int(r["id"])), reverse=True)
+        return rows
+
+    def plan(self, plan_id: int) -> Record | None:
+        rows = self._entities(f"ent:plan|{_pad(plan_id)}")
+        return next(iter(rows.values()), None)
+
+    def phases(self, plan_id: int) -> list[Record]:
+        rows = [
+            r
+            for r in self._entities("ent:phase|").values()
+            if str(r.get("plan_id")) == str(plan_id)
+        ]
+        rows.sort(key=lambda r: (int(r.get("position") or 0), int(r["id"])))
+        return rows
+
+    def set_plan_status(self, plan_id: int, status: str) -> None:
+        self._write([self._put(_rid("plan", _pad(plan_id)), "plan", {"status": status})])
 
     # --- graph -------------------------------------------------------------
 

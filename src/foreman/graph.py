@@ -45,6 +45,11 @@ FOUND_BY = "found_by"
 # walking to some finding and back would depend on which finding you picked.
 FROM_SKILL = "from_skill"
 CONCERNS = "concerns"
+# A plan and what it is about. `covers` is the edge that makes "what is planned
+# for this domain" a walk rather than a scan of every plan's subject list.
+HAS_PHASE = "has_phase"
+COVERS = "covers"
+PLANNED_IN = "planned_in"
 # A skill's track record, as relationships rather than a tally kept beside the
 # graph. Dispatching a skill costs money, so the run it produced is the unit
 # that carries the evidence: what it cost, where it was aimed, which backend
@@ -226,3 +231,20 @@ def relink(store: Any) -> int:
             int(run_id) if run_id is not None else None,
         )
     return store.relate(edges)
+
+
+def plan_edges(plan_id: int, subjects) -> list[Edge]:
+    """A plan and the subjects it is about, related both ways.
+
+    The reverse edge exists for the same reason `seen_on` does: walking out from
+    a plan says which domains it covers, and the question actually asked is the
+    other one — "what is being built on this domain" — which a forward-only walk
+    cannot answer without reading every plan.
+    """
+    plan_node = node("plan", plan_id)
+    edges: list[Edge] = []
+    for subject in subjects:
+        target = subject if "|" in str(subject) else node("subject", subject)
+        edges.append((plan_node, COVERS, target))
+        edges.append((target, PLANNED_IN, plan_node))
+    return edges

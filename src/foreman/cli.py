@@ -26,6 +26,7 @@ from .history import ingest_all
 from .memory import about_nodes, describe, label
 from .migrate import migrate as copy_store
 from .models import Severity
+from .plans import GATES, plan_progress
 from .precision import label as precision_label
 from .precision import rank, rule_scores
 from .runner import (
@@ -677,6 +678,90 @@ def timeline(
             _clip(row["actor"] or "-", 16),
             _clip(row["title"] or "", 70),
         )
+    console.print(table)
+
+
+@app.command(name="plan-new")
+def plan_new(
+    goal: str = typer.Argument(..., help="What is being built."),
+    subject: list[str] = typer.Option(None, "--subject", "-s", help="Repeatable."),
+    phase: list[str] = typer.Option(
+        None, "--phase", "-p", help="name:gate[:k=v,k=v], repeatable and in order."
+    ),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Start a plan: what is being built, on what, in what order."""
+    if not phase:
+        raise typer.BadParameter("a plan with no phases has nothing to gate")
+    with open_store(db) as store:
+        plan_id = store.create_plan(goal, subject or [])
+        for position, spec in enumerate(phase, start=1):
+            name, _, rest = spec.partition(":")
+            gate, _, raw = rest.partition(":")
+            if gate not in GATES:
+                raise typer.BadParameter(f"unknown gate {gate!r} (have: {', '.join(GATES)})")
+            params = dict(pair.split("=", 1) for pair in raw.split(",") if "=" in pair)
+            store.add_phase(plan_id, position, name, gate, params)
+    console.print(f"[bold]plan {plan_id}[/] — {goal}")
+    console.print(f"[dim]{len(subject or [])} subject(s), {len(phase)} phase(s)[/]")
+
+
+@app.command(name="plans")
+def plans_cmd(
+    plan_id: int = typer.Argument(None, help="Show one plan's matrix."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """What is being built, and how far along each subject is."""
+    with open_store(db) as store:
+        if plan_id is None:
+            rows = store.plans()
+            if not rows:
+                console.print("[dim]No plans. Start one with `foreman plan-new`.[/]")
+                return
+            table = Table(box=None, pad_edge=False)
+            for column in ("id", "status", "subjects", "goal"):
+                table.add_column(column)
+            for row in rows:
+                table.add_row(
+                    str(row["id"]),
+                    str(row["status"]),
+                    str(len(json.loads(row["subjects"] or "[]"))),
+                    _clip(str(row["goal"]), 60),
+                )
+            console.print(table)
+            return
+
+        detail = plan_progress(store, plan_id)
+
+    if not detail:
+        console.print(f"[red]no plan {plan_id}[/]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]{detail['goal']}[/]  [dim]({detail['status']})[/]\n")
+    for line in detail["summary"]:
+        counts = " · ".join(
+            f"{line[state]} {state}"
+            for state in ("passed", "pending", "blocked", "unknown")
+            if line[state]
+        )
+        console.print(f"  [bold]{line['position']}. {line['phase']}[/]  {counts}")
+        console.print(f"     [dim]{line['gate_summary']}[/]")
+
+    table = Table(box=None, pad_edge=False, title=None)
+    table.add_column("subject")
+    for phase_detail in detail["phases"]:
+        table.add_column(phase_detail["name"])
+    # A word per state, never a colour alone: this is the view somebody scans to
+    # answer "where are we", and it has to survive a monochrome terminal.
+    mark = {
+        "passed": "[green]done[/]",
+        "pending": "[yellow]todo[/]",
+        "blocked": "[dim]—[/]",
+        "unknown": "[dim]?[/]",
+    }
+    for subject, standings in sorted(detail["subjects"].items()):
+        table.add_row(subject.removeprefix("subject:"), *(mark[s] for s in standings))
+    console.print()
     console.print(table)
 
 

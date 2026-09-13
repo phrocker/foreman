@@ -25,10 +25,12 @@ from foreman.graph import (
     ABOUT,
     AUDITED,
     CONCERNS,
+    COVERS,
     FOUND_BY,
     FROM_RULE,
     FROM_SKILL,
     HAS_FINDING,
+    PLANNED_IN,
     RAN,
     RAN_VIA,
     REMEMBERS,
@@ -862,3 +864,51 @@ def test_an_empty_observation_value_is_not_the_same_as_a_missing_one(store):
     values = {c["key"]: c["value"] for c in store.latest_observations("p")}
     assert values["empty"] == ""
     assert values["absent"] is None
+
+
+# --- plans ------------------------------------------------------------------
+
+
+def test_a_plan_remembers_its_goal_and_its_subjects(store):
+    plan_id = store.create_plan("stand up lead gen", ["domain:a.test", "domain:b.test"])
+    row = store.plan(plan_id)
+    assert row["goal"] == "stand up lead gen"
+    assert row["status"] == "active"
+    assert json.loads(row["subjects"]) == ["domain:a.test", "domain:b.test"]
+
+
+def test_a_plan_is_related_to_what_it_is_about_in_both_directions(store):
+    """ "What is being built on this domain" is the question actually asked, and
+    walking out from the plan cannot answer it without reading every plan."""
+    plan_id = store.create_plan("stand up lead gen", ["domain:a.test"])
+    assert store.neighbors([node("plan", plan_id)], [COVERS]) == ["subject|domain:a.test"]
+    assert store.neighbors(["subject|domain:a.test"], [PLANNED_IN]) == [node("plan", plan_id)]
+
+
+def test_phases_come_back_in_the_order_they_happen(store):
+    plan_id = store.create_plan("g", [])
+    store.add_phase(plan_id, 2, "Serve", "serves", {})
+    store.add_phase(plan_id, 1, "DNS", "dns_resolves", {"nameserver_suffix": "x.test"})
+    assert [p["name"] for p in store.phases(plan_id)] == ["DNS", "Serve"]
+    assert json.loads(store.phases(plan_id)[0]["params"]) == {"nameserver_suffix": "x.test"}
+
+
+def test_phases_do_not_leak_between_plans(store):
+    first = store.create_plan("a", [])
+    second = store.create_plan("b", [])
+    store.add_phase(first, 1, "DNS", "dns_resolves", {})
+    assert store.phases(second) == []
+
+
+def test_a_plan_can_be_finished_without_being_deleted(store):
+    """What was built and why stays worth having after it is built."""
+    plan_id = store.create_plan("g", [])
+    store.set_plan_status(plan_id, "done")
+    assert store.plan(plan_id)["status"] == "done"
+    assert [p["id"] for p in store.plans()] == [plan_id]
+    assert store.plans(status="active") == []
+
+
+def test_plans_made_in_the_same_second_still_order_deterministically(store):
+    ids = [store.create_plan(f"g{n}", []) for n in range(4)]
+    assert [p["id"] for p in store.plans()] == list(reversed(ids))

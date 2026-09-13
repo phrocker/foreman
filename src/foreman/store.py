@@ -21,7 +21,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .graph import SUPERSEDES, edges_for, memory_edges, node
+from .graph import HAS_PHASE, SUPERSEDES, edges_for, memory_edges, node, plan_edges
 from .models import Event, Finding, Observation, utcnow
 
 DB_NAME = "foreman.db"
@@ -140,6 +140,16 @@ class Store(Protocol):
     def retire_memory(
         self, memory_id: int, because: str, superseded_by: int | None = None
     ) -> None: ...
+
+    # --- plans ---
+    def create_plan(self, goal: str, subjects: Sequence[str]) -> int: ...
+    def add_phase(
+        self, plan_id: int, position: int, name: str, gate: str, params: dict[str, str]
+    ) -> int: ...
+    def plans(self, status: str | None = None) -> list[Record]: ...
+    def plan(self, plan_id: int) -> Record | None: ...
+    def phases(self, plan_id: int) -> list[Record]: ...
+    def set_plan_status(self, plan_id: int, status: str) -> None: ...
 
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
@@ -338,6 +348,31 @@ CREATE TABLE IF NOT EXISTS memories (
     retired_because TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_open ON memories (retired_at, created_at);
+
+-- What is being built, as opposed to what is wrong with what exists. A plan is
+-- the inverse of a finding and resolves the same way: through actions the
+-- operator approves. Phases are ordered, and each declares a gate — a query over
+-- observations, never a flag somebody sets, because a plan recording what
+-- somebody believed is the thing this replaces.
+CREATE TABLE IF NOT EXISTS plans (
+    id         INTEGER PRIMARY KEY,
+    goal       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    -- Also in the graph as edges. Kept here because display order matters and a
+    -- set of edges has none.
+    subjects   TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS phases (
+    id       INTEGER PRIMARY KEY,
+    plan_id  INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    name     TEXT NOT NULL,
+    gate     TEXT NOT NULL,
+    params   TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_phases_plan ON phases (plan_id, position);
 
 -- Relationships between entities, written when the facts are so they can be
 -- walked rather than rediscovered. Node ids are "<kind>|<key>"; the shoal
@@ -971,6 +1006,52 @@ class SqliteStore:
         self._db.commit()
         if superseded_by is not None:
             self.relate([(node("memory", superseded_by), SUPERSEDES, node("memory", memory_id))])
+
+    # --- plans ------------------------------------------------------------
+
+    def create_plan(self, goal: str, subjects: Sequence[str]) -> int:
+        cursor = self._db.execute(
+            "INSERT INTO plans (goal, status, created_at, subjects) VALUES (?, 'active', ?, ?)",
+            (goal, utcnow(), json.dumps(list(subjects))),
+        )
+        self._db.commit()
+        plan_id = int(cursor.lastrowid)
+        self.relate(plan_edges(plan_id, subjects))
+        return plan_id
+
+    def add_phase(
+        self, plan_id: int, position: int, name: str, gate: str, params: dict[str, str]
+    ) -> int:
+        cursor = self._db.execute(
+            "INSERT INTO phases (plan_id, position, name, gate, params) VALUES (?, ?, ?, ?, ?)",
+            (plan_id, position, name, gate, json.dumps(params or {}, sort_keys=True)),
+        )
+        self._db.commit()
+        phase_id = int(cursor.lastrowid)
+        self.relate([(node("plan", plan_id), HAS_PHASE, node("phase", phase_id))])
+        return phase_id
+
+    def plans(self, status: str | None = None) -> list[Record]:
+        sql = "SELECT * FROM plans"
+        params: tuple[str, ...] = ()
+        if status:
+            sql += " WHERE status = ?"
+            params = (status,)
+        return _many(self._db.execute(sql + " ORDER BY created_at DESC, id DESC", params))
+
+    def plan(self, plan_id: int) -> Record | None:
+        return _one(self._db.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone())
+
+    def phases(self, plan_id: int) -> list[Record]:
+        return _many(
+            self._db.execute(
+                "SELECT * FROM phases WHERE plan_id = ? ORDER BY position, id", (plan_id,)
+            )
+        )
+
+    def set_plan_status(self, plan_id: int, status: str) -> None:
+        self._db.execute("UPDATE plans SET status = ? WHERE id = ?", (status, plan_id))
+        self._db.commit()
 
     # --- graph ------------------------------------------------------------
 

@@ -27,6 +27,7 @@ from .diff import project_drift
 from .graph import MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import describe
 from .models import utcnow
+from .plans import plan_progress
 from .precision import label as precision_label
 from .precision import rank, rule_scores
 from .runner import (
@@ -408,6 +409,20 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         except secrets.SecretsUnavailable as exc:
             raise HTTPException(503, str(exc)) from None
         return {"name": name, "removed": removed, "set": False}
+
+    @app.get("/api/plans")
+    def plans() -> list[dict[str, Any]]:
+        """Every plan, with where its subjects stand.
+
+        The progress is computed rather than stored, for the reason the whole
+        feature exists: a phase is done when a collector says so, and a stored
+        percentage would be a record of what somebody believed at the time.
+        """
+        s = store()
+        try:
+            return [plan_progress(s, int(row["id"])) for row in s.plans()]
+        finally:
+            s.close()
 
     @app.get("/api/connectors")
     def connectors() -> list[dict[str, Any]]:
