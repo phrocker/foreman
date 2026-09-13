@@ -104,8 +104,13 @@ def _cleared_errors(
             value=None,
         )
         for row in store.latest_observations(project_id)
-        if str(row["key"]).endswith(ERROR_SUFFIX)
-        and row["value"]
+        if str(row["key"]).endswith(ERROR_SUFFIX) and row["value"]
+        # Only its own. `pulls_error` belongs to the activity collector, and a
+        # dependabot run knows nothing about it — in shoal the collector is the
+        # column family and therefore part of the cell's identity, so retracting
+        # somebody else's would write a second cell beside theirs rather than
+        # replacing anything.
+        and row.get("collector") == collector
         and row["subject"] in subjects
         and (row["subject"], row["key"]) not in said
     ]

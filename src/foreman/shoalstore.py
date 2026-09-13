@@ -463,6 +463,10 @@ class ShoalStore:
             {
                 "subject": cell.row.decode().split("|", 2)[2],
                 "key": cell.column_qualifier.decode(),
+                # The column family *is* the collector, and it is part of the
+                # cell's identity — so a retraction written under a different
+                # one lands beside the error instead of replacing it.
+                "collector": cell.column_family.decode(),
                 "value": None if cell.value == NULL else cell.value.decode(),
             }
             for cell in self._cells(prefix, as_of)

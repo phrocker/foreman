@@ -634,7 +634,7 @@ class SqliteStore:
         and a rule should judge that rather than treat the cell as absent.
         """
         sql = """
-            SELECT subject, key, value FROM observations o
+            SELECT subject, key, value, collector FROM observations o
             WHERE project = ? AND observed_at = (
                 SELECT MAX(observed_at) FROM observations i
                 WHERE i.project = o.project AND i.subject = o.subject AND i.key = o.key

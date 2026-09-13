@@ -947,3 +947,35 @@ def test_an_answer_resting_on_nothing_relates_to_nothing(store):
     conversation_id = store.start_conversation("q")
     store.add_message(conversation_id, "user", "hello")
     assert store.neighbors([node("conv", conversation_id)], [GROUNDED_IN]) == []
+
+
+def test_an_observation_says_which_collector_produced_it(store):
+    """In shoal the collector is the column family and therefore part of the
+    cell's identity. A caller that cannot see it will write beside a cell
+    believing it is replacing one."""
+    run_id = store.start_run("p", "crawl")
+    store.record(
+        run_id,
+        [Observation(project="p", collector="crawl", subject="s", key="k", value="v")],
+    )
+    store.finish_run(run_id, ok=True)
+    (row,) = store.latest_observations("p")
+    assert row["collector"] == "crawl"
+
+
+def test_two_collectors_can_hold_the_same_key_without_colliding(store):
+    """`pulls_error` and `dependabot_error` live on one subject and belong to
+    different collectors; so can any other pair."""
+    run_id = store.start_run("p", "a")
+    store.record(
+        run_id, [Observation(project="p", collector="a", subject="s", key="note", value="1")]
+    )
+    store.finish_run(run_id, ok=True)
+    run_id = store.start_run("p", "b")
+    store.record(
+        run_id, [Observation(project="p", collector="b", subject="s", key="note", value="2")]
+    )
+    store.finish_run(run_id, ok=True)
+
+    by_collector = {r["collector"]: r["value"] for r in store.latest_observations("p")}
+    assert by_collector == {"a": "1", "b": "2"}

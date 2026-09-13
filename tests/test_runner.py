@@ -116,3 +116,19 @@ async def test_a_subject_this_run_did_not_touch_keeps_its_error(tmp_path):
             await collect_project(_project(), ["flaky"], store)
             rows = {(c["subject"], c["key"]): c["value"] for c in store.latest_observations("p")}
             assert rows[("o/one", "dependabot_error")] == "alerts are off"
+
+
+@pytest.mark.asyncio
+async def test_a_collector_does_not_retract_another_collectors_error(tmp_path):
+    """`pulls_error` belongs to the activity collector; a dependabot run knows
+    nothing about it. In shoal the collector is the column family and therefore
+    part of the cell's identity, so retracting somebody else's would write a
+    second cell beside theirs rather than replacing anything."""
+    activity = _Collector("activity", [[("o/r", "pulls_error", "alerts are off")]])
+    alerts = _Collector("alerts", [[("o/r", "open_alerts", "0")]])
+    with SqliteStore(tmp_path / "t.db") as store:
+        with mock.patch.dict("foreman.runner.COLLECTORS", {"activity": activity, "alerts": alerts}):
+            await collect_project(_project(), ["activity"], store)
+            await collect_project(_project(), ["alerts"], store)
+            rows = {(c["collector"], c["key"]): c["value"] for c in store.latest_observations("p")}
+            assert rows[("activity", "pulls_error")] == "alerts are off"
