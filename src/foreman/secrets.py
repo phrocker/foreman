@@ -66,16 +66,14 @@ class Credential:
 # login expires and takes the monitoring down with it.
 CREDENTIALS: tuple[Credential, ...] = (
     Credential(
-        name="godaddy_api_key",
-        label="GoDaddy API key",
+        name="godaddy_pat",
+        label="GoDaddy personal access token",
         provider="godaddy",
-        help="No CLI exists, so domains, DNS and expiry are unreadable without this.",
-    ),
-    Credential(
-        name="godaddy_api_secret",
-        label="GoDaddy API secret",
-        provider="godaddy",
-        help="Issued alongside the key. Both are needed.",
+        help="Scope it to domains.domain:read. No CLI exists, so domains, "
+        "nameservers and expiry are unreadable without it. Grant a write scope "
+        "only when you want changes proposed — Foreman reads with it either way, "
+        "and a change is an action you approve. PATs expire, and Foreman reports "
+        "one that has rather than going quiet.",
     ),
     Credential(
         name="github_token",

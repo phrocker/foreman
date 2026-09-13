@@ -30,6 +30,7 @@ from foreman.connectors import (
 )
 from foreman.connectors.claudecode import (
     ClaudeCodeConnector,
+    _complete_items,
     _cost,
     _envelope,
     _partial_string,
@@ -390,3 +391,52 @@ def test_the_chat_task_names_the_field_that_carries_the_answer():
     from foreman.chat import PROMPT  # noqa: F401  - imported for the module's side of the contract
 
     assert Task(instructions="x", schema=Reply, stream_field="reply").stream_field == "reply"
+
+
+# --- items arriving before the answer does ----------------------------------
+
+
+def test_no_items_until_one_is_finished():
+    """A half-written finding is not a finding. Emitting it would put something
+    on the record that the next frame contradicts."""
+    assert _complete_items('{"findings": [{"rule": "thi', "findings") == []
+    assert _complete_items('{"findings": [', "findings") == []
+    assert _complete_items('{"other": 1}', "findings") == []
+
+
+def test_each_finished_item_comes_out_whole():
+    document = '{"findings": [{"rule": "a", "severity": "high"}, {"rule": "b"'
+    assert _complete_items(document, "findings") == [{"rule": "a", "severity": "high"}]
+    assert len(_complete_items(document + "}]}", "findings")) == 2
+
+
+def test_braces_and_quotes_inside_a_detail_do_not_end_it_early():
+    """A finding's detail is prose written by a model, and prose contains
+    punctuation that looks structural."""
+    document = r'{"findings": [{"detail": "a } brace and a \" quote"}]'
+    assert _complete_items(document, "findings") == [{"detail": 'a } brace and a " quote'}]
+
+
+@pytest.mark.asyncio
+async def test_findings_reach_the_caller_as_they_close(tmp_path):
+    seen: list[dict] = []
+
+    class Dribbles(Fake):
+        async def run(self, task, on_text=None, on_item=None):
+            document = ""
+            handed = 0
+            for piece in (
+                '{"findings": [{"rule": "a", "severity": "high", "summary": "x"}',
+                ', {"rule": "b", "severity": "low", "summary": "y"}',
+                "]}",
+            ):
+                document += piece
+                done = _complete_items(document, task.stream_items or "findings")
+                for item in done[handed:]:
+                    on_item(item)
+                handed = len(done)
+            return Result(value=Reply(reply="done"), cost_usd=0.0, connector="d")
+
+    task = Task(instructions="x", schema=Reply, stream_items="findings")
+    await Dribbles().run(task, on_item=seen.append)
+    assert [i["rule"] for i in seen] == ["a", "b"]

@@ -43,13 +43,13 @@ def vault(monkeypatch):
 
 
 def test_a_credential_round_trips(vault):
-    secrets.set_secret("godaddy_api_key", SECRET)
-    assert secrets.get_secret("godaddy_api_key") == SECRET
+    secrets.set_secret("godaddy_pat", SECRET)
+    assert secrets.get_secret("godaddy_pat") == SECRET
 
 
 def test_status_says_whether_it_is_set_without_saying_what_it_is(vault):
-    secrets.set_secret("godaddy_api_key", SECRET)
-    status = secrets.status("godaddy_api_key")
+    secrets.set_secret("godaddy_pat", SECRET)
+    status = secrets.status("godaddy_pat")
     assert status.set is True
     assert status.hint == "WXYZ"
     assert SECRET not in str(status)
@@ -108,24 +108,24 @@ def client(vault, tmp_path):
 
 
 def test_the_settings_endpoint_never_returns_a_value(client, vault):
-    secrets.set_secret("godaddy_api_key", SECRET)
+    secrets.set_secret("godaddy_pat", SECRET)
     body = client.get("/api/settings").json()
     assert SECRET not in str(body)
-    entry = next(c for c in body["credentials"] if c["name"] == "godaddy_api_key")
+    entry = next(c for c in body["credentials"] if c["name"] == "godaddy_pat")
     assert entry["set"] is True and entry["hint"] == "WXYZ"
 
 
 def test_saving_a_credential_answers_with_its_status_not_its_value(client, vault):
-    body = client.put("/api/settings/godaddy_api_key", json={"value": SECRET}).json()
-    assert body == {"name": "godaddy_api_key", "set": True, "hint": "WXYZ"}
-    assert secrets.get_secret("godaddy_api_key") == SECRET
+    body = client.put("/api/settings/godaddy_pat", json={"value": SECRET}).json()
+    assert body == {"name": "godaddy_pat", "set": True, "hint": "WXYZ"}
+    assert secrets.get_secret("godaddy_pat") == SECRET
 
 
 def test_there_is_no_endpoint_that_reads_a_credential_back(client, vault):
     """The whole design rests on this. A GET that returned a value would put it
     in a browser history and in every proxy between here and there."""
-    secrets.set_secret("godaddy_api_key", SECRET)
-    assert client.get("/api/settings/godaddy_api_key").status_code == 405
+    secrets.set_secret("godaddy_pat", SECRET)
+    assert client.get("/api/settings/godaddy_pat").status_code == 405
 
 
 def test_an_unknown_credential_is_refused(client, vault):
