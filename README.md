@@ -80,6 +80,17 @@ asked is "what does a crawler see".
 claims to have, which makes it blind to unmatched URLs answering 200 with the
 homepage shell. Foreman asks for URLs that should not exist and compares.
 
+**A gate is a query over observations.** Standing something up is a sequence of
+phases, and a phase is done when a collector says so rather than when somebody
+ticks it. `siteprobe` is the one for *is anything serving here*: per domain, does
+it resolve, what do http and https answer at the apex, is the certificate valid
+and actually for this name, and is there a body or a holding page. It reads its
+subject list from the cells the registrar collector already wrote — 114 live
+domains probed in fifteen seconds — so nothing pays twice for the same answer.
+Telling a parked domain from a live one is most of the work: both answer 200, and
+what separates them is a redirect ending at a broker, a body identical to the
+sixty-five others serving the same template, or no text at all.
+
 ## Deliberately not built
 
 - **No worker fleet, no queue, no provider router.** Collection across 40

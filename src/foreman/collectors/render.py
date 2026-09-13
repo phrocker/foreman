@@ -17,6 +17,7 @@ import httpx
 
 from ..config import Project
 from ..models import Observation
+from .base import Facts
 from .discovery import discover_urls
 
 # Rendering costs seconds per page against milliseconds for a fetch, so only a
@@ -58,7 +59,7 @@ class RenderCollector:
     name = "render"
     surface = "web"
 
-    async def collect(self, project: Project) -> list[Observation]:
+    async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         # A project without a web surface is still a project; this collector
         # simply has nothing to look at.
         if project.web is None:

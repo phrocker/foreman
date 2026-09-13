@@ -21,6 +21,7 @@ from typing import Any
 
 from ..config import Project
 from ..models import Observation
+from .base import Facts
 
 TIMEOUT_S = 60
 # Enough history to mean something without paging forever. A repository that
@@ -195,7 +196,7 @@ class DependabotCollector:
     name = "dependabot"
     surface = "github"
 
-    async def collect(self, project: Project) -> list[Observation]:
+    async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         if project.github is None:
             return []
         slug = project.github.slug
@@ -274,7 +275,7 @@ class GitHubActivityCollector:
     name = "github_activity"
     surface = "github"
 
-    async def collect(self, project: Project) -> list[Observation]:
+    async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         if project.github is None:
             return []
         slug = project.github.slug

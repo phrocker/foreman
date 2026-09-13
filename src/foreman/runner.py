@@ -17,6 +17,20 @@ from .store import Store
 Log = Callable[[str], None]
 
 
+def _facts(store: Store, project: str) -> dict[str, dict[str, str | None]]:
+    """Every cell already known about this project, in the shape rules see.
+
+    Handed to each collector so one can be built on another's subjects. The
+    registrar knows which domains exist and a second collector probes them; that
+    list should be read from the store rather than bought a second time from the
+    API that sold it.
+    """
+    facts: dict[str, dict[str, str | None]] = {}
+    for row in store.latest_observations(project):
+        facts.setdefault(row["subject"], {})[row["key"]] = row["value"]
+    return facts
+
+
 async def collect_project(
     project: Project, collectors: Sequence[str], store: Store, log: Log = lambda _: None
 ) -> int:
@@ -36,7 +50,9 @@ async def collect_project(
             continue
         run_id = store.start_run(project.id, name)
         try:
-            observations = await collector.collect(project)
+            # Read fresh for each collector, so one that builds on another's
+            # subjects sees this sweep's values rather than last night's.
+            observations = await collector.collect(project, _facts(store, project.id))
         except Exception as exc:  # noqa: BLE001 — one site must not end the sweep
             store.finish_run(run_id, ok=False, error=f"{type(exc).__name__}: {exc}")
             log(f"{project.id}/{name} failed: {exc}")

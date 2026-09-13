@@ -16,6 +16,7 @@ from .gcloud import GcloudCollector
 from .github import DependabotCollector, GitHubActivityCollector
 from .godaddy import GoDaddyCollector
 from .render import RenderCollector
+from .siteprobe import SiteProbeCollector
 from .tls import TlsCollector
 
 COLLECTORS = {
@@ -28,6 +29,7 @@ COLLECTORS = {
         GitHubActivityCollector(),
         GcloudCollector(),
         GoDaddyCollector(),
+        SiteProbeCollector(),
     )
 }
 
@@ -44,5 +46,6 @@ __all__ = [
     "GoDaddyCollector",
     "GitHubActivityCollector",
     "RenderCollector",
+    "SiteProbeCollector",
     "TlsCollector",
 ]

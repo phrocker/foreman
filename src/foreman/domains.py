@@ -99,9 +99,11 @@ def _registry() -> dict[str, Domain]:
         ),
         Domain(
             name="domains",
-            summary="Domain registration, renewal and transfer exposure",
+            summary="Domain registration, renewal and whether anything serves",
             surfaces=("registrar",),
-            collectors=("godaddy",),
+            # Order matters: the probe reads the domain list the registrar
+            # collector recorded rather than asking the registrar again.
+            collectors=("godaddy", "siteprobe"),
             evaluate=domain_rules.evaluate,
             ops=(SetDnsRecord(),),
         ),

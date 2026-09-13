@@ -11,6 +11,7 @@ import httpx
 
 from ..config import Project
 from ..models import Observation
+from .base import Facts
 from .discovery import discover_urls
 
 # Only <head> is needed, and some pages are megabytes. Cap the read.
@@ -50,7 +51,7 @@ def _meta(head: str, name: str) -> str | None:
     return htmllib.unescape(content.group(1)).strip() if content else None
 
 
-def _text_length(html: str) -> int:
+def text_length(html: str) -> int:
     """Rough count of the human-readable text the server actually sent.
 
     Compared against the rendered DOM's text, this is the measure that says how
@@ -61,7 +62,7 @@ def _text_length(html: str) -> int:
     return len(" ".join(htmllib.unescape(stripped).split()))
 
 
-def _title(head: str) -> str | None:
+def page_title(head: str) -> str | None:
     m = _TITLE_RE.search(head)
     return htmllib.unescape(m.group(1)).strip() if m else None
 
@@ -78,7 +79,7 @@ class CrawlCollector:
     name = "crawl"
     surface = "web"
 
-    async def collect(self, project: Project) -> list[Observation]:
+    async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         # A project without a web surface is still a project; this collector
         # simply has nothing to look at.
         if project.web is None:
@@ -166,7 +167,7 @@ class CrawlCollector:
 
         try:
             home = await client.get(f"{project.web.url}/", follow_redirects=True)
-            home_title = _title(home.text[:HEAD_BYTES])
+            home_title = page_title(home.text[:HEAD_BYTES])
         except httpx.HTTPError:
             home_title = None
 
@@ -183,7 +184,7 @@ class CrawlCollector:
                 # Serving *the homepage* on a nonexistent path is the specific
                 # failure. A real custom 404 page also answers 200 sometimes,
                 # but it does not carry the homepage's title.
-                if home_title and _title(r.text[:HEAD_BYTES]) == home_title:
+                if home_title and page_title(r.text[:HEAD_BYTES]) == home_title:
                     shells += 1
         out.append(ob("probe_paths_tried", str(len(PROBE_PATHS))))
         out.append(ob("probe_served_200", str(served)))
@@ -223,8 +224,8 @@ class CrawlCollector:
 
             body = r.text
             head = body[:HEAD_BYTES]
-            out.append(ob("served_text_chars", str(_text_length(body))))
-            out.append(ob("title", _title(head)))
+            out.append(ob("served_text_chars", str(text_length(body))))
+            out.append(ob("title", page_title(head)))
             out.append(ob("meta_description", _meta(head, "description")))
             out.append(ob("meta_robots", _meta(head, "robots")))
             out.append(ob("canonical", _canonical(head, url)))

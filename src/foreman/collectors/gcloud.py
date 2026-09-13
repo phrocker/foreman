@@ -33,6 +33,7 @@ from typing import Any
 
 from ..config import Project
 from ..models import Observation
+from .base import Facts
 
 TIMEOUT_S = 90
 
@@ -154,7 +155,7 @@ class GcloudCollector:
     name = "gcloud"
     surface = "cloud"
 
-    async def collect(self, project: Project) -> list[Observation]:
+    async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         cloud = project.cloud
         if cloud is None:
             return []

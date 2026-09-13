@@ -40,6 +40,7 @@ from typing import Any
 from ..config import Project
 from ..models import Observation
 from ..secrets import SecretsUnavailable, get_secret
+from .base import Facts
 
 API = "https://api.godaddy.com/v1"
 TIMEOUT_S = 30
@@ -142,7 +143,7 @@ class GoDaddyCollector:
     name = "godaddy"
     surface = "registrar"
 
-    async def collect(self, project: Project) -> list[Observation]:
+    async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         surface = project.registrar
         if surface is None or surface.provider != "godaddy":
             return []
