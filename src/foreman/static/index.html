@@ -164,6 +164,15 @@
   .st-blocked { color: var(--text-3); }
   .st-unknown { color: var(--text-3); }
 
+  .proj { display: grid; grid-template-columns: 1fr auto auto; gap: 10px 14px;
+    align-items: center; padding: 9px 12px; border-top: 1px solid var(--border); }
+  .proj-id { font-weight: 600; }
+  .proj-what { color: var(--text-3); font-size: 12px; }
+  .proj-state { font-size: 12px; letter-spacing: .03em; text-transform: uppercase;
+    white-space: nowrap; }
+  .proj-on { color: var(--good); }
+  .proj-off { color: var(--text-3); }
+
   .cred { display: grid; grid-template-columns: 1fr auto; gap: 10px 14px;
     align-items: start; padding: 12px; border-top: 1px solid var(--border); }
   .cred-label { font-weight: 600; }
@@ -639,6 +648,16 @@
   </section>
 
   <section id="panel-settings" role="tabpanel" hidden>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="section-head">Projects — what is declared, and what is swept</div>
+      <div id="projectAdmin"></div>
+      <form id="projectNew" class="cred-form" style="padding:12px">
+        <input id="newProjectId" placeholder="id (e.g. leadgen)" aria-label="Project id" style="flex:0 1 150px">
+        <input id="newProjectName" placeholder="name" aria-label="Project name" style="flex:0 1 190px">
+        <input id="newProjectUrl" placeholder="https:// (optional)" aria-label="Website" style="flex:1 1 200px">
+        <button class="primary" type="submit">Declare</button>
+      </form>
+    </div>
     <div class="panel">
       <div class="section-head">Credentials — kept in the OS keyring, never in a file</div>
       <div id="credentialList"></div>
@@ -657,6 +676,7 @@ const SEV = {
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
+  declared: [],
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
   tab: "findings", decisiveOnly: true, kind: "", showRetired: true,
@@ -749,7 +769,7 @@ let stale = [];
 async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports] =
+         settings, plans, reports, declared] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -763,10 +783,11 @@ async function load() {
     fetchPart("/api/settings", null),
     fetchPart("/api/plans", []),
     fetchPart("/api/reports", []),
+    fetchPart("/api/projects", []),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
-    connectors, skills, memories, settings, plans, reports,
+    connectors, skills, memories, settings, plans, reports, declared,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -778,7 +799,7 @@ async function load() {
     ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
-    ["plans", renderPlans], ["reports", renderReports], ["settings", renderSettings], ["counts", renderCounts],
+    ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -1473,6 +1494,60 @@ function renderPlans() {
     return head + `<table class="matrix"><thead><tr><th>subject</th>${header}</tr></thead><tbody>${body}</tbody></table>`;
   }).join("");
 }
+
+// --- which projects are swept ----------------------------------------------
+
+function renderProjectAdmin() {
+  const list = $("projectAdmin");
+  if (!state.declared.length) {
+    list.innerHTML = '<div class="empty">Nothing declared yet.</div>';
+    return;
+  }
+  list.innerHTML = state.declared.map((p) => {
+    const on = p.enabled !== false;
+    const surfaces = ["web", "github", "cloud", "registrar", "ads"]
+      .filter((k) => p[k]).join(", ") || "no surfaces";
+    return `<div class="proj">
+      <div>
+        <div class="proj-id">${esc(p.id)}${p.name ? ` <span class="proj-what">${esc(p.name)}</span>` : ""}</div>
+        <div class="proj-what">${esc(surfaces)}</div>
+      </div>
+      <span class="proj-state ${on ? "proj-on" : "proj-off"}">${on ? "\u25CF swept" : "\u25CB paused"}</span>
+      <button class="proj-toggle" data-id="${esc(p.id)}" data-on="${on}">${on ? "Pause" : "Resume"}</button>
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll(".proj-toggle").forEach((b) =>
+    b.addEventListener("click", async () => {
+      // Paused, never deleted: removing a project orphans every observation
+      // about it, which go on producing findings nobody can trace to a project
+      // that still exists.
+      const res = await fetch(`/api/projects/${encodeURIComponent(b.dataset.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: b.dataset.on !== "true" }),
+      });
+      if (!res.ok) { alert(`Could not change that: ${(await res.json()).detail}`); return; }
+      await load();
+    }));
+}
+
+$("projectNew").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const id = $("newProjectId").value.trim();
+  if (!id) { $("newProjectId").focus(); return; }
+  const body = { id, name: $("newProjectName").value.trim() || id };
+  const url = $("newProjectUrl").value.trim();
+  if (url) body.web = { url };
+  const res = await fetch("/api/projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { alert(`Could not declare it: ${(await res.json()).detail}`); return; }
+  for (const f of ["newProjectId", "newProjectName", "newProjectUrl"]) $(f).value = "";
+  await load();
+});
 
 // --- settings --------------------------------------------------------------
 

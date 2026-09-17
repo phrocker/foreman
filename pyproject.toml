@@ -11,6 +11,9 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "pyyaml>=6.0",
+    # Edits to foreman.yaml keep the comments a person wrote in it; a plain
+    # round-trip deletes every one.
+    "ruamel.yaml>=0.18",
     "grpcio>=1.60",
     # The generated stubs import it directly; grpcio does not pull it in, so
     # without this a fresh install cannot talk to shoal at all.

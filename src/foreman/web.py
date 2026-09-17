@@ -21,7 +21,7 @@ from . import secrets
 from .actions import Stale, effect_of, target_label
 from .actions.sagform import automatable, policy_allows
 from .chat import ChatError, ask
-from .config import load_registry
+from .config import find_registry, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import project_drift
@@ -31,6 +31,8 @@ from .models import utcnow
 from .plans import plan_progress
 from .precision import label as precision_label
 from .precision import rank, rule_scores
+from .registry_edit import RegistryError, add_project, set_enabled
+from .registry_edit import projects as registry_projects
 from .report import write_report
 from .runner import (
     apply_action,
@@ -445,6 +447,52 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             return dict(s.finding(finding_id) or {})
         finally:
             s.close()
+
+    @app.get("/api/projects")
+    def all_projects() -> list[dict[str, Any]]:
+        """Every project declared, disabled ones included.
+
+        Deliberately not the active list: the point of this view is to see what
+        is *not* being swept and turn it back on.
+        """
+        path = registry_path or find_registry()
+        if path is None:
+            raise HTTPException(404, "no foreman.yaml found")
+        return registry_projects(Path(path))
+
+    @app.patch("/api/projects/{project_id}")
+    def track_project(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Start or stop sweeping a project.
+
+        There is no delete. Removing one orphans every observation about it,
+        which go on producing findings nobody can trace back to a project that
+        still exists — so disabling is the honest operation: it stops being
+        swept, its history stays, and it can come back.
+        """
+        path = registry_path or find_registry()
+        if path is None:
+            raise HTTPException(404, "no foreman.yaml found")
+        try:
+            return set_enabled(Path(path), project_id, bool(payload.get("enabled", True)))
+        except RegistryError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.post("/api/projects")
+    def declare_project(payload: dict[str, Any]) -> dict[str, Any]:
+        """Declare a new project.
+
+        Validated against the same model the loader uses and written
+        atomically, because a registry that will not load is a Foreman that will
+        not start — and finding that out on the next run rather than here is how
+        a config gets abandoned half-broken.
+        """
+        path = registry_path or find_registry()
+        if path is None:
+            raise HTTPException(404, "no foreman.yaml found")
+        try:
+            return add_project(Path(path), payload)
+        except RegistryError as exc:
+            raise HTTPException(400, str(exc)) from None
 
     @app.get("/api/reports")
     def reports(project: str | None = Query(None)) -> list[dict[str, Any]]:
