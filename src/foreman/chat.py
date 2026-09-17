@@ -169,6 +169,7 @@ def portfolio_state(store: Store, registry: Registry) -> str:
     else:
         lines.append("\n### Rule precision\nNot yet measured — no findings decided.")
 
+    lines.append(_repo_activity(store, registry))
     lines.append(_domains(store))
     lines.append(_graph(store, findings))
     return "\n".join(lines)
@@ -180,6 +181,28 @@ def portfolio_state(store: Store, registry: Registry) -> str:
 # alone because a parked domain is not a problem.
 PARKING_HOSTS = ("domaincontrol.com", "afternic.com")
 DOMAIN_LIST_LIMIT = 160
+
+
+def _repo_activity(store: Store, registry: Registry) -> str:
+    """What each repository has been doing, as a shape rather than a changelog.
+
+    A project can be worth watching without being worth fixing. A stewarded one
+    produces hundreds of events a quarter and none of them are findings; the
+    question asked of it is "how is it going", which counts answer and a list
+    does not — and a list would cost more than the answer is worth on every
+    single turn.
+    """
+    from .history import summarise
+
+    lines = [
+        summarise(store, project.id) for project in registry.active if project.github is not None
+    ]
+    kept = [line for line in lines if line]
+    if not kept:
+        return ""
+    return "\n### Repository activity (retained locally; no API call answers these)\n" + "\n".join(
+        kept
+    )
 
 
 def _domains(store: Store) -> str:

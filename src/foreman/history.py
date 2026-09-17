@@ -27,7 +27,9 @@ negligible thereafter.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
@@ -244,3 +246,68 @@ async def ingest_all(
         for outcome in (await ingest_project(candidate, store, since=since, log=log)).values():
             total += int(outcome.get("events", 0))
     return total
+
+
+# --- reading it back --------------------------------------------------------
+
+# Enough to see a shape without turning a chat turn into a changelog. A report
+# asks for far more and says so.
+DIGEST_ACTORS = 8
+DIGEST_ITEMS = 12
+
+
+def _humans(events: Sequence[Mapping[str, Any]]) -> Counter:
+    """Who did things, bots excluded.
+
+    A dependabot run is not a contributor, and on a busy repository it would
+    otherwise be the most active one.
+    """
+    return Counter(
+        str(e["actor"]) for e in events if e.get("actor") and not str(e["actor"]).endswith("[bot]")
+    )
+
+
+def digest(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """What a window of history amounts to, as numbers rather than a list.
+
+    A stewarded project produces hundreds of events a quarter. Handing all of
+    them to a model every turn would cost more than the answer is worth and
+    bury the shape — which is what somebody asking "how is it going" wants.
+    """
+    if not events:
+        return {}
+    kinds = Counter(str(e["kind"]) for e in events)
+    merged = sum(
+        1
+        for e in events
+        if e["kind"] == "pr" and json.loads(e.get("fields") or "{}").get("merged") == "true"
+    )
+    people = _humans(events)
+    stamps = [str(e["at"]) for e in events]
+    return {
+        "events": len(events),
+        "from": min(stamps)[:10],
+        "to": max(stamps)[:10],
+        "kinds": dict(kinds),
+        "merged_prs": merged,
+        "contributors": len(people),
+        "most_active": people.most_common(DIGEST_ACTORS),
+    }
+
+
+def summarise(store: Any, project_id: str, since: str | None = None, limit: int = 1000) -> str:
+    """A window of a project's history, small enough to hand over every turn."""
+    events = store.events(project=project_id, since=since, limit=limit)
+    facts = digest(events)
+    if not facts:
+        return ""
+    lines = [
+        f"- {project_id}: {facts['events']} events {facts['from']} to {facts['to']} — "
+        f"{facts['kinds'].get('commit', 0)} commits, {facts['kinds'].get('pr', 0)} pull request "
+        f"events ({facts['merged_prs']} merged), {facts['kinds'].get('issue', 0)} issue events, "
+        f"{facts['contributors']} people",
+    ]
+    if facts["most_active"]:
+        busiest = ", ".join(f"{name} ({n})" for name, n in facts["most_active"][:5])
+        lines.append(f"  most active: {busiest}")
+    return "\n".join(lines)

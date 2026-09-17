@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
@@ -29,6 +30,7 @@ from .models import Severity
 from .plans import GATES, plan_progress
 from .precision import label as precision_label
 from .precision import rank, rule_scores
+from .report import write_report
 from .runner import (
     apply_action,
     apply_eligible,
@@ -646,6 +648,54 @@ def history(
                 log=lambda m: console.print(f"  {m}"),
             )
             console.print(f"\n[bold]{total}[/] event(s) recorded.")
+
+    asyncio.run(run())
+
+
+@app.command(name="report")
+def report_cmd(
+    project: str = typer.Argument(..., help="Which project to write up."),
+    since: str = typer.Option(None, "--since", help="ISO-8601 start; default 90 days."),
+    out: Path = typer.Option(None, "--out", "-o", help="Write the markdown here."),
+    model: str = typer.Option(None, "--model"),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Write up what a project has been doing, from the retained event log.
+
+    Costs no API calls: the hundred were paid once, when the events were
+    ingested. Run `foreman history` first if the window looks thin.
+    """
+    reg = load_registry(registry)
+    window = since or (datetime.now(UTC) - timedelta(days=90)).isoformat(timespec="seconds")
+
+    async def run() -> None:
+        with open_store(db, registry=registry) as store:
+            written, cost = await write_report(
+                store,
+                project,
+                since=window,
+                connectors=build_connectors(reg.connectors),
+                model=model,
+            )
+
+        console.print(written.report)
+        for heading, items, style in (
+            ("Highlights", written.highlights, "green"),
+            ("Concerns", written.concerns, "yellow"),
+            # The important one: a reader will otherwise treat silence as
+            # absence, and this is one repository's event log.
+            ("Not visible from this record", written.unknown, "dim"),
+        ):
+            if items:
+                console.print(f"\n[bold]{heading}[/]")
+                for item in items:
+                    console.print(f"  [{style}]·[/] {item}")
+
+        if out:
+            out.write_text(written.report + "\n")
+            console.print(f"\n[dim]written to {out}[/]")
+        console.print(f"[dim]${cost:.3f}[/]")
 
     asyncio.run(run())
 
