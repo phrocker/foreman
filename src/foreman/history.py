@@ -89,7 +89,7 @@ async def _commits(slug: str, project_id: str, since: str) -> list[Event]:
         if not at or not sha:
             continue
         message = (commit.get("message") or "").strip().splitlines()
-        fields = {"sha": sha}
+        fields = {"sha": sha, "repo": slug.split("/")[-1]}
         if authored := iso((commit.get("author") or {}).get("date")):
             fields["authored"] = authored
         out.append(
@@ -133,7 +133,11 @@ async def _issues(slug: str, project_id: str, since: str) -> list[Event]:
         # otherwise file a pull request as an issue.
         is_pull = "pull_request" in item
         pull = item.get("pull_request") or {}
-        fields = {"state": item.get("state") or "", "comments": str(item.get("comments") or 0)}
+        fields = {
+            "state": item.get("state") or "",
+            "comments": str(item.get("comments") or 0),
+            "repo": slug.split("/")[-1],
+        }
         if created := iso(item.get("created_at")):
             fields["created"] = created
         if is_pull:
@@ -179,7 +183,10 @@ async def _releases(slug: str, project_id: str, since: str) -> list[Event]:
                 actor=(item.get("author") or {}).get("login"),
                 title=(item.get("name") or tag)[:TITLE_CHARS],
                 url=item.get("html_url"),
-                fields={"draft": str(bool(item.get("draft"))).lower()},
+                fields={
+                    "draft": str(bool(item.get("draft"))).lower(),
+                    "repo": slug.split("/")[-1],
+                },
             )
         )
     return out
@@ -203,29 +210,35 @@ async def ingest_project(
     """Bring one project's history up to date. Returns what each feed did."""
     if project.github is None:
         return {}
-    slug = project.github.slug
     result: dict[str, dict[str, Any]] = {}
 
-    for feed, fetch in FEEDS.items():
-        start = _start(store, project.id, feed, since)
-        try:
-            events = await fetch(slug, project.id, start)
-        except GitHubError as exc:
-            # Recorded and reported rather than raised: one unreadable feed
-            # should not cost you the two that worked, and a feed that cannot
-            # be read must look different from one with nothing in it.
-            result[feed] = {"error": str(exc), "since": start}
-            log(f"{project.id}: {feed} unreadable — {exc}")
-            continue
+    for slug in project.github.slugs:
+        for feed, fetch in FEEDS.items():
+            # A watermark per repository as well as per feed: one repository
+            # going quiet must not advance another's cursor past events nobody
+            # has read.
+            key = f"{feed}@{slug}"
+            start = _start(store, project.id, key, since)
+            try:
+                events = await fetch(slug, project.id, start)
+            except GitHubError as exc:
+                # Recorded and reported rather than raised: one unreadable feed
+                # should not cost you the ones that worked, and a feed that
+                # cannot be read must look different from one with nothing in
+                # it.
+                result[key] = {"error": str(exc), "since": start}
+                log(f"{project.id}: {key} unreadable — {exc}")
+                continue
 
-        store.record_events(events)
-        if events:
-            # Advanced only on success, and only as far as something actually
-            # stored. A cursor past events that were never written would skip
-            # them permanently, and nothing would ever say so.
-            store.set_watermark(project.id, feed, max(e.at for e in events))
-        result[feed] = {"events": len(events), "since": start}
-        log(f"{project.id}: {feed} — {len(events)} event(s) since {start}")
+            store.record_events(events)
+            if events:
+                # Advanced only on success, and only as far as something
+                # actually stored. A cursor past events that were never written
+                # would skip them permanently, and nothing would say so.
+                store.set_watermark(project.id, key, max(e.at for e in events))
+            result[key] = {"events": len(events), "since": start}
+            if events:
+                log(f"{project.id}: {key} — {len(events)} event(s) since {start}")
     return result
 
 

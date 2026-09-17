@@ -199,8 +199,16 @@ class DependabotCollector:
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         if project.github is None:
             return []
-        slug = project.github.slug
+        out: list[Observation] = []
+        # Each repository the surface names. Observations are keyed by slug, so
+        # several of them coexist without any further ceremony — and a project
+        # whose alerts are off on one repository and on for another says exactly
+        # that rather than averaging it away.
+        for slug in project.github.slugs:
+            out.extend(await self._one(project, slug))
+        return out
 
+    async def _one(self, project: Project, slug: str) -> list[Observation]:
         def ob(subject: str, key: str, value: str | None) -> Observation:
             return Observation(
                 project=project.id, collector=self.name, subject=subject, key=key, value=value
@@ -278,17 +286,21 @@ class GitHubActivityCollector:
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         if project.github is None:
             return []
-        slug = project.github.slug
-
-        def ob(key: str, value: str | None) -> Observation:
-            return Observation(
-                project=project.id, collector=self.name, subject=slug, key=key, value=value
-            )
-
         out: list[Observation] = []
-        out.extend(await self._workflows(slug, ob))
-        out.extend(await self._reviews(slug, ob))
-        out.extend(await self._release(slug, ob))
+        # Every repository the surface names. Each keys its observations by its
+        # own slug, so a project of twenty repositories reports twenty sets of
+        # delivery facts rather than one blurred average — and a broken build
+        # belongs to the repository that has it.
+        for slug in project.github.slugs:
+
+            def ob(key: str, value: str | None, slug: str = slug) -> Observation:
+                return Observation(
+                    project=project.id, collector=self.name, subject=slug, key=key, value=value
+                )
+
+            out.extend(await self._workflows(slug, ob))
+            out.extend(await self._reviews(slug, ob))
+            out.extend(await self._release(slug, ob))
         return out
 
     async def _workflows(self, slug: str, ob) -> list[Observation]:

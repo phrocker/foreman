@@ -42,6 +42,10 @@ Window: {window}
 
 {numbers}
 
+A project may be several repositories. Where a line names one, it is the
+repository the item belongs to — the same number in two repositories is two
+different things.
+
 ## What happened
 
 {items}
@@ -118,8 +122,12 @@ def _items(events: list[Any]) -> str:
         # velocity number gets quoted that nobody can reproduce.
         opened = str(fields.get("created") or "")[:10]
         age = f" (opened {opened})" if opened and opened != str(event["at"])[:10] else ""
+        # Which repository, once a project is more than one of them. Two repos
+        # can hold an issue #5, and a report that does not say which is talking
+        # about neither.
+        repo = f"{fields['repo']} " if fields.get("repo") else ""
         out.append(
-            f"  {str(event['at'])[:10]} {event['kind']}#{event['ref']}{state}{age} "
+            f"  {str(event['at'])[:10]} {repo}{event['kind']}#{event['ref']}{state}{age} "
             f"{event['actor'] or 'unknown'}: {event['title'] or ''}"
         )
     if len(events) > MAX_ITEMS:

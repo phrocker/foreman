@@ -244,23 +244,37 @@ async def test_releases_are_filtered_here_because_the_endpoint_takes_no_cursor(g
 
 
 class _Project:
+    """A project of one repository, which is the ordinary case."""
+
     id = "p"
-    github = type("S", (), {"slug": "o/r"})()
+    github = type("S", (), {"slug": "o/r", "slugs": ["o/r"]})()
+
+
+class _MultiRepoProject:
+    """A project that is several repositories.
+
+    Apache Accumulo is twenty of them — the engine, the website, the testing
+    harness, the Fluo repositories under its PMC — and a report on "the project"
+    covering only the largest would answer a different question.
+    """
+
+    id = "p"
+    github = type("S", (), {"slug": "o/one", "slugs": ["o/one", "o/two"]})()
 
 
 @pytest.mark.asyncio
 async def test_ingest_advances_each_feed_to_the_newest_thing_it_stored(gh, store):
     gh.payloads["commits"] = [COMMIT]
     await history.ingest_project(_Project(), store)
-    assert store.watermark("p", "gh:commits") == "2026-09-10T12:00:00+00:00"
+    assert store.watermark("p", "gh:commits@o/r") == "2026-09-10T12:00:00+00:00"
     # Nothing came back for the others, so their cursors stay unset rather than
     # jumping to now and skipping whatever arrives next.
-    assert store.watermark("p", "gh:issues") is None
+    assert store.watermark("p", "gh:issues@o/r") is None
 
 
 @pytest.mark.asyncio
 async def test_ingest_reads_from_the_stored_cursor_on_the_second_run(gh, store):
-    store.set_watermark("p", "gh:commits", "2026-09-01T00:00:00+00:00")
+    store.set_watermark("p", "gh:commits@o/r", "2026-09-01T00:00:00+00:00")
     await history.ingest_project(_Project(), store)
     assert any("since=2026-09-01" in c for c in gh.calls if "commits" in c)
 
@@ -269,9 +283,9 @@ async def test_ingest_reads_from_the_stored_cursor_on_the_second_run(gh, store):
 async def test_an_explicit_since_does_not_rewind_the_cursor(gh, store):
     """Re-reading old history is something you ask for, not something that
     resets the feed for every run afterwards."""
-    store.set_watermark("p", "gh:commits", "2026-09-05T00:00:00+00:00")
+    store.set_watermark("p", "gh:commits@o/r", "2026-09-05T00:00:00+00:00")
     await history.ingest_project(_Project(), store, since="2026-01-01T00:00:00+00:00")
-    assert store.watermark("p", "gh:commits") == "2026-09-05T00:00:00+00:00"
+    assert store.watermark("p", "gh:commits@o/r") == "2026-09-05T00:00:00+00:00"
 
 
 @pytest.mark.asyncio
@@ -286,6 +300,43 @@ async def test_one_unreadable_feed_does_not_cost_the_others(gh, store, monkeypat
 
     monkeypatch.setattr(history, "gh_api", fake)
     result = await history.ingest_project(_Project(), store)
-    assert result["gh:commits"]["events"] == 1
-    assert "error" in result["gh:issues"]
+    assert result["gh:commits@o/r"]["events"] == 1
+    assert "error" in result["gh:issues@o/r"]
     assert len(store.events(kind="commit")) == 1
+
+
+@pytest.mark.asyncio
+async def test_every_repository_a_project_names_is_read(gh, store):
+    """A project is not always a repository, and a report on "the project" that
+    covered only the largest one would answer a different question."""
+    gh.payloads["commits"] = [COMMIT]
+    await history.ingest_project(_MultiRepoProject(), store)
+    assert any("repos/o/one/commits" in c for c in gh.calls)
+    assert any("repos/o/two/commits" in c for c in gh.calls)
+
+
+@pytest.mark.asyncio
+async def test_each_repository_reads_from_its_own_cursor(gh, store):
+    """One repository being further along must not make another skip events
+    nobody has read. A shared cursor would do exactly that."""
+    gh.payloads["commits"] = [COMMIT]
+    store.set_watermark("p", "gh:commits@o/one", "2026-08-01T00:00:00+00:00")
+
+    await history.ingest_project(_MultiRepoProject(), store)
+
+    commit_calls = [c for c in gh.calls if "commits" in c]
+    ahead = [c for c in commit_calls if "o/one" in c]
+    behind = [c for c in commit_calls if "o/two" in c]
+    # The one with a cursor resumes from it; the one without falls back to the
+    # backfill window rather than borrowing its sibling's position.
+    assert any("since=2026-08-01" in c for c in ahead)
+    assert not any("since=2026-08-01" in c for c in behind)
+
+
+@pytest.mark.asyncio
+async def test_an_event_says_which_repository_it_came_from(gh, store):
+    """Two repositories can hold an issue #5, and an event that does not say
+    which is about neither."""
+    gh.payloads["commits"] = [COMMIT]
+    (event,) = await history._commits("o/one", "p", "2026-01-01T00:00:00+00:00")
+    assert event.fields["repo"] == "one"

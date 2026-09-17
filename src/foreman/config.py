@@ -62,14 +62,30 @@ class WebSurface(BaseModel):
 
 
 class GitHubSurface(BaseModel):
-    """A GitHub repository: alerts, workflow runs, releases."""
+    """The repositories a project is: alerts, workflow runs, releases, history.
+
+    Plural because a project is not always a repository. Apache Accumulo is
+    twenty of them — the engine, the website, the testing harness, the Docker
+    images, and the Fluo repositories that came under its PMC — and a report on
+    "the project" that covered only the largest one would be answering a
+    different question from the one asked.
+    """
 
     owner: str
     repo: str
+    # Further repositories under the same owner. `repo` stays the primary
+    # because a project still has a main line, and anything that must pick one
+    # picks that.
+    also: list[str] = Field(default_factory=list)
 
     @property
     def slug(self) -> str:
         return f"{self.owner}/{self.repo}"
+
+    @property
+    def slugs(self) -> list[str]:
+        """Every repository this surface covers, primary first."""
+        return [self.slug] + [f"{self.owner}/{name}" for name in self.also]
 
 
 class CloudSurface(BaseModel):
