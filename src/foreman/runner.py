@@ -10,6 +10,7 @@ from .actions import OpNotApplicable, Stale, propose, rehydrate
 from .actions import apply as apply_patch
 from .actions.sagform import policy_allows
 from .collectors import COLLECTORS, OPTIONAL
+from .collectors.base import Collector
 from .config import Project, Registry
 from .domains import collectors_for
 from .models import Observation
@@ -69,8 +70,14 @@ async def collect_project(
             store.finish_run(run_id, ok=False, error=f"{type(exc).__name__}: {exc}")
             log(f"{project.id}/{name} failed: {exc}")
             continue
-        observations = list(observations)
-        observations += _cleared_errors(store, project.id, name, observations)
+        reported = list(observations)
+        # Two retractions, and both say "this is no longer true" rather than
+        # "this did not change": an error that stopped happening, and a subject
+        # that stopped existing. Both are read from what the collector actually
+        # reported, which is why a collector that raised reaches neither — the
+        # `continue` above is the whole guard.
+        observations = reported + _cleared_errors(store, project.id, name, reported)
+        observations += _retracted_orphans(store, project.id, collector, reported)
         total += store.record(run_id, observations)
         store.finish_run(run_id, ok=True)
         log(f"{project.id}/{name}: {len(observations)} observations")
@@ -123,6 +130,66 @@ def _cleared_errors(
         and row.get("collector") == collector
         and row["subject"] in subjects
         and (row["subject"], row["key"]) not in said
+    ]
+
+
+def _retracted_orphans(
+    store: Store, project_id: str, collector: Collector, observations: Sequence[Observation]
+) -> list[Observation]:
+    """Retract the subjects this collector owned last time and no longer names.
+
+    `_cleared_errors` one level up. A key nobody writes again is stale and the
+    old value should stand; a *subject* nobody collects any more is not stale,
+    it is gone — and `latest_observations` cannot tell those apart, so the old
+    cells go on being the latest value of their own subject and the rules go on
+    judging them.
+
+    Seen for real. A project's `cloud.account` was corrected from one GCP
+    project to another; both accounts then had cells, each was current for its
+    own subject, and the report doubled — including two HIGHs about a project
+    being deleted that production does not use. 151 orphaned cells, retracted by
+    hand.
+
+    Only for a collector that says it enumerates a closed set. `gcloud` owns one
+    account and `godaddy` owns the domains on one registrar, so a subject
+    missing from a clean sweep of theirs has gone. `crawl` visits up to
+    `max_urls` pages and may honestly see a different set every night, and
+    retracting there would take findings off the board and put them back
+    tomorrow — a slower, noisier failure than the one this fixes. Read with a
+    default rather than as a plain attribute, so a collector that says nothing
+    about itself is never retracted from.
+    """
+    if not getattr(collector, "enumerates", False):
+        return []
+
+    # A sweep that reported an error read part of the world, and part of the
+    # world is not an enumeration. `gcloud` abandons the rest of the account
+    # when `projects describe` fails, so acting on the two facts it still
+    # managed to say would retract every IAM binding on an expired token. An
+    # error postpones retraction to the next clean sweep, which costs a night
+    # and cannot flap.
+    if any(o.key.endswith(ERROR_SUFFIX) and o.value for o in observations):
+        return []
+
+    named = {o.subject for o in observations}
+    return [
+        Observation(
+            project=project_id,
+            collector=collector.name,
+            subject=row["subject"],
+            key=row["key"],
+            value=None,
+        )
+        for row in store.latest_observations(project_id)
+        # A cell of a subject this sweep never named, that still holds a value.
+        # Without the second half, every night after the first writes another
+        # null over a subject that has been gone for months.
+        if row["subject"] not in named and row["value"] is not None
+        # Only its own, for the reason `_cleared_errors` gives: in shoal the
+        # collector is the column family and therefore part of a cell's
+        # identity. `siteprobe` and `godaddy` both write `domain:example.com`,
+        # and neither may speak for the other's half of it.
+        and row.get("collector") == collector.name
     ]
 
 

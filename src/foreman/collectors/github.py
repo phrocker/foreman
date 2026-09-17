@@ -195,6 +195,10 @@ async def completed_runs_since(slug: str, since: datetime) -> list[dict[str, Any
 class DependabotCollector:
     name = "dependabot"
     surface = "github"
+    # Every open alert on every repository the surface names, listed in one
+    # paginated read. A package subject that stops appearing has had its
+    # advisory fixed, and the alert should leave the board with it.
+    enumerates = True
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         if project.github is None:
@@ -282,6 +286,9 @@ class DependabotCollector:
 class GitHubActivityCollector:
     name = "github_activity"
     surface = "github"
+    # One subject per repository the surface names. Dropping a repository from
+    # the registry should take its delivery facts with it.
+    enumerates = True
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         if project.github is None:

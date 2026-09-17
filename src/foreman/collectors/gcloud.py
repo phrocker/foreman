@@ -154,6 +154,9 @@ def _days_from(iso: str | None) -> float | None:
 class GcloudCollector:
     name = "gcloud"
     surface = "cloud"
+    # One account, read whole. Correcting `cloud.account` in the registry moves
+    # every subject here, and the account left behind is gone rather than quiet.
+    enumerates = True
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         cloud = project.cloud

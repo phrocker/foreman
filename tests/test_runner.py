@@ -1,8 +1,10 @@
 """The sweep itself.
 
-One property here is easy to lose and expensive to lose: an error a collector
-reported once must stop being reported when it stops happening. A board that
-shows fixed problems teaches you to stop reading the board.
+Two properties here are easy to lose and expensive to lose. An error a collector
+reported once must stop being reported when it stops happening, and a subject a
+collector no longer owns must stop being judged. A board that shows fixed
+problems, or problems belonging to an account nobody uses, teaches you to stop
+reading the board.
 """
 
 from __future__ import annotations
@@ -13,16 +15,17 @@ import pytest
 
 from foreman.config import Project
 from foreman.models import Observation
+from foreman.rules import evaluate
 from foreman.runner import collect_project
 from foreman.store import SqliteStore
 
 
 class _Collector:
-    surface = "github"
-
-    def __init__(self, name, batches):
+    def __init__(self, name, batches, enumerates=False, surface="github"):
         self.name = name
+        self.surface = surface
         self.batches = list(batches)
+        self.enumerates = enumerates
         self.raising = False
 
     async def collect(self, project, prior=None):
@@ -132,3 +135,147 @@ async def test_a_collector_does_not_retract_another_collectors_error(tmp_path):
             await collect_project(_project(), ["alerts"], store)
             rows = {(c["collector"], c["key"]): c["value"] for c in store.latest_observations("p")}
             assert rows[("activity", "pulls_error")] == "alerts are off"
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_cloud_account_stops_the_old_account_producing_findings(tmp_path):
+    """The whole reason this exists. A project named `veculo` as its GCP
+    account; the account was really `myfinanceadvisor-485519`. Correcting the
+    registry did not correct the findings — it doubled them, because both
+    subjects had cells, each was the latest value of its own subject, and the
+    rules judged both. Two HIGHs about a project being deleted that production
+    does not use, and 151 orphaned cells retracted by hand.
+    """
+    collector = _Collector(
+        "gcloud",
+        [
+            [
+                ("gcp:veculo", "lifecycle_state", "DELETE_REQUESTED"),
+                ("gcp:veculo", "billing_enabled", "false"),
+            ],
+            [
+                ("gcp:myfinanceadvisor-485519", "lifecycle_state", "ACTIVE"),
+                ("gcp:myfinanceadvisor-485519", "billing_enabled", "true"),
+            ],
+        ],
+        enumerates=True,
+        surface="cloud",
+    )
+    project = Project(id="mfa", name="MFA", cloud={"provider": "gcp", "account": "veculo"})
+    with SqliteStore(tmp_path / "t.db") as store:
+        with mock.patch.dict("foreman.runner.COLLECTORS", {"gcloud": collector}):
+            await collect_project(project, ["gcloud"], store)
+            assert [f.rule for f in evaluate(project, store.latest_observations("mfa"))] == [
+                "cloud_project_not_active",
+                "cloud_billing_disabled",
+            ]
+
+            project = Project(
+                id="mfa",
+                name="MFA",
+                cloud={"provider": "gcp", "account": "myfinanceadvisor-485519"},
+            )
+            await collect_project(project, ["gcloud"], store)
+
+        # The old account still has rows — history is not rewritten — but every
+        # one of them is null, so no rule has anything left to judge.
+        rows = store.latest_observations("mfa")
+        assert {r["value"] for r in rows if r["subject"] == "gcp:veculo"} == {None}
+        assert evaluate(project, rows) == []
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_samples_keeps_the_subjects_it_did_not_visit(tmp_path):
+    """`crawl` visits up to `max_urls` pages and may honestly see a different
+    set every night. Retracting on that basis would take findings off the board
+    and put them back tomorrow, which is a slower and noisier failure than the
+    orphan it would fix — so a collector that has not said it enumerates a
+    closed set is never retracted from."""
+    collector = _Collector(
+        "crawl",
+        [
+            [("https://p/a", "title", "A"), ("https://p/b", "title", "B")],
+            [("https://p/a", "title", "A")],
+        ],
+    )
+    with SqliteStore(tmp_path / "t.db") as store:
+        with mock.patch.dict("foreman.runner.COLLECTORS", {"crawl": collector}):
+            await collect_project(_project(), ["crawl"], store)
+            await collect_project(_project(), ["crawl"], store)
+            rows = {(c["subject"], c["key"]): c["value"] for c in store.latest_observations("p")}
+            assert rows[("https://p/b", "title")] == "B"
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_raised_retracts_no_subjects(tmp_path):
+    """Silence is not absence. A run that died read nothing, so it cannot have
+    discovered that a subject has gone."""
+    collector = _Collector("gcloud", [[("gcp:one", "lifecycle_state", "ACTIVE")]], enumerates=True)
+    with SqliteStore(tmp_path / "t.db") as store:
+        with mock.patch.dict("foreman.runner.COLLECTORS", {"gcloud": collector}):
+            await collect_project(_project(), ["gcloud"], store)
+            collector.raising = True
+            await collect_project(_project(), ["gcloud"], store)
+            assert _facts(store)["lifecycle_state"] == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_reported_an_error_retracts_no_subjects(tmp_path):
+    """A partial read is not an enumeration. `gcloud` abandons the rest of an
+    account when `projects describe` fails, so acting on the two facts it still
+    managed to say would retract every IAM binding on an expired token."""
+    collector = _Collector(
+        "gcloud",
+        [
+            [
+                ("gcp:one", "lifecycle_state", "ACTIVE"),
+                ("gcp:one/role:roles/owner", "binding_members", "user:a"),
+            ],
+            [("gcp:one", "gcloud_error", "reauthentication required")],
+        ],
+        enumerates=True,
+    )
+    with SqliteStore(tmp_path / "t.db") as store:
+        with mock.patch.dict("foreman.runner.COLLECTORS", {"gcloud": collector}):
+            await collect_project(_project(), ["gcloud"], store)
+            await collect_project(_project(), ["gcloud"], store)
+            rows = {(c["subject"], c["key"]): c["value"] for c in store.latest_observations("p")}
+            assert rows[("gcp:one/role:roles/owner", "binding_members")] == "user:a"
+
+
+@pytest.mark.asyncio
+async def test_a_collector_does_not_retract_another_collectors_subject(tmp_path):
+    """`siteprobe` and `godaddy` both write `domain:example.com`, and neither
+    may speak for the other's half of it. In shoal the collector is the column
+    family and therefore part of a cell's identity, so a retraction written
+    under the wrong one lands beside the cell rather than replacing it."""
+    registrar = _Collector("godaddy", [[("domain:a.test", "status", "ACTIVE")]], enumerates=True)
+    probe = _Collector("siteprobe", [[("domain:b.test", "serving", "true")]], enumerates=True)
+    with SqliteStore(tmp_path / "t.db") as store:
+        collectors = {"godaddy": registrar, "siteprobe": probe}
+        with mock.patch.dict("foreman.runner.COLLECTORS", collectors):
+            await collect_project(_project(), ["godaddy"], store)
+            await collect_project(_project(), ["siteprobe"], store)
+            rows = {(c["collector"], c["key"]): c["value"] for c in store.latest_observations("p")}
+            assert rows[("godaddy", "status")] == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_a_subject_already_retracted_is_not_retracted_again(tmp_path):
+    """Otherwise every night after the first writes another null over a subject
+    that has been gone for months, and the store grows without learning
+    anything."""
+    collector = _Collector(
+        "gcloud",
+        [
+            [("gcp:old", "lifecycle_state", "ACTIVE")],
+            [("gcp:new", "lifecycle_state", "ACTIVE")],
+            [("gcp:new", "lifecycle_state", "ACTIVE")],
+        ],
+        enumerates=True,
+    )
+    with SqliteStore(tmp_path / "t.db") as store:
+        with mock.patch.dict("foreman.runner.COLLECTORS", {"gcloud": collector}):
+            await collect_project(_project(), ["gcloud"], store)
+            assert await collect_project(_project(), ["gcloud"], store) == 2  # one, and its null
+            assert await collect_project(_project(), ["gcloud"], store) == 1

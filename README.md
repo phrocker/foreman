@@ -57,6 +57,16 @@ than per-domain tables. A change is a row whose value differs from the previous
 run's row with the same `(project, subject, key)`. Add a collector, get drift
 detection free.
 
+**Retraction is a collector's own claim.** A cell keeps its last value until
+somebody writes a new one, which is right for a collector that failed tonight and
+wrong for a subject that has gone. So a collector that reads a closed set says so
+— `enumerates = True` — and the runner nulls the subjects it owns and no longer
+names. `gcloud` owns one account, `godaddy` owns the domains on one registrar;
+`crawl` samples up to `max_urls` pages and says nothing, because retracting a page
+it simply did not visit tonight would flap findings on and off. A collector that
+raised, or that reported an error, retracts nothing: it read part of the world,
+and part of the world is not an enumeration.
+
 **Rules are partitioned by domain, projects opt in.** `rules/seo.py`,
 `rules/security.py`, `rules/performance.py`, `rules/cloud.py`. A project is
 evaluated on the intersection of the surfaces it has and the domains it asked

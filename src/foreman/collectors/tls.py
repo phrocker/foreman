@@ -34,6 +34,9 @@ def _cert_not_after(host: str, port: int = 443) -> str | None:
 class TlsCollector:
     name = "tls"
     surface = "web"
+    # Exactly one host, the one the registry names. When that is corrected the
+    # old host's certificate and headers are somebody else's facts.
+    enumerates = True
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         # A project without a web surface is still a project; this collector

@@ -345,6 +345,10 @@ def _live_domains(prior: Facts, surface: RegistrarSurface) -> list[str]:
 class SiteProbeCollector:
     name = "siteprobe"
     surface = "registrar"
+    # The ACTIVE domains the registrar collector recorded — a closed list handed
+    # to it rather than a sample it chose, so a domain missing from it has left
+    # the portfolio.
+    enumerates = True
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         surface = project.registrar

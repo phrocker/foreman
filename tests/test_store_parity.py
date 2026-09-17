@@ -201,6 +201,33 @@ def test_observations_are_scoped_to_their_project(store):
     assert len(store.latest_observations("a")) == 1
 
 
+def test_a_retracted_subject_reads_back_as_null_rather_than_disappearing(store):
+    """How the runner says a subject has gone: a null over every cell it owns.
+
+    The subject stays — history is the point, and "this was a live account until
+    Tuesday" is worth keeping — but the rules see None and have nothing to
+    judge. Both stores have to agree, because the retraction is written through
+    the same `record` that wrote the value it replaces and shoal keeps the two
+    as one cell only if the collector matches.
+    """
+    _sweep(store, values=("Old",))
+    time.sleep(1.1)  # timestamps are second-resolution
+    run_id = store.start_run("p", "crawl")
+    store.record(
+        run_id,
+        [
+            Observation(
+                project="p", collector="crawl", subject="https://p/", key="title", value=None
+            )
+        ],
+    )
+    store.finish_run(run_id, ok=True)
+
+    (row,) = store.latest_observations("p")
+    assert row["value"] is None
+    assert row["subject"] == "https://p/"
+
+
 # --- findings ---------------------------------------------------------------
 
 

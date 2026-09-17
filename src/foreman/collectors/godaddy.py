@@ -182,6 +182,10 @@ async def _nameservers(domain: str, limiter: asyncio.Semaphore) -> list[str]:
 class GoDaddyCollector:
     name = "godaddy"
     surface = "registrar"
+    # Every domain the registrar holds, listed in one read. A domain that has
+    # been transferred out or allowed to lapse stops appearing, and that is the
+    # registrar saying it is no longer ours.
+    enumerates = True
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
         surface = project.registrar
