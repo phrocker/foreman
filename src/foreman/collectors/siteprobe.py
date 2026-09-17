@@ -29,10 +29,18 @@ floor no real page sits under. The first two are near-certain, the third is a
 heuristic that a JavaScript-only site would also trip — which is why `serving`
 is computed from evidence of life rather than from the absence of parking.
 
+**Serving is not the same as capturing.** The phase after *Serve* asks whether a
+visitor can get in touch, and a lead-generation site that answers beautifully
+and captures nothing is a failure that looks like a success. The body is already
+in hand here, so `capture` reads the forms, the contact fields and the `tel:`
+links out of it rather than fetching 114 pages a second time. Nothing is ever
+submitted — see that module for why not.
+
 Being careful matters here in a way it does not for a single site: these are the
 operator's own live hosts, 159 of them, and a sweep that looks like a scan is a
-sweep that gets a WAF in the way. One request per scheme per domain, a modest
-number in flight, short timeouts, and an honest User-Agent.
+sweep that gets a WAF in the way. One request per scheme per domain, at most one
+HEAD for a form's action, a modest number in flight, short timeouts, and an
+honest User-Agent.
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ import httpx
 
 from ..config import Project, RegistrarSurface
 from ..models import Observation
+from . import capture
 from .base import Facts
 from .crawl import page_title, text_length
 
@@ -109,6 +118,9 @@ BLANK: dict[str, str] = {
     "cert_expires_in_days": "",
     "cert_covers_name": "false",
     "cert_error": "",
+    # Whether a visitor can get in touch, read from the same body. Folded in
+    # here so a domain that answered nothing carries the capture cells too.
+    **capture.BLANK,
 }
 
 _DIGITS = re.compile(r"\d+")
@@ -243,6 +255,24 @@ async def _get(client: httpx.AsyncClient, url: str) -> tuple[httpx.Response | No
         return None, f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
+async def _exists(client: httpx.AsyncClient, url: str) -> str:
+    """Does a form's action actually exist? HEAD, and only ever HEAD.
+
+    A form posting to a relative path that 404s is capture that is present and
+    broken, which is worth far more than knowing there is a form. HEAD asks
+    whether the path routes without asking the endpoint to do anything — a GET
+    to a booking handler is a request somebody's application will try to serve,
+    and this sweep runs unattended against the operator's own live sites.
+
+    A POST-only endpoint answers HEAD with 405 or 403, and that is a pass: the
+    path is there. Only a 404 or a 410 says the form goes nowhere.
+    """
+    try:
+        return str((await client.head(url)).status_code)
+    except httpx.HTTPError as exc:
+        return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+
+
 async def _probe(
     domain: str, client: httpx.AsyncClient, limiter: asyncio.Semaphore
 ) -> dict[str, str]:
@@ -294,6 +324,14 @@ async def _probe(
             facts["body_text_chars"] = str(text_length(body))
             facts["body_title"] = page_title(body) or ""
             facts["body_digest"] = _digest(body, domain) if body else ""
+
+            # Capture rides on the body already in hand. A second collector
+            # would be a second full fetch of 114 pages to read a different
+            # part of the same string.
+            facts.update(capture.read(body, facts["final_url"]))
+            if action := capture.action_to_probe(facts, facts["final_url"]):
+                facts["form_action_status"] = await _exists(client, action)
+            facts.update(capture.summarise(facts))
         return facts
 
 
@@ -398,7 +436,7 @@ class SiteProbeCollector:
                 bodies[digest] = bodies.get(digest, 0) + 1
 
         out: list[Observation] = []
-        serving = parked = dark = 0
+        serving = parked = dark = capturing = 0
         for domain, facts in zip(domains, probed, strict=True):
             shared = bodies.get(facts["body_digest"], 1) - 1 if facts["body_digest"] else 0
             facts["body_shared_with"] = str(shared)
@@ -407,6 +445,11 @@ class SiteProbeCollector:
             serving += facts["serving"] == "true"
             parked += facts["parked"] == "true"
             dark += facts["serving"] == "false" and facts["parked"] == "false"
+            # Counted only among the domains that serve. 78 of these are parked
+            # on purpose and a holding page has no contact form by design, so
+            # counting those would put the portfolio's capture rate at a tenth
+            # of what it is and hide the sites that genuinely have no route in.
+            capturing += facts["serving"] == "true" and facts["captures"] == "true"
             out.extend(ob(f"domain:{domain}", key, value) for key, value in sorted(facts.items()))
 
         out.extend(
@@ -415,6 +458,7 @@ class SiteProbeCollector:
                 ob(account, "domains_serving", str(serving)),
                 ob(account, "domains_parked", str(parked)),
                 ob(account, "domains_not_serving", str(dark)),
+                ob(account, "domains_capturing", str(capturing)),
                 ob(account, "probe_error", ""),
             ]
         )

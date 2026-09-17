@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 from foreman.plans import (
+    GATE_ONLY,
     GATES,
     Phase,
     Standing,
@@ -134,6 +135,40 @@ def test_a_page_duplicating_its_siblings_has_not_passed_substance():
 
 def test_substance_also_needs_enough_of_it():
     assert not GATES["distinct"].check({"body_text_chars": "50"}, {"min_chars": "2000"})
+
+
+def test_a_phone_number_is_enough_to_pass_the_capture_gate():
+    """Most of a local trade's work arrives by phone. Failing a site whose
+    capture route is a number in the header would be this gate's worst
+    available mistake."""
+    assert GATES["captures"].check({"capture_route": "link"}, {})
+
+
+def test_a_serving_page_nobody_can_get_in_touch_through_has_not_passed_capture():
+    """A lead-generation site answering 200 with two thousand distinct words and
+    no way to reach anybody has passed every earlier gate and delivered
+    nothing."""
+    assert not GATES["captures"].check({"capture_route": "none"}, {})
+
+
+def test_an_operator_building_forms_can_refuse_to_count_a_phone_link():
+    assert not GATES["captures"].check({"capture_route": "link"}, {"require": "form"})
+    assert GATES["captures"].check({"capture_route": "form"}, {"require": "form"})
+
+
+def test_a_domain_nobody_probed_for_capture_is_unknown_rather_than_failing():
+    """The absence of evidence, and the fix is a sweep rather than any work."""
+    assert GATES["captures"].needs == ("capture_route",)
+    assert standing(_phase(gate="captures"), {}, True) is Standing.UNKNOWN
+
+
+def test_the_capture_gate_never_needs_a_lead_to_be_submitted():
+    """Proving capture works means writing to a live endpoint — a booking, a
+    paged duty phone, a row somebody has to delete — which is a different kind
+    of operation from everything else here and is deliberately not built. The
+    gate reads a fact the probe observed without sending anything."""
+    assert GATES["captures"].needs == ("capture_route",)
+    assert "require" in GATE_ONLY
 
 
 def test_a_gate_reading_a_number_it_cannot_parse_does_not_pass():

@@ -273,7 +273,10 @@
 
   .detail td { background: var(--surface-alt); padding: 0 16px; }
   .detail-inner { padding: 14px 0 18px; }
-  .detail p { margin: 0 0 12px; color: var(--text-2); max-width: 68ch; }
+  /* Findings write their evidence as a block of aligned lines — what https
+     answered, what the certificate said, where a form posts. Collapsed to
+     one paragraph those run together into a sentence nobody can read. */
+  .detail p { margin: 0 0 12px; color: var(--text-2); max-width: 68ch; white-space: pre-wrap; }
   .subjects { margin: 0; padding: 0; list-style: none;
               font: 12.5px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
   .subjects li { color: var(--text-2); word-break: break-all; }

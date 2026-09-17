@@ -21,6 +21,13 @@ somewhere* and the somewhere does not work: an address that accepts no
 connection, a host that does not recognise the name it was given, a certificate
 for someone else. Each of those is a decision that has already been made and has
 since stopped holding.
+
+The third half is capture, and it is quieter still. A lead-generation site that
+serves beautifully and captures nothing is a failure that looks like a success,
+so what is judged is a *serving* page with no form, no phone link and no email
+link at all — and even that is filed low where the served body is thin enough
+that a form mounted by JavaScript is the likelier story. Nothing submits a test
+lead, so nothing here claims a lead arrives.
 """
 
 from __future__ import annotations
@@ -54,6 +61,19 @@ CERT_URGENT_DAYS = 7
 # Below this much served text there is no page. Matches the probe's own floor,
 # since the two must agree on what "empty" means.
 CONTENT_FLOOR = 200
+
+# Above this much served text the server sent a real page rather than a shell
+# for JavaScript to fill. It decides how loudly "nothing captures here" is said:
+# the probe reads what the server sent, exactly as a non-JS crawler does, so a
+# form mounted by script is invisible to it — and on a 337-character Vite shell
+# that is the likeliest explanation, while on four thousand characters of
+# server-rendered prose it is not.
+SERVER_RENDERED = 2000
+
+# What a form's action answering this means: the path is not there. Every other
+# status, 405 and 403 included, means it routes — which is the question a HEAD
+# can answer. Matches the probe's own reading.
+ACTION_GONE = ("404", "410")
 
 
 def _days_until(value: str | None, today: date) -> int | None:
@@ -159,6 +179,7 @@ def evaluate(pages: Pages, add: Add) -> None:
             )
 
         _judge_serving(name, subject, facts, add)
+        _judge_capture(name, subject, facts, add)
 
 
 def _int(value: str | None) -> int | None:
@@ -240,4 +261,92 @@ def _judge_serving(name: str, subject: str, facts: dict[str, str | None], add: A
             "it. Renewal is usually automatic and usually works; the reason to know "
             "is that this is the last window in which a renewal that has silently "
             "stopped working is still fixable.",
+        )
+
+
+def _judge_capture(name: str, subject: str, facts: dict[str, str | None], add: Add) -> None:
+    """Whether a visitor could get in touch, judged only where a page serves.
+
+    A lead-generation site that serves beautifully and captures nothing is a
+    failure that looks like a success — every earlier gate green, and nobody
+    calling. That is the whole reason for these checks and also the reason they
+    are quiet: nothing here submits a test lead, so none of this proves a lead
+    arrives, only that there is somewhere for one to go.
+
+    Gated on `serving` rather than on the probe having run, so a parked domain
+    and a domain answering with somebody else's certificate are both silent.
+    Filing "no contact form" against 77 deliberately parked domains would bury
+    every real finding in the portfolio, and the parked judgement is already
+    made above rather than made again here.
+    """
+    # Both guards, not just `serving`. A domain serving the same holding page
+    # as seventy-five others passes the serving check — nothing about it is
+    # broken — and is still parked, which is where "no contact form" is a
+    # description of the decision rather than a fault in it.
+    if not _is_true(facts.get("serving")) or _is_true(facts.get("parked")):
+        return
+
+    route = str(facts.get("capture_route") or "")
+    forms = _int(facts.get("forms")) or 0
+    served = _int(facts.get("body_text_chars")) or 0
+
+    if route == "none":
+        add(
+            "site_captures_nothing",
+            Severity.MEDIUM if served >= SERVER_RENDERED else Severity.LOW,
+            f"{name} serves a real page with no way to get in touch",
+            [subject],
+            "Nothing on what the server sent takes a lead: no form with an email or "
+            "phone field, no tel: link and no mailto: link. A site that answers "
+            "perfectly and captures nothing is the failure that looks most like "
+            "success, because every check before this one passes.\n\n"
+            f"forms on the page: {forms}\n"
+            f"tel: links:        {facts.get('tel_links') or '0'}\n"
+            f"mailto: links:     {facts.get('mailto_links') or '0'}\n"
+            f"served text:       {served} characters\n\n"
+            "Read from the HTML the server sent, which is also what a non-JS "
+            "crawler sees. A form mounted by JavaScript will not appear here — on "
+            "a thin page that is the likely explanation and the finding is filed "
+            "low, and it is still worth knowing that the contact route exists only "
+            "for visitors who run scripts.",
+        )
+        return
+
+    status = str(facts.get("form_action_status") or "")
+    if status in ACTION_GONE:
+        add(
+            "site_form_posts_to_missing_path",
+            Severity.LOW,
+            f"{name} has a form posting to a path that answers {status}",
+            [subject],
+            "The form names a same-origin path and a GET of that path does not find "
+            "it. This is not proof the form is broken and is filed low for that "
+            "reason: a POST-only endpoint can legitimately answer a GET with a 404, "
+            "and two of this portfolio's storefronts do exactly that while handling "
+            "the submission fine.\n\n"
+            f"posts to: {facts.get('form_action') or '—'}\n"
+            f"method:   {facts.get('form_method') or 'unstated'}\n\n"
+            "What it is worth is the check: submit the form once by hand and confirm "
+            "the lead lands somewhere. If the platform is not handling that path, "
+            "every enquiry typed into this form has been going to a 404 page and "
+            "nothing would have said so.",
+        )
+
+    # An explicit `method="get"` only. A form with no method and no action is
+    # submitted by JavaScript — two of the operator's own sites are built that
+    # way — and calling those GET forms would be reporting a default the markup
+    # never asked for.
+    if facts.get("form_method") == "get" and route == "form":
+        add(
+            "site_contact_form_uses_get",
+            Severity.LOW,
+            f"{name} takes contact details through a GET form",
+            [subject],
+            "The form carries a contact field and submits with GET, so whatever a "
+            "visitor types lands in the query string — in the server's access log, "
+            "in the browser's history, and in the Referer header sent to every "
+            "third-party script on the page that follows. It is also the shape that "
+            "silently does nothing on a static host, since there is no handler to "
+            "read the query.\n\n"
+            f"posts to: {facts.get('form_action') or '—'}",
         )

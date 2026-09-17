@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
+from foreman.collectors import capture as cap
 from foreman.collectors import godaddy as gd
 from foreman.collectors import siteprobe as sp
 from foreman.config import Project, RegistrarSurface
@@ -670,6 +671,10 @@ def _judge_serving(facts):
         "serving": "false",
         "body_shared_with": "0",
         "cert_covers_name": "true",
+        # A way to get in touch is part of healthy now, so a test about a
+        # certificate stays a test about a certificate.
+        "capture_route": "link",
+        "tel_links": "1",
     }
     return _judge({s: {**healthy, **f} for s, f in facts.items()})
 
@@ -768,3 +773,298 @@ def test_a_probe_that_could_not_run_is_a_finding_of_its_own():
     reads as too."""
     found = _judge({"siteprobe:p": {"probe_error": "no ACTIVE domains are known"}})
     assert found["serve_unobserved"].value == "medium"
+
+
+# --- can anybody get in touch -----------------------------------------------
+
+# One page, every shape of capture on it, so each test below can say which part
+# it is about rather than restating a document.
+PAGE = """
+<html><body>
+  <a href="tel:+15551234567">Call us</a>
+  <a href="mailto:hi@acme.test">Email us</a>
+  <form role="search" action="/search" method="get">
+    <input type="search" name="s" placeholder="Search">
+  </form>
+  <form action="/enquiry" method="POST">
+    <input type="hidden" name="csrf" value="abc">
+    <input type="text" name="full_name">
+    <input type="email" name="email">
+    <input type="text" name="telephone">
+    <textarea name="message"></textarea>
+  </form>
+</body></html>
+"""
+
+
+def test_the_form_a_lead_would_use_is_the_one_reported():
+    """Three forms on a page and only one of them takes an enquiry. Reporting
+    the search box because it came first would say the site captures nothing
+    while a working contact form sits under it."""
+    facts = cap.read(PAGE, "https://acme.test/")
+    assert facts["forms"] == "2"
+    assert facts["form_action"] == "https://acme.test/enquiry"
+    assert facts["form_method"] == "post"
+    assert facts["form_email_field"] == "true" and facts["form_tel_field"] == "true"
+    assert facts["form_message_field"] == "true"
+
+
+def test_a_page_with_a_phone_number_and_no_form_still_captures_leads():
+    """Most of a local trade's work arrives by phone. Calling a site with a
+    number in the header a capture failure would be the worst mistake available
+    here."""
+    facts = cap.read('<a href="tel:+15551234567">Call</a>', "https://acme.test/")
+    assert facts["forms"] == "0"
+    assert cap.summarise(facts) == {"capture_route": "link", "captures": "true"}
+
+
+def test_a_contact_field_named_only_in_an_attribute_a_builder_invented_is_found():
+    """Two of the operator's sites carry no name, no type=email and no
+    placeholder — the only word saying what the field is for sits in an
+    attribute the page builder made up."""
+    html = """<form><input type="text" id="input60469" data-aid="CONTACT_FORM_EMAIL">
+              <textarea data-aid="CONTACT_FORM_MESSAGE"></textarea></form>"""
+    assert cap.read(html, "https://acme.test/")["form_email_field"] == "true"
+
+
+def test_a_field_whose_only_hint_is_a_utility_class_is_not_a_contact_field():
+    """The same builder puts forty classes on every input. Reading those as
+    hints would make a search box look like a contact form."""
+    html = '<form><input type="text" class="c1-email-ish c1-6s" name="q"></form>'
+    assert cap.read(html, "https://acme.test/")["form_email_field"] == "false"
+
+
+def test_a_hotel_is_not_a_phone_number():
+    """`tel` matched anywhere in a word turns every hotel booking field into a
+    contact route."""
+    html = '<form><input type="text" name="hotel_name"></form>'
+    assert cap.read(html, "https://acme.test/")["form_tel_field"] == "false"
+
+
+def test_an_unsubscribe_form_is_the_opposite_of_capture():
+    """It carries an email field and on one of the operator's sites it is the
+    only form on the page that does, so it ranks top and would be reported as
+    the way to get in touch."""
+    html = """<form class="wpmst-unsubscribe-form" action="" method="post">
+              <input type="text" name="subscriber_email"></form>"""
+    facts = cap.read(html, "https://acme.test/")
+    assert facts["forms"] == "1" and facts["form_action_scope"] == ""
+    assert cap.summarise(facts)["capture_route"] == "none"
+
+
+def test_a_login_is_not_a_way_to_get_in_touch():
+    html = '<form action="/account/login" method="post"><input type="email"></form>'
+    assert cap.summarise(cap.read(html, "https://acme.test/"))["capture_route"] == "none"
+
+
+def test_a_hidden_input_is_machinery_rather_than_a_field_anybody_fills_in():
+    """Counting a CSRF token as a field is how a one-box search form comes to
+    look like a contact form."""
+    html = '<form><input type="hidden" name="csrf"><input type="email"></form>'
+    assert cap.read(html, "https://acme.test/")["forms"] == "1"
+
+
+def test_a_form_action_of_hash_names_nowhere():
+    """`#` is not a destination even in principle, so nothing on the page says
+    where a lead would go."""
+    html = '<form action="#" method="post"><input type="email" name="email"></form>'
+    facts = cap.read(html, "https://acme.test/")
+    assert facts["form_action_scope"] == cap.NOWHERE
+    assert cap.summarise(facts)["captures"] == "false"
+
+
+def test_a_missing_action_posts_to_the_page_itself_rather_than_nowhere():
+    """The commonest shape on a site whose form is submitted by JavaScript. It
+    cannot be verified from outside, which is not the same as being broken."""
+    html = '<form><input type="email" name="email"></form>'
+    facts = cap.read(html, "https://acme.test/contact")
+    assert facts["form_action_scope"] == cap.SELF
+    assert facts["form_action"] == "https://acme.test/contact"
+    assert cap.summarise(facts)["capture_route"] == "form"
+
+
+def test_a_missing_method_is_not_reported_as_a_get_form():
+    """A browser defaults it to GET, but markup with neither a method nor an
+    action is a form JavaScript submits — and reporting that as a GET form puts
+    a lead in a query string that never exists."""
+    html = '<form><input type="email" name="email"></form>'
+    assert cap.read(html, "https://acme.test/")["form_method"] == ""
+
+
+def test_a_form_posting_to_another_host_is_still_a_capture_route():
+    """Formspree, HubSpot and every hosted form endpoint. A third-party action
+    is where the lead goes, not evidence that it goes nowhere."""
+    html = '<form action="https://forms.example.net/f/1" method="post"><input type="tel"></form>'
+    facts = cap.read(html, "https://acme.test/")
+    assert facts["form_action_scope"] == cap.THIRD_PARTY
+    assert cap.summarise(facts)["capture_route"] == "form"
+
+
+def test_www_and_the_bare_name_are_one_origin():
+    """Otherwise every site that redirects to www posts its form third-party to
+    itself."""
+    html = '<form action="/enquiry" method="post"><input type="email"></form>'
+    facts = cap.read(html, "https://www.acme.test/")
+    assert facts["form_action_scope"] == cap.SAME_ORIGIN
+
+
+def test_only_a_same_origin_action_that_is_not_the_page_itself_is_worth_a_head():
+    """A form posting back to the page just fetched has already been proved to
+    exist, and a third party's endpoint is not this sweep's to poke."""
+    same = cap.read('<form action="/enquiry"><input type="email"></form>', "https://acme.test/")
+    assert cap.action_to_probe(same, "https://acme.test/") == "https://acme.test/enquiry"
+
+    itself = cap.read('<form action="/#contact"><input type="email"></form>', "https://acme.test/")
+    assert cap.action_to_probe(itself, "https://acme.test/") == ""
+
+    away = cap.read(
+        '<form action="https://forms.example.net/f"><input type="email"></form>',
+        "https://acme.test/",
+    )
+    assert cap.action_to_probe(away, "https://acme.test/") == ""
+
+
+def test_an_action_that_answers_404_does_not_by_itself_mean_capture_is_broken():
+    """Two of this portfolio's storefronts post their footer form to a path that
+    answers 404 to a GET and handles the POST perfectly well. Demoting the route
+    on that status would fail two sites that capture fine."""
+    facts = cap.read(
+        '<form action="/contact" method="post"><input type="email"></form>', "https://acme.test/"
+    )
+    facts["form_action_status"] = "404"
+    assert cap.summarise(facts)["capture_route"] == "form"
+
+
+def test_a_page_too_broken_to_parse_reports_no_forms_rather_than_failing():
+    """Losing a whole domain's row to somebody else's malformed markup is the
+    one outcome worse than reporting no forms."""
+    assert cap.read("<form <<< ><input type='email'", "https://acme.test/")["captures"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_the_probe_reads_capture_from_the_body_it_already_fetched(wire):
+    """A second collector would be a second full fetch of 114 pages to read a
+    different part of the same string."""
+    wire["routes"] = {
+        "https://acme.test": lambda: httpx.Response(
+            200, text=PAGE, headers={"content-type": "text/html"}
+        )
+    }
+    facts = await _probe("acme.test", wire)
+    assert facts["capture_route"] == "form" and facts["captures"] == "true"
+    assert facts["tel_links"] == "1" and facts["mailto_links"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_a_form_action_that_is_not_there_is_recorded_as_the_status_it_gave(wire):
+    """A form posting to a relative path that 404s is capture that may be
+    present and broken, and it is a plain HEAD away."""
+    asked = []
+
+    def enquiry():
+        return httpx.Response(404)
+
+    wire["routes"] = {
+        "https://acme.test/enquiry": enquiry,
+        "https://acme.test": lambda: httpx.Response(
+            200,
+            text='<form action="/enquiry" method="post"><input type="email"></form>',
+            headers={"content-type": "text/html"},
+        ),
+    }
+    wire["record"] = asked
+    facts = await _probe("acme.test", wire)
+    assert facts["form_action_status"] == "404"
+    # Recorded, not concluded from: the route still stands.
+    assert facts["capture_route"] == "form"
+
+
+@pytest.mark.asyncio
+async def test_a_domain_that_resolves_nowhere_still_carries_the_capture_cells(wire):
+    """Absent would read as "nobody looked", which is the one thing this
+    repository exists to keep apart from "nothing is there"."""
+    wire["addresses"] = []
+    facts = await _probe("acme.test", wire)
+    assert set(cap.BLANK) <= set(facts)
+    assert facts["capture_route"] == "none"
+
+
+# --- judging capture --------------------------------------------------------
+
+
+def _judge_capture(facts):
+    """Judge capture facts against a domain that is registered, serving and
+    otherwise healthy."""
+    serving = {
+        **sp.BLANK,
+        "resolves": "true",
+        "parked": "false",
+        "serving": "true",
+        "body_shared_with": "0",
+        "cert_covers_name": "true",
+        "https_apex_status": "200",
+        "body_text_chars": "900",
+    }
+    return _judge({s: {**serving, **f} for s, f in facts.items()})
+
+
+def test_a_parked_domain_with_no_form_is_not_a_capture_finding():
+    """77 of 114 are parked on purpose and a holding page has no contact form by
+    design. Filing each one would bury the five that genuinely serve and cannot
+    be reached."""
+    found = _judge_capture({"domain:a.test": {"parked": "true", "capture_route": "none"}})
+    assert "site_captures_nothing" not in found
+
+
+def test_a_domain_that_does_not_serve_is_not_asked_whether_it_captures():
+    """It is already reported as not answering, and a second row saying nobody
+    can get in touch is two vocabularies for one problem."""
+    found = _judge_capture({"domain:a.test": {"serving": "false", "capture_route": "none"}})
+    assert "site_captures_nothing" not in found
+
+
+def test_a_serving_page_with_no_route_in_at_all_is_a_finding():
+    """The failure that looks most like success: every check before this one
+    passes and nobody calls."""
+    found = _judge_capture({"domain:a.test": {"capture_route": "none", "body_text_chars": "4200"}})
+    assert found["site_captures_nothing"].value == "medium"
+
+
+def test_a_thin_page_with_no_form_is_filed_low_because_a_script_may_build_one():
+    """The probe reads what the server sent, exactly as a non-JS crawler does.
+    On a three-hundred-character shell a form mounted by JavaScript is the
+    likelier story than no form at all."""
+    found = _judge_capture({"domain:a.test": {"capture_route": "none", "body_text_chars": "337"}})
+    assert found["site_captures_nothing"].value == "low"
+
+
+def test_a_form_posting_to_a_missing_path_is_worth_knowing_but_not_called_broken():
+    """A POST-only endpoint can legitimately answer a GET with a 404, and two of
+    this portfolio's storefronts do."""
+    found = _judge_capture(
+        {"domain:a.test": {"capture_route": "form", "form_action_status": "404"}}
+    )
+    assert found["site_form_posts_to_missing_path"].value == "low"
+
+
+def test_an_action_answering_405_is_a_path_that_routes():
+    """Which is the whole question a HEAD can answer. Only a 404 or a 410 says
+    the form goes nowhere."""
+    found = _judge_capture(
+        {"domain:a.test": {"capture_route": "form", "form_action_status": "405"}}
+    )
+    assert "site_form_posts_to_missing_path" not in found
+
+
+def test_a_get_form_with_a_contact_field_puts_the_lead_in_the_query_string():
+    """Into the access log, the browser history and the Referer header sent to
+    every third-party script on the page."""
+    found = _judge_capture({"domain:a.test": {"capture_route": "form", "form_method": "get"}})
+    assert found["site_contact_form_uses_get"].value == "low"
+
+
+def test_a_form_whose_markup_states_no_method_is_not_reported_as_a_get_form():
+    """Two of the operator's sites are built that way, and their forms are
+    submitted by the builder's own script."""
+    found = _judge_capture({"domain:a.test": {"capture_route": "form", "form_method": ""}})
+    assert "site_contact_form_uses_get" not in found

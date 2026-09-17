@@ -148,6 +148,33 @@ def _distinct(facts: Facts, params: dict[str, str]) -> bool:
         return False
 
 
+def _captures(facts: Facts, params: dict[str, str]) -> bool:
+    """A visitor has somewhere to put their details.
+
+    The phase after *Serve*, and the one that decides whether any of the rest of
+    it was worth doing. A lead-generation site answering 200 with two thousand
+    distinct words and no way to get in touch has passed every earlier gate and
+    delivered nothing.
+
+    Deliberately short of proof. Nothing submits a test lead — that writes to a
+    live endpoint, and `collectors/capture.py` argues out why it is not built —
+    so this asks whether there is anywhere for a lead to go and whether that
+    place exists, not whether one arrives. That still catches every structural
+    failure: no form and no phone number, a form with no contact field, a form
+    naming nowhere, and a form posting to a path that 404s.
+
+    A `tel:` or `mailto:` link passes on its own. Most of a local trade's work
+    arrives by phone, and a site whose capture route is a number in the header
+    is doing the job — failing it for the absence of a form would be this gate's
+    worst available mistake. An operator building forms specifically can say
+    `require: form` and get the stricter reading.
+    """
+    route = str(facts.get("capture_route") or "none")
+    if params.get("require", "any").strip().lower() == "form":
+        return route == "form"
+    return route != "none"
+
+
 # The prefix under which a person's own confirmations are stored. They are
 # observations like any other — the operator is a collector, and `collector:
 # operator` is what tells an asserted fact from a measured one. Keeping them in
@@ -221,6 +248,12 @@ GATES: dict[str, Gate] = {
             "the page is not a near-copy of its siblings",
             _distinct,
             needs=("body_text_chars",),
+        ),
+        Gate(
+            "captures",
+            "a visitor can get in touch: a working form, or a tel/mailto link",
+            _captures,
+            needs=("capture_route",),
         ),
     )
 }
@@ -370,7 +403,7 @@ def plan_progress(store: Any, plan_id: int) -> dict[str, Any]:
 # whose gate closes by somebody doing something Foreman cannot do.
 OP_KEY = "op"
 # Params the gate reads and the op must not be handed.
-GATE_ONLY = frozenset({"nameserver_suffix", "min_chars", "min_words"})
+GATE_ONLY = frozenset({"nameserver_suffix", "min_chars", "min_words", "require"})
 
 
 def phase_op_params(phase: Phase) -> dict[str, str]:

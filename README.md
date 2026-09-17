@@ -101,6 +101,14 @@ Telling a parked domain from a live one is most of the work: both answer 200, an
 what separates them is a redirect ending at a broker, a body identical to the
 sixty-five others serving the same template, or no text at all.
 
+The phase after that is *Capture*, and `capture` reads it out of the body the
+probe already fetched: how many forms, where each posts — same origin, a third
+party, or nowhere — whether it has an email or phone field, whether the method
+is POST, and whether a `tel:` or `mailto:` link offers a route with no form at
+all. One HEAD confirms a same-origin action exists. Across the operator's 114
+live domains, 12 serve and 7 of those capture: five through a form, two through
+a phone or email link.
+
 ## Deliberately not built
 
 - **No worker fleet, no queue, no provider router.** Collection across 40
@@ -109,6 +117,16 @@ sixty-five others serving the same template, or no text at all.
   anything that spawns subagents needs a ceiling.
 - **No stealth browser.** Foreman crawls projects you own. If a WAF blocks it,
   allowlist it.
+- **No test lead.** The only way to prove capture works end to end is to submit
+  a form and watch it arrive, and every other operation here reads — a DNS
+  query, a GET, a certificate handshake. A submission writes to a live
+  endpoint: it books an appointment, pages a duty phone, and lands in a CRM
+  somebody then has to delete. That is a different kind of operation and it
+  deserves its own argument, guardrail and approval rather than a quiet arrival
+  inside a nightly sweep. The `captures` gate stops one step short and still
+  catches every structural failure — no form and no phone number, a form with no
+  contact field, a form naming nowhere, a form posting to a path that is not
+  there.
 - **No Postgres.** SQLite in WAL mode by default, behind a `Store` protocol,
   with a second implementation over shoal:
 
