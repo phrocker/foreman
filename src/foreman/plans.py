@@ -111,14 +111,39 @@ def _distinct(facts: Facts, params: dict[str, str]) -> bool:
     """This subject's page is not a copy of its siblings'.
 
     The hardest gate, and deliberately so. Eighteen local-services sites
-    differing only by town and trade is the doorway pattern, and the duplicate
-    title and description check is the earliest signal that the set is thin —
-    the same check that a search console complains about, run before it does.
+    differing only by town and trade is the doorway pattern, and this is where a
+    buildout either earns its place or does not.
+
+    Three checks, weakest first. Titles and descriptions are what a search
+    console eventually complains about, so they are the cheapest signal and the
+    one people already know. Length is a floor, not a virtue.
+
+    The one that matters is `body_shared_with`. Unique titles, unique
+    descriptions and two thousand words apiece still describe one page with the
+    town swapped — which is exactly what "the same product in eighteen places"
+    produces by default, without anybody intending it. The digest is taken with
+    the domain's own name and every digit stripped out, so a site that differs
+    only in the places a template varies collapses onto its siblings and is
+    counted. It found 66 of 114 domains sharing one registrar holding page; it
+    does not care whose template it is.
+
+    One shared body is allowed by default because two names for one business is
+    ordinary — `nbparkway.com` and `nationalbusinessparkway.com` are one site and
+    must not be failed for it.
     """
     if _truthy(facts.get("title_duplicated")) or _truthy(facts.get("description_duplicated")):
         return False
+
     try:
-        return int(facts.get("rendered_text_chars") or 0) >= int(params.get("min_words", 600))
+        shared = int(facts.get("body_shared_with") or 0)
+        if shared > int(params.get("max_shared", 1)):
+            return False
+        # `body_text_chars` is what a visitor is served and what siteprobe
+        # records per domain. The gate used to read `rendered_text_chars`, which
+        # only the render collector writes and only for a project's single web
+        # surface — so for eighteen domains it was never present and the gate
+        # could never be anything but unknown.
+        return int(facts.get("body_text_chars") or 0) >= int(params.get("min_chars", 2000))
     except (TypeError, ValueError):
         return False
 
@@ -161,7 +186,7 @@ GATES: dict[str, Gate] = {
             "distinct",
             "the page is not a near-copy of its siblings",
             _distinct,
-            needs=("rendered_text_chars",),
+            needs=("body_text_chars",),
         ),
     )
 }

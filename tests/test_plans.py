@@ -91,18 +91,49 @@ def test_serving_needs_a_certificate_that_is_actually_valid():
     )
 
 
+def test_a_page_that_is_its_siblings_with_the_town_swapped_fails_substance():
+    """The check that matters. Unique titles, unique descriptions and two
+    thousand words apiece still describe one page with the place name changed —
+    which is exactly what "the same product in eighteen locations" produces
+    unless somebody stops it. The digest is taken with the domain's own name and
+    every digit removed, so a template collapses onto its siblings."""
+    templated = {"body_text_chars": "4000", "body_shared_with": "17"}
+    assert not GATES["distinct"].check(templated, {})
+
+
+def test_one_shared_body_is_allowed_because_two_names_for_one_site_is_ordinary():
+    """`nbparkway.com` and `nationalbusinessparkway.com` are one business on two
+    names, and failing that would be punishing a correct thing."""
+    alias = {"body_text_chars": "4000", "body_shared_with": "1"}
+    assert GATES["distinct"].check(alias, {})
+
+
+def test_how_much_sharing_is_tolerated_is_the_operators_call():
+    strict = {"body_text_chars": "4000", "body_shared_with": "1"}
+    assert not GATES["distinct"].check(strict, {"max_shared": "0"})
+
+
+def test_substance_reads_the_body_the_visitor_was_served():
+    """It read `rendered_text_chars`, which only the render collector writes and
+    only for a project's single web surface — so across eighteen domains it was
+    never present and the gate could never be anything but unknown."""
+    assert GATES["distinct"].needs == ("body_text_chars",)
+    assert GATES["distinct"].check({"body_text_chars": "4000"}, {})
+    assert not GATES["distinct"].check({"body_text_chars": "120"}, {})
+
+
 def test_a_page_duplicating_its_siblings_has_not_passed_substance():
     """Eighteen local-services sites differing only by town and trade is the
     doorway pattern. This is the earliest signal that the set is thin — the same
     check a search console eventually complains about, run before it does."""
-    thin = {"rendered_text_chars": "4000", "title_duplicated": "true"}
+    thin = {"body_text_chars": "4000", "title_duplicated": "true"}
     assert not GATES["distinct"].check(thin, {})
-    described = {"rendered_text_chars": "4000", "description_duplicated": "true"}
+    described = {"body_text_chars": "4000", "description_duplicated": "true"}
     assert not GATES["distinct"].check(described, {})
 
 
 def test_substance_also_needs_enough_of_it():
-    assert not GATES["distinct"].check({"rendered_text_chars": "50"}, {"min_words": "600"})
+    assert not GATES["distinct"].check({"body_text_chars": "50"}, {"min_chars": "2000"})
 
 
 def test_a_gate_reading_a_number_it_cannot_parse_does_not_pass():
