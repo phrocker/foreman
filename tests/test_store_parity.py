@@ -1021,3 +1021,54 @@ def test_dismissals_are_scoped_to_their_project(store):
     store.set_finding_outcome(first, "dismissed")
     assert [r["project"] for r in store.dismissals("a")] == ["a"]
     assert store.dismissals("b") == []
+
+
+# --- reports ----------------------------------------------------------------
+
+
+def test_a_report_is_kept_with_the_window_it_covers(store):
+    """Two reports are told apart by what they are about, not by when they
+    happened to be written."""
+    report_id = store.record_report(
+        "accumulo",
+        "## The quarter\n\nSteady.",
+        window_from="2026-06-22",
+        window_to="2026-09-17",
+        highlights=["two releases"],
+        concerns=["4.0 did not ship"],
+        unknown=["mailing list traffic"],
+        events=498,
+        cost_usd=0.76,
+    )
+    row = store.report(report_id)
+    assert row["project"] == "accumulo"
+    assert "Steady." in row["body"]
+    assert (row["window_from"], row["window_to"]) == ("2026-06-22", "2026-09-17")
+    assert json.loads(row["unknown"]) == ["mailing list traffic"]
+    assert int(row["events"]) == 498
+
+
+def test_reports_come_back_newest_first(store):
+    ids = [store.record_report("p", f"body {n}") for n in range(3)]
+    assert [int(r["id"]) for r in store.reports()] == list(reversed(ids))
+
+
+def test_reports_are_scoped_to_their_project(store):
+    store.record_report("a", "one")
+    store.record_report("b", "two")
+    assert [r["project"] for r in store.reports(project="a")] == ["a"]
+
+
+def test_a_report_keeps_what_it_could_not_speak_to(store):
+    """A reader coming back later needs the boundary as much as the first one
+    did — silence would otherwise read as absence."""
+    report_id = store.record_report("p", "body", unknown=["votes", "affiliation"])
+    assert json.loads(store.report(report_id)["unknown"]) == ["votes", "affiliation"]
+
+
+def test_a_thin_report_is_still_a_report(store):
+    """A quiet quarter is a fact about the quarter."""
+    report_id = store.record_report("p", "Nothing happened.")
+    row = store.report(report_id)
+    assert json.loads(row["highlights"]) == []
+    assert row["cost_usd"] is None

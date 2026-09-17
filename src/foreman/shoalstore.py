@@ -132,6 +132,18 @@ FIELDS: dict[str, tuple[str, ...]] = {
         "verified_at",
         "verification_ref",
     ),
+    "report": (
+        "project",
+        "body",
+        "window_from",
+        "window_to",
+        "highlights",
+        "concerns",
+        "unknown",
+        "events",
+        "cost_usd",
+        "created_at",
+    ),
     "plan": ("goal", "status", "created_at", "subjects"),
     "phase": ("plan_id", "position", "name", "gate", "params"),
     "conv": ("title", "started_at"),
@@ -915,6 +927,45 @@ class ShoalStore:
         )
         if superseded_by is not None:
             self.relate([(node("memory", superseded_by), SUPERSEDES, node("memory", memory_id))])
+
+    # --- reports -------------------------------------------------------------
+
+    def record_report(self, project: str, body: str, **fields: Any) -> int:
+        report_id = self._next_id("report")
+        self._write(
+            [
+                self._put(
+                    _rid("report", _pad(report_id)),
+                    "report",
+                    {
+                        "project": project,
+                        "body": body,
+                        "window_from": fields.get("window_from"),
+                        "window_to": fields.get("window_to"),
+                        "highlights": json.dumps(fields.get("highlights") or []),
+                        "concerns": json.dumps(fields.get("concerns") or []),
+                        "unknown": json.dumps(fields.get("unknown") or []),
+                        "events": fields.get("events"),
+                        "cost_usd": fields.get("cost_usd"),
+                        "created_at": utcnow(),
+                    },
+                )
+            ]
+        )
+        return report_id
+
+    def reports(self, project: str | None = None, limit: int = 20) -> list[Record]:
+        rows = [
+            r
+            for r in self._entities("ent:report|").values()
+            if not project or r.get("project") == project
+        ]
+        rows.sort(key=lambda r: (str(r.get("created_at") or ""), int(r["id"])), reverse=True)
+        return rows[:limit]
+
+    def report(self, report_id: int) -> Record | None:
+        rows = self._entities(f"ent:report|{_pad(report_id)}")
+        return next(iter(rows.values()), None)
 
     # --- plans ---------------------------------------------------------------
 

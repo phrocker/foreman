@@ -132,6 +132,20 @@
   /* A plan is a matrix: one row per subject, one column per phase. The state
      is a word as well as a mark, because this is the view somebody scans to
      answer "where are we" and colour alone would not survive printing it. */
+  .report { border-top: 1px solid var(--border); padding: 12px; }
+  .report-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .report-window { font-weight: 600; }
+  .report-meta { color: var(--text-3); font-size: 12px; }
+  .report-body { margin-top: 8px; max-width: 78ch; }
+  /* Collapsed by default: a quarter is a thousand words and a list of them
+     should be scannable. */
+  .report-body[hidden] { display: none; }
+  .report-lists { margin-top: 10px; display: grid; gap: 10px; }
+  .report-lists h4 { margin: 0 0 3px; font-size: 11px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--text-3); }
+  .report-lists ul { margin: 0; padding-left: 18px; }
+  .report-lists li { margin-bottom: 3px; }
+
   .plan-head { padding: 12px; border-top: 1px solid var(--border); }
   .plan-goal { font-weight: 600; }
   .plan-meta { color: var(--text-3); font-size: 12px; margin-top: 3px; }
@@ -527,6 +541,7 @@
     <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
     <button class="tab" data-tab="history"  role="tab" aria-selected="false">History <span class="count" id="countHistory"></span></button>
     <button class="tab" data-tab="memory"   role="tab" aria-selected="false">Memory <span class="count" id="countMemory"></span></button>
+    <button class="tab" data-tab="reports" role="tab" aria-selected="false">Reports <span class="count" id="countReports"></span></button>
     <button class="tab" data-tab="plans"    role="tab" aria-selected="false">Plans <span class="count" id="countPlans"></span></button>
     <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
     <button class="tab" data-tab="settings" role="tab" aria-selected="false">Settings</button>
@@ -595,6 +610,15 @@
     <div class="panel"><div id="memoryList"></div></div>
   </section>
 
+  <section id="panel-reports" role="tabpanel" hidden>
+    <div class="filters">
+      <select id="reportProject" aria-label="Project to write up"></select>
+      <button class="primary" id="reportWrite">Write one</button>
+      <span class="hint">Written from the retained event log, so it costs no API calls. Run <code>foreman history</code> first if a window looks thin.</span>
+    </div>
+    <div class="panel scroll"><div id="reportList"></div></div>
+  </section>
+
   <section id="panel-plans" role="tabpanel" hidden>
     <div class="panel scroll"><div id="planList"></div></div>
   </section>
@@ -632,7 +656,8 @@ const SEV = {
 };
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
-  connectors: [], skills: [], memories: [], settings: null, plans: [],
+  connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
+  openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
   tab: "findings", decisiveOnly: true, kind: "", showRetired: true,
 };
@@ -724,7 +749,7 @@ let stale = [];
 async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans] =
+         settings, plans, reports] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -737,10 +762,11 @@ async function load() {
     fetchPart("/api/memories", []),
     fetchPart("/api/settings", null),
     fetchPart("/api/plans", []),
+    fetchPart("/api/reports", []),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
-    connectors, skills, memories, settings, plans,
+    connectors, skills, memories, settings, plans, reports,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -752,7 +778,7 @@ async function load() {
     ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
-    ["plans", renderPlans], ["settings", renderSettings], ["counts", renderCounts],
+    ["plans", renderPlans], ["reports", renderReports], ["settings", renderSettings], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -781,6 +807,7 @@ function renderCounts() {
   $("countDrift").textContent = visibleDrift().length || "";
   $("countHistory").textContent = visibleHistory().length || "";
   $("countPlans").textContent = state.plans.length || "";
+  $("countReports").textContent = state.reports.length || "";
   // Held, not held-plus-retired: the count is what Foreman currently believes.
   $("countMemory").textContent = state.memories.filter((m) => !m.retired_at).length || "";
 }
@@ -1308,6 +1335,103 @@ $("retiredToggle").addEventListener("click", () => {
   state.showRetired = !state.showRetired;
   $("retiredToggle").setAttribute("aria-pressed", String(state.showRetired));
   renderMemory();
+});
+
+// --- reports ---------------------------------------------------------------
+
+function renderReports() {
+  const select = $("reportProject");
+  const projects = (state.overview?.projects || []).map((p) => p.project || p.id).filter(Boolean);
+  if (select.options.length !== projects.length) {
+    select.innerHTML = projects.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+  }
+
+  const list = $("reportList");
+  if (!state.reports.length) {
+    list.innerHTML =
+      '<div class="empty">No reports yet. One is an account of what a project has been doing, written from the events already retained.</div>';
+    return;
+  }
+  list.innerHTML = state.reports.map((r) => {
+    const open = state.openReports.has(r.id);
+    const lists = [
+      ["Highlights", r.highlights],
+      ["Concerns", r.concerns],
+      // The one a reader most needs and would otherwise assume away.
+      ["Not visible from this record", r.unknown],
+    ].filter(([, items]) => items && items.length).map(([heading, items]) =>
+      `<div><h4>${esc(heading)}</h4><ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>`
+    ).join("");
+
+    return `<div class="report">
+      <div class="report-head" data-id="${r.id}" role="button" tabindex="0">
+        <span class="report-window">${esc(r.project)} · ${esc(r.window_from || "?")} to ${esc(r.window_to || "?")}</span>
+        <span class="report-meta">${r.events || 0} events · written ${esc(ago(r.created_at))}${
+          r.cost_usd ? ` · $${Number(r.cost_usd).toFixed(2)}` : ""
+        }</span>
+        <span class="report-meta">${open ? "hide" : "read"}</span>
+      </div>
+      <div class="report-body" ${open ? "" : "hidden"}>${md(r.body || "")}${
+        lists ? `<div class="report-lists">${lists}</div>` : ""
+      }</div>
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll(".report-head").forEach((el) =>
+    el.addEventListener("click", () => {
+      const id = Number(el.dataset.id);
+      state.openReports.has(id) ? state.openReports.delete(id) : state.openReports.add(id);
+      renderReports();
+    }));
+}
+
+$("reportWrite").addEventListener("click", async () => {
+  const project = $("reportProject").value;
+  if (!project) return;
+  const button = $("reportWrite");
+  button.disabled = true;
+  const list = $("reportList");
+  // Streamed, because a quarter of an active project takes a minute or more and
+  // the alternative is a page that looks stalled for the whole of it.
+  list.innerHTML = '<div class="report"><div class="report-body" id="reportDraft"><span class="caret"></span></div></div>';
+  let draft = "";
+  try {
+    const res = await fetch("/api/reports/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project }),
+    });
+    if (!res.ok) throw new Error(`failed with ${res.status}`);
+    const reader = res.body.getReader();
+    const decode = new TextDecoder();
+    let buffer = "";
+    let failed = null;
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decode.decode(chunk.value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop();
+      for (const frame of frames) {
+        const kind = (frame.match(/^event: (.*)$/m) || [])[1];
+        const raw = (frame.match(/^data: ([\s\S]*)$/m) || [])[1];
+        if (!kind || raw === undefined) continue;
+        const data = JSON.parse(raw);
+        if (kind === "text") {
+          draft += data;
+          $("reportDraft").innerHTML = md(draft) + '<span class="caret"></span>';
+        } else if (kind === "error") {
+          failed = data;
+        }
+      }
+    }
+    if (failed) throw new Error(failed);
+    await load();
+  } catch (err) {
+    list.innerHTML = `<div class="empty">Could not write it: ${esc(err.message)}</div>`;
+  } finally {
+    button.disabled = false;
+  }
 });
 
 // --- plans -----------------------------------------------------------------
@@ -1926,7 +2050,8 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute("aria-selected", String(t.dataset.tab === name)));
   for (const panel of
-       ["findings", "actions", "drift", "history", "memory", "plans", "rules", "settings"]) {
+       ["findings", "actions", "drift", "history", "memory", "plans", "reports",
+        "rules", "settings"]) {
     $("panel-" + panel).hidden = panel !== name;
   }
   try { localStorage.setItem("foreman-tab", name); } catch {}

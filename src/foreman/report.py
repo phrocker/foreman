@@ -144,8 +144,16 @@ async def write_report(
     since: str | None = None,
     connectors: list[Connector] | None = None,
     model: str | None = None,
-) -> tuple[Report, float]:
-    """Assemble the record and have it written up. Returns (report, USD spent)."""
+    on_text: Any = None,
+) -> tuple[int, Report, float]:
+    """Assemble the record, have it written up, and keep it.
+
+    Kept because a report is signed and because the useful question next quarter
+    is "what changed since last time" — which nothing can answer if the last one
+    went to a terminal and a file.
+
+    Returns (report id, report, USD spent).
+    """
     if connectors is None:
         from .connectors.claudecode import ClaudeCodeConnector
 
@@ -172,7 +180,20 @@ async def write_report(
         stream_field="report",
     )
     try:
-        result = await choose(connectors, task).run(task)
+        result = await choose(connectors, task).run(task, on_text=on_text)
     except ConnectorError as exc:
         raise RuntimeError(str(exc)) from exc
-    return result.value, result.cost_usd
+
+    written: Report = result.value
+    report_id = store.record_report(
+        project_id,
+        written.report,
+        window_from=facts.get("from"),
+        window_to=facts.get("to"),
+        highlights=written.highlights,
+        concerns=written.concerns,
+        unknown=written.unknown,
+        events=len(events),
+        cost_usd=result.cost_usd,
+    )
+    return report_id, written, result.cost_usd

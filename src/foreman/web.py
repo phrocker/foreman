@@ -10,6 +10,7 @@ import asyncio
 import json
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from .models import utcnow
 from .plans import plan_progress
 from .precision import label as precision_label
 from .precision import rank, rule_scores
+from .report import write_report
 from .runner import (
     apply_action,
     apply_eligible,
@@ -43,6 +45,8 @@ from .skills import label as skill_label
 from .store import Store, open_store
 
 STATIC = Path(__file__).parent / "static"
+# Matches the CLI, and a quarter is what a report is usually asked for.
+DEFAULT_REPORT_DAYS = 90
 
 
 def _proposed(reply: Any) -> list[dict[str, Any]]:
@@ -441,6 +445,79 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             return dict(s.finding(finding_id) or {})
         finally:
             s.close()
+
+    @app.get("/api/reports")
+    def reports(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        """Accounts written of what a project has been doing.
+
+        Kept rather than printed, because a report is signed and the useful
+        question next quarter is what changed since the last one.
+        """
+        s = store()
+        try:
+            out = []
+            for row in s.reports(project=project):
+                item = dict(row)
+                for key in ("highlights", "concerns", "unknown"):
+                    item[key] = json.loads(row[key] or "[]")
+                out.append(item)
+            return out
+        finally:
+            s.close()
+
+    @app.post("/api/reports/stream")
+    async def write_a_report(payload: dict[str, Any]) -> StreamingResponse:
+        """Write one, streaming it as it is written.
+
+        A quarter of an active project takes a minute or more — the record is
+        several hundred events — so the alternative is a page that looks stalled
+        for the whole of it.
+        """
+        project = (payload.get("project") or "").strip()
+        if not project:
+            raise HTTPException(400, "which project")
+        since = payload.get("since") or (
+            datetime.now(UTC) - timedelta(days=DEFAULT_REPORT_DAYS)
+        ).isoformat(timespec="seconds")
+
+        async def events():
+            queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+            async def run() -> None:
+                s = store()
+                try:
+                    registry = load_registry(registry_path)
+                    report_id, written, cost = await write_report(
+                        s,
+                        project,
+                        since=since,
+                        connectors=build_connectors(registry.connectors),
+                        on_text=lambda text: queue.put_nowait(("text", text)),
+                    )
+                    await queue.put(
+                        ("done", {"id": report_id, "cost_usd": cost, "project": project})
+                    )
+                except Exception as exc:  # noqa: BLE001 - the browser gets one chance
+                    await queue.put(("error", f"{type(exc).__name__}: {exc}"))
+                finally:
+                    s.close()
+                    await queue.put(("end", None))
+
+            task = asyncio.create_task(run())
+            try:
+                while True:
+                    kind, data = await queue.get()
+                    if kind == "end":
+                        break
+                    yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+            finally:
+                task.cancel()
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/plans")
     def plans() -> list[dict[str, Any]]:

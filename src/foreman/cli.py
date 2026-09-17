@@ -671,7 +671,7 @@ def report_cmd(
 
     async def run() -> None:
         with open_store(db, registry=registry) as store:
-            written, cost = await write_report(
+            report_id, written, cost = await write_report(
                 store,
                 project,
                 since=window,
@@ -695,7 +695,7 @@ def report_cmd(
         if out:
             out.write_text(written.report + "\n")
             console.print(f"\n[dim]written to {out}[/]")
-        console.print(f"[dim]${cost:.3f}[/]")
+        console.print(f"[dim]report {report_id} · ${cost:.3f} · also kept in the store[/]")
 
     asyncio.run(run())
 

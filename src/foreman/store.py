@@ -150,6 +150,11 @@ class Store(Protocol):
         self, memory_id: int, because: str, superseded_by: int | None = None
     ) -> None: ...
 
+    # --- reports ---
+    def record_report(self, project: str, body: str, **fields: Any) -> int: ...
+    def reports(self, project: str | None = None, limit: int = 20) -> list[Record]: ...
+    def report(self, report_id: int) -> Record | None: ...
+
     # --- plans ---
     def create_plan(self, goal: str, subjects: Sequence[str]) -> int: ...
     def add_phase(
@@ -357,6 +362,29 @@ CREATE TABLE IF NOT EXISTS memories (
     retired_because TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_open ON memories (retired_at, created_at);
+
+-- An account of what a project has been doing, kept because it is signed and
+-- because the useful question is usually "what changed since last time". A
+-- report written to a terminal and a file is gone from here, so nothing can
+-- compare one quarter to the next or say what was claimed last time.
+CREATE TABLE IF NOT EXISTS reports (
+    id           INTEGER PRIMARY KEY,
+    project      TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    -- The window it covers, so two reports are told apart by what they are
+    -- about rather than by when they happened to be written.
+    window_from  TEXT,
+    window_to    TEXT,
+    highlights   TEXT NOT NULL DEFAULT '[]',
+    concerns     TEXT NOT NULL DEFAULT '[]',
+    -- What the record could not speak to. Kept with the report because a reader
+    -- coming back later needs the boundary as much as the first one did.
+    unknown      TEXT NOT NULL DEFAULT '[]',
+    events       INTEGER,
+    cost_usd     REAL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reports_project ON reports (project, created_at);
 
 -- What is being built, as opposed to what is wrong with what exists. A plan is
 -- the inverse of a finding and resolves the same way: through actions the
@@ -1054,6 +1082,45 @@ class SqliteStore:
         self._db.commit()
         if superseded_by is not None:
             self.relate([(node("memory", superseded_by), SUPERSEDES, node("memory", memory_id))])
+
+    # --- reports ----------------------------------------------------------
+
+    def record_report(self, project: str, body: str, **fields: Any) -> int:
+        cursor = self._db.execute(
+            "INSERT INTO reports "
+            "(project, body, window_from, window_to, highlights, concerns, unknown, "
+            " events, cost_usd, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                project,
+                body,
+                fields.get("window_from"),
+                fields.get("window_to"),
+                json.dumps(fields.get("highlights") or []),
+                json.dumps(fields.get("concerns") or []),
+                json.dumps(fields.get("unknown") or []),
+                fields.get("events"),
+                fields.get("cost_usd"),
+                utcnow(),
+            ),
+        )
+        self._db.commit()
+        return int(cursor.lastrowid)
+
+    def reports(self, project: str | None = None, limit: int = 20) -> list[Record]:
+        sql = "SELECT * FROM reports"
+        params: list[Any] = []
+        if project:
+            sql += " WHERE project = ?"
+            params.append(project)
+        # id last: created_at is second-resolution, so two written in the same
+        # second would otherwise order arbitrarily.
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return _many(self._db.execute(sql, params))
+
+    def report(self, report_id: int) -> Record | None:
+        return _one(self._db.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone())
 
     # --- plans ------------------------------------------------------------
 
