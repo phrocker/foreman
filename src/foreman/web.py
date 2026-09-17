@@ -27,8 +27,9 @@ from .connectors import describe as describe_connectors
 from .diff import project_drift
 from .graph import MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import describe
-from .models import utcnow
-from .plans import plan_progress
+from .models import Observation, utcnow
+from .plans import CONFIRM_PREFIX, plan_progress
+from .plans import _project_for as project_for
 from .precision import label as precision_label
 from .precision import rank, rule_scores
 from .registry_edit import RegistryError, add_project, set_enabled
@@ -566,6 +567,54 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.post("/api/confirm")
+    def confirm_step(payload: dict[str, Any]) -> dict[str, Any]:
+        """Record that a person did something Foreman cannot see.
+
+        Stored as an observation with `collector: operator`, so it reads like
+        any other fact and the gate machinery does not change — and so a reader
+        can always tell an asserted fact from a measured one, which are
+        different kinds of truth and must never look alike.
+        """
+        subject = str(payload.get("subject") or "").strip()
+        key = str(payload.get("key") or "").strip()
+        if not (subject and key.startswith(CONFIRM_PREFIX)):
+            raise HTTPException(400, "need a subject and a confirmation key")
+
+        # Resolved here rather than asked for: a plan names subjects, and which
+        # project owns one is a registry question the caller should not have to
+        # answer. A subject no project claims is a plan nobody can act on, and
+        # saying so beats filing the confirmation somewhere arbitrary.
+        registry = load_registry(registry_path)
+        owner = project_for(registry, subject)
+        if owner is None:
+            raise HTTPException(400, f"no project claims {subject!r}")
+        project = owner.id
+
+        confirmed = bool(payload.get("confirmed", True))
+        s = store()
+        try:
+            run_id = s.start_run(project, "operator")
+            s.record(
+                run_id,
+                [
+                    Observation(
+                        project=project,
+                        collector="operator",
+                        subject=subject,
+                        key=key,
+                        # Retracted rather than deleted when unticked, so the
+                        # record says somebody changed their mind rather than
+                        # that nobody ever said anything.
+                        value="true" if confirmed else None,
+                    )
+                ],
+            )
+            s.finish_run(run_id, ok=True)
+        finally:
+            s.close()
+        return {"project": project, "subject": subject, "key": key, "confirmed": confirmed}
 
     @app.get("/api/plans")
     def plans() -> list[dict[str, Any]]:

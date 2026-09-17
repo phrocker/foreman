@@ -33,6 +33,7 @@ from .config import Registry
 from .connectors import Connector, ConnectorError, Task, choose
 from .graph import FROM_SKILL, SEEN_ON, key_of, node
 from .memory import describe
+from .plans import GATES
 from .store import Store
 
 TIMEOUT_S = 180
@@ -82,7 +83,27 @@ finding: a finding is a problem, a memory is a judgement about how this
 portfolio works. One sentence, still true next month. Name what it bears on in
 `about` as `project|<id>`, `rule|<name>` or `finding|<id>`.
 
-You cannot write one. It is offered, and the operator decides."""
+You cannot write one. It is offered, and the operator decides.
+
+`plan` is for when the operator is describing something they want to *build*
+rather than something that is wrong. Findings are about what exists; a plan is
+about what does not exist yet and should. Offer one only when the conversation
+has settled on an actual shape of work, never as a way of restating a wish.
+
+Phases are ordered and each names a gate, which is how Foreman will know the
+step is done. The gates available are:
+
+{gates}
+
+Use `confirmed` for anything Foreman cannot observe — creating a cloud project,
+signing something, work in a console it has no credential for. Give it
+`key: confirmed:<short_name>`. That step is then a box the operator ticks, and
+Foreman will not pretend to have checked it.
+
+Use a measured gate wherever one fits, and add `op` to a phase's params when
+Foreman could propose the work: `set_dns_record` is the one that exists.
+
+A plan is drafted, never started. It waits for the operator."""
 
 
 class Suggestion(BaseModel):
@@ -104,11 +125,33 @@ class Memory(BaseModel):
     why: str = ""
 
 
+class DraftPhase(BaseModel):
+    name: str
+    gate: str
+    # Gate arguments, and the op's if Foreman is to propose the work.
+    params: dict[str, str] = Field(default_factory=dict)
+
+
+class DraftPlan(BaseModel):
+    """A shape of work, offered for the operator to accept or discard.
+
+    Drafted, never started. A plan is cheap to propose and expensive to abandon
+    half-done — eighteen subjects through five phases is a lot of pending work
+    to conjure out of a conversational "what if" — so this arrives as something
+    to look at and activate, and does nothing until somebody does.
+    """
+
+    goal: str
+    subjects: list[str] = Field(default_factory=list)
+    phases: list[DraftPhase] = Field(default_factory=list)
+
+
 class Reply(BaseModel):
     reply: str
     refs: dict[str, list[Any]] = Field(default_factory=dict)
     suggest: list[Suggestion] = Field(default_factory=list)
     remember: list[Memory] = Field(default_factory=list)
+    plan: DraftPlan | None = None
 
 
 class ChatError(RuntimeError):
@@ -343,6 +386,7 @@ async def ask(
             state=portfolio_state(store, registry),
             history=_history(store, conversation_id),
             question=question,
+            gates="\n".join(f"- `{name}`: {gate.summary}" for name, gate in sorted(GATES.items())),
         ),
         schema=Reply,
         # Nothing. The whole portfolio state is assembled above and handed

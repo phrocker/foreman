@@ -163,6 +163,11 @@
   .st-pending { color: var(--medium); }
   .st-blocked { color: var(--text-3); }
   .st-unknown { color: var(--text-3); }
+  /* A step somebody does by hand. Ticking it writes an observation like any
+     other — the operator is a collector — and it reads differently from a
+     measured cell on purpose: one is a person's word, the other is a fact. */
+  .tick { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .tick input { margin: 0; }
 
   .proj { display: grid; grid-template-columns: 1fr auto auto; gap: 10px 14px;
     align-items: center; padding: 9px 12px; border-top: 1px solid var(--border); }
@@ -1461,6 +1466,24 @@ $("reportWrite").addEventListener("click", async () => {
 // things — one is waiting its turn, the other has no evidence either way.
 const STATE_LABEL = { passed: "done", pending: "todo", blocked: "waiting", unknown: "no data" };
 
+async function confirmStep(box) {
+  const res = await fetch("/api/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      subject: box.dataset.subject,
+      key: box.dataset.key,
+      confirmed: box.checked,
+    }),
+  });
+  if (!res.ok) {
+    box.checked = !box.checked;
+    alert(`Could not record that: ${(await res.json()).detail}`);
+    return;
+  }
+  await load();
+}
+
 function renderPlans() {
   const list = $("planList");
   if (!state.plans.length) {
@@ -1469,6 +1492,7 @@ function renderPlans() {
     return;
   }
   list.innerHTML = state.plans.map((plan) => {
+    void 0;
     const subjects = Object.entries(plan.subjects || {});
     const head = `<div class="plan-head">
         <div class="plan-goal">${esc(plan.goal)}</div>
@@ -1486,13 +1510,29 @@ function renderPlans() {
       }).join("")}</div>`;
 
     const header = (plan.phases || []).map((p) => `<th>${esc(p.name)}</th>`).join("");
+    const phases = plan.phases || [];
     const body = subjects.sort(([a], [b]) => a.localeCompare(b)).map(([subject, states]) =>
       `<tr><td>${esc(subject.replace(/^(domain|subject):/, ""))}</td>${
-        states.map((st) => `<td><span class="st st-${esc(st)}">${STATE_LABEL[st] || esc(st)}</span></td>`).join("")
+        states.map((st, i) => {
+          const key = phases[i] && phases[i].confirm_key;
+          // A step only a person can do gets a box to tick. Everything else is
+          // measured, and showing a box would invite somebody to assert what a
+          // collector is there to decide.
+          if (key) {
+            const done = st === "passed";
+            return `<td><label class="tick"><input type="checkbox" ${done ? "checked" : ""}
+              data-subject="${esc(subject)}" data-key="${esc(key)}" class="confirm-box">
+              <span class="st st-${esc(st)}">${done ? "you confirmed" : "you do this"}</span></label></td>`;
+          }
+          return `<td><span class="st st-${esc(st)}">${STATE_LABEL[st] || esc(st)}</span></td>`;
+        }).join("")
       }</tr>`).join("");
 
     return head + `<table class="matrix"><thead><tr><th>subject</th>${header}</tr></thead><tbody>${body}</tbody></table>`;
   }).join("");
+
+  list.querySelectorAll(".confirm-box").forEach((box) =>
+    box.addEventListener("change", () => confirmStep(box)));
 }
 
 // --- which projects are swept ----------------------------------------------

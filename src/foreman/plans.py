@@ -148,6 +148,33 @@ def _distinct(facts: Facts, params: dict[str, str]) -> bool:
         return False
 
 
+# The prefix under which a person's own confirmations are stored. They are
+# observations like any other — the operator is a collector, and `collector:
+# operator` is what tells an asserted fact from a measured one. Keeping them in
+# the same place means the gate machinery does not change at all, and a reader
+# can always see which kind of truth a phase rests on.
+CONFIRM_PREFIX = "confirmed:"
+
+
+def confirm_key(phase_name: str) -> str:
+    return f"{CONFIRM_PREFIX}{phase_name.strip().lower().replace(' ', '_')}"
+
+
+def _confirmed(facts: Facts, params: dict[str, str]) -> bool:
+    """Somebody said this is done.
+
+    For the steps Foreman cannot see. Creating a cloud project, signing a
+    contract, pointing a registrar Foreman has no token for — real work, done by
+    a person, and a plan that could not represent it would either stall
+    permanently or pretend the step did not exist.
+
+    Weaker than every other gate here and deliberately labelled so: it is one
+    person's word at one moment, and unlike a measured gate it cannot notice
+    that it stopped being true.
+    """
+    return str(facts.get(params.get("key", ""), "")).lower() == "true"
+
+
 def _controls_dns(facts: Facts, params: dict[str, str]) -> bool:
     """Foreman's token is being served for this zone.
 
@@ -164,6 +191,13 @@ def _controls_dns(facts: Facts, params: dict[str, str]) -> bool:
 GATES: dict[str, Gate] = {
     g.name: g
     for g in (
+        Gate(
+            "confirmed",
+            "you have confirmed this step yourself",
+            _confirmed,
+            # No `needs`: an unconfirmed step is pending, not unknown. Nobody is
+            # waiting on a sweep — they are waiting on somebody to do the work.
+        ),
         Gate(
             "controls_dns",
             "Foreman's token is served at _foreman for this domain",
@@ -314,7 +348,15 @@ def plan_progress(store: Any, plan_id: int) -> dict[str, Any]:
         "status": row["status"],
         "created_at": row["created_at"],
         "phases": [
-            {"name": p.name, "position": p.position, "gate": p.gate, "summary": p.gate_summary}
+            {
+                "name": p.name,
+                "position": p.position,
+                "gate": p.gate,
+                "summary": p.gate_summary,
+                # The key a confirmation is stored under, so a reader knows
+                # which cells are somebody's word rather than a measurement.
+                "confirm_key": p.params.get("key") if p.gate == "confirmed" else None,
+            }
             for p in sorted(phases, key=lambda p: p.position)
         ],
         "subjects": {s: [str(x) for x in standings] for s, standings in rows.items()},
