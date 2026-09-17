@@ -26,9 +26,11 @@ from .history import digest
 from .store import Store
 
 TIMEOUT_S = 300
-# Enough of the record to write from. Beyond this the window is the thing to
-# narrow, not the sample.
-MAX_ITEMS = 220
+# A quarter of an active project is several hundred events and has to fit whole.
+# At 220 a ninety-day window on Accumulo was cut to its first month, and the
+# report opened by saying so rather than writing confidently from a third of the
+# record — right of it, and not a substitute for having the record.
+MAX_ITEMS = 900
 
 PROMPT = """Write an account of what this project has been doing, for somebody
 who has to sign it.
@@ -49,6 +51,12 @@ Window: {window}
 Ground every sentence in the record above. If the quarter was quiet, say so — a
 thin quarter is a fact about the quarter, and padding is worse than brevity
 because somebody will act on it.
+
+Each line is dated by when it happened. Where an item was opened earlier, that
+date is given too: GitHub reports anything updated in the window, so an old
+issue somebody commented on last week appears dated last week. Treat those as
+activity on an old item, never as new work, and derive no per-day or per-week
+rate from them.
 
 Name people by their handles where it is due; a report is partly how
 contribution gets acknowledged. Distinguish a merged pull request from an opened
@@ -102,13 +110,22 @@ def _items(events: list[Any]) -> str:
             )
         elif event["kind"] == "issue":
             state = f" [{fields.get('state', '')}]"
+        # When it was opened, where that differs from when it was touched.
+        # `issues?since=` returns anything *updated* since, so an issue from
+        # years ago that somebody commented on last week arrives dated last
+        # week. Without this a report reads twenty-two ancient pull requests
+        # touched on one day as twenty-two merged that day, which is how a
+        # velocity number gets quoted that nobody can reproduce.
+        opened = str(fields.get("created") or "")[:10]
+        age = f" (opened {opened})" if opened and opened != str(event["at"])[:10] else ""
         out.append(
-            f"  {str(event['at'])[:10]} {event['kind']}#{event['ref']}{state} "
+            f"  {str(event['at'])[:10]} {event['kind']}#{event['ref']}{state}{age} "
             f"{event['actor'] or 'unknown'}: {event['title'] or ''}"
         )
     if len(events) > MAX_ITEMS:
         out.append(
-            f"  … and {len(events) - MAX_ITEMS} more; narrow the window rather than trust a sample"
+            f"  … and {len(events) - MAX_ITEMS} more. Say so, and say that the account "
+            "covers only part of the window."
         )
     return "\n".join(out)
 
