@@ -262,7 +262,7 @@ def apply_action(
         raise
 
     try:
-        written = apply_patch(target, fresh)
+        written = apply_patch(target, fresh, action_id=action_id)
     except OpNotApplicable as exc:
         # The world moved between the guardrail passing and the effect landing —
         # a file rewritten, or a branch force-pushed after GitHub was asked to

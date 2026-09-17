@@ -163,6 +163,22 @@ class Project(BaseModel):
     def label(self) -> str:
         return self.name or self.id
 
+    # Where a file edit lands. The same fix is the same operation either way, so
+    # this is delivery rather than a different kind of effect — the op, its
+    # equivalence class and its digest are all unchanged, which matters because
+    # a class that split by delivery would halve the evidence behind every
+    # claim the ledger makes.
+    deliver: str = "worktree"
+
+    @field_validator("deliver")
+    @classmethod
+    def _known_delivery(cls, v: str) -> str:
+        from .delivery import MODES
+
+        if v not in MODES:
+            raise ValueError(f"unknown delivery {v!r}; known: {list(MODES)}")
+        return v
+
     @property
     def fixable(self) -> bool:
         return self.repo is not None and self.repo.exists()

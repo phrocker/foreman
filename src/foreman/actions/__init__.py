@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import Project
+from ..delivery import PULL_REQUEST, deliver_as_pull_request
 from .base import (
     FileEdit,
     Merge,
@@ -233,7 +234,7 @@ def propose(project: Project, findings: Sequence[Any]) -> list[ActionProposal]:
     return proposals
 
 
-def apply(project: Project, proposal: ActionProposal) -> list[str]:
+def apply(project: Project, proposal: ActionProposal, action_id: int | None = None) -> list[str]:
     """Carry out a proposal's patch, and say what it did.
 
     Each edit is verified against the `before` text the patch was computed from.
@@ -272,7 +273,27 @@ def apply(project: Project, proposal: ActionProposal) -> list[str]:
     # part that can be redone: a file is fixed by re-running, a record is fixed
     # by another write that the world learns about at the speed of its TTL, and
     # a merge is fixed by a human writing a revert.
-    return written + _set_all(proposal) + _merge_all(proposal)
+    done = written + _set_all(proposal) + _merge_all(proposal)
+
+    # Delivered as a pull request if the project asks for it. After the edits
+    # are on disk, not instead of: the check that a file still says what the op
+    # was computed against has to run against the working tree, and doing it on
+    # a branch would be checking a copy.
+    if written and project.deliver == PULL_REQUEST:
+        assert project.repo is not None
+        url = deliver_as_pull_request(
+            project.repo,
+            written,
+            proposal.verb,
+            # The decision this branch came from. Named in the branch so a
+            # change on a remote can be traced back to the approval that made
+            # it, rather than being an anonymous Foreman branch among others.
+            action_id or 0,
+            proposal.statement,
+            proposal.summary,
+        )
+        done.append(url)
+    return done
 
 
 def _set_all(proposal: ActionProposal) -> list[str]:

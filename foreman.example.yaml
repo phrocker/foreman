@@ -67,5 +67,19 @@ projects:
 # question about the portfolio needs none of them, because the state is
 # assembled and handed over rather than fetched. That is what lets the chat
 # pane run on a backend with no tools at all.
+# Where an approved file edit lands.
+#
+#   worktree      (default) written straight into the checkout, for you to
+#                 review with `git diff` and commit yourself.
+#   pull_request  committed onto its own branch and proposed, so the reason
+#                 travels with the change and two approvals do not end up mixed
+#                 together in one dirty tree.
+#
+# Only meaningful for a project with a `repo`. The operation, its equivalence
+# class and its digest are identical either way — this is how a change is
+# delivered, not what the change is.
+#
+# deliver: pull_request
+
 connectors:
   - kind: claude-code
