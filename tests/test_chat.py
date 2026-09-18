@@ -169,3 +169,24 @@ def test_conversations_are_listed_most_recent_first(world):
     listed = store.conversations()
     assert [c["id"] for c in listed][0] == second
     assert listed[0]["turns"] == 1
+
+
+def test_the_state_says_how_a_project_delivers_an_approved_change(world):
+    """Omitting it produced a confidently wrong answer.
+
+    Asked to open pull requests for a project's dependency work, Foreman replied
+    "I can't open PRs myself — I only read state and suggest". It can:
+    `deliver: pull_request` is what turns an approval into one. Unable and
+    not-configured are different answers, and only one of them has a fix the
+    operator can act on.
+    """
+    _, store = world
+    registry = Registry(
+        projects=[
+            Project(id="a", repo=store.path.parent, deliver="pull_request"),
+            Project(id="b", repo=store.path.parent),
+        ]
+    )
+    state = portfolio_state(store, registry)
+    assert "deliver=pull_request" in state
+    assert "deliver=worktree" in state

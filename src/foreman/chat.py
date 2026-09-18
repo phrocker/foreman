@@ -49,6 +49,14 @@ You cannot approve or reject anything, and you cannot record anything as
 settled. If an action should be taken, put it in `suggest` with a short reason
 and the operator will decide.
 
+That limit is about approval, not about what Foreman can do once approved. Each
+project carries a `deliver` mode: `worktree` writes an approved change into the
+local checkout, `pull_request` branches, commits and opens a pull request for
+it. So "Foreman cannot open pull requests" is wrong — say which mode the project
+is on, and that changing it is a one-line edit to the registry. A merge-effect
+action such as `bump_dependency` is the exception: it merges a pull request
+somebody else opened, so delivery does not apply to it at all.
+
 ## Portfolio state
 
 {state}
@@ -170,9 +178,16 @@ def portfolio_state(store: Store, registry: Registry) -> str:
     for project in registry.active:
         surfaces = ",".join(project.surface_names) or "none"
         lines.append(
+            # `deliver` is here because leaving it out produced a confidently
+            # wrong answer: asked to open pull requests for a project's
+            # dependency work, Foreman replied "I can't open PRs myself — I only
+            # read state and suggest". It can; `deliver: pull_request` is what
+            # turns an approval into one. Unable and not-configured are different
+            # answers, and only one of them has a fix the operator can act on.
             f"- {project.id} ({project.label}) surfaces={surfaces} "
             f"domains={','.join(project.active_domains) or 'none'} "
-            f"fixable={'yes' if project.fixable else 'no'}"
+            f"fixable={'yes' if project.fixable else 'no'} "
+            f"deliver={project.deliver}"
         )
 
     findings = store.open_findings()
