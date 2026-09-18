@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -93,6 +94,11 @@ class Job:
                 "error": self.error,
                 "log": list(self.log),
             }
+
+
+# Enough to hide the latency of a page's worth of registrar reads, few enough
+# that a dashboard refresh is not a burst somebody rate-limits.
+STALENESS_WORKERS = 8
 
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
@@ -206,18 +212,54 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         # progress bar towards a threshold that does not exist is a promise the
         # page has no business making.
         item["automatable"] = automatable(row["statement"])
-        # Staleness is a read of the working tree, so it is computed per request
-        # rather than stored: an action that was fine a minute ago may not be.
+        # Deliberately absent here. Deciding whether an action is still valid
+        # means re-reading the world it acts on, and for `set_dns_record` that
+        # is a request to the registrar — eighteen of them made a dashboard
+        # refresh take twenty-five seconds and put eighteen API calls on the
+        # wire every time somebody pressed F5. It is its own endpoint now, so
+        # the board draws immediately and the badges arrive after.
+        #
+        # Nothing is lost by the wait: this was never the guardrail. `approve`
+        # rehydrates and refuses on its own, so a stale action that was clicked
+        # before its badge appeared is still refused.
         item["stale"] = None
-        try:
-            from .actions import rehydrate
-
-            rehydrate(registry.get(row["project"]), row)
-        except Stale as exc:
-            item["stale"] = str(exc)
-        except KeyError:
-            item["stale"] = "project is no longer in the registry"
         return item
+
+    def _staleness(registry, rows: list[Any]) -> list[str | None]:
+        """Re-derive every pending action at once, to find the dead ones.
+
+        Computed per request rather than stored, because an action that was fine
+        a minute ago may not be — but *serially* it made the dashboard take
+        twenty-five seconds to load. `set_dns_record` rehydrates by reading the
+        live record from the registrar, which is about 1.4 seconds of network
+        each, and eighteen of them were queued behind one another while every
+        other panel sat waiting.
+
+        Threads rather than a rewrite: each of these is a socket read that holds
+        no lock and touches no store, so the work is already parallel in
+        everything but the arrangement. The pool is small on purpose — this is
+        eighteen requests to one registrar, and the fix for a slow page is not a
+        burst that gets Foreman rate-limited.
+        """
+        from .actions import rehydrate
+
+        def check(row: Any) -> str | None:
+            try:
+                rehydrate(registry.get(row["project"]), row)
+            except Stale as exc:
+                return str(exc)
+            except KeyError:
+                return "project is no longer in the registry"
+            except Exception as exc:  # noqa: BLE001
+                # A registrar that times out is not evidence the action is dead.
+                # Saying so beats both a spinner and a false "stale".
+                return None if isinstance(exc, TimeoutError) else f"could not be checked: {exc}"
+            return None
+
+        if not rows:
+            return []
+        with ThreadPoolExecutor(max_workers=STALENESS_WORKERS) as pool:
+            return list(pool.map(check, rows))
 
     @app.get("/api/actions")
     def list_actions(project: str | None = Query(None)) -> list[dict[str, Any]]:
@@ -227,6 +269,27 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             return [_decorate(s, row, registry) for row in s.pending_actions(project)]
         finally:
             s.close()
+
+    @app.get("/api/actions/stale")
+    def actions_stale(project: str | None = Query(None)) -> dict[str, str]:
+        """Which pending actions no longer hold, as {id: reason}.
+
+        Split from the listing because it is the expensive half and the page can
+        draw without it. Absent from the map means "still valid"; the page shows
+        no badge until this answers, which is the honest rendering of not
+        knowing yet.
+        """
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            rows = s.pending_actions(project)
+        finally:
+            s.close()
+        return {
+            str(row["id"]): reason
+            for row, reason in zip(rows, _staleness(registry, rows), strict=True)
+            if reason
+        }
 
     @app.post("/api/actions/propose")
     def propose(project: str | None = Query(None)) -> dict[str, Any]:

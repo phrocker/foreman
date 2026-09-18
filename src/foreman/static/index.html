@@ -869,6 +869,12 @@ async function load() {
   // Each panel renders independently. One throwing used to abort the rest of
   // load(), so a single bad reference blanked the whole page instead of one
   // section — a failure mode that is much harder to notice than an empty panel.
+  // After the board is drawn, never before it. Deciding whether an action still
+  // holds means re-reading the world it acts on — for a DNS record that is a
+  // request to the registrar each — and blocking the whole page on eighteen of
+  // them made a refresh take twenty-five seconds. Nothing is lost by the wait:
+  // approving rehydrates and refuses on its own, so this is a label, not a gate.
+  loadStaleness();
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
@@ -884,6 +890,23 @@ async function load() {
       console.error(`render failed: ${name}`, err);
     }
   }
+}
+
+
+/** Mark the pending actions that no longer hold.
+ *
+ *  Its own request because it is the slow half. Until it answers, an action
+ *  carries no badge — which is the honest rendering of not knowing yet, and
+ *  better than a spinner on a row that is almost certainly fine. */
+async function loadStaleness() {
+  const stale = await fetchPart("/api/actions/stale", null);
+  if (!stale) return;
+  let changed = false;
+  for (const a of state.actions) {
+    const reason = stale[String(a.id)] || null;
+    if (a.stale !== reason) { a.stale = reason; changed = true; }
+  }
+  if (changed) { renderActions(); renderCounts(); }
 }
 
 /** Say so when the server could not answer, rather than showing empty panels.
