@@ -55,16 +55,55 @@ def branch_name(verb: str, action_id: int) -> str:
 
 
 def default_branch(repo: Path) -> str:
+    """The branch a pull request from this repository should target.
+
+    Asked of the forge rather than of the clone. `refs/remotes/origin/HEAD` is a
+    local cache written at clone time and refreshed only by an explicit
+    `git remote set-head`, so it goes stale the moment somebody changes the
+    default branch on the web — and it had. squibble's pointer still named
+    `claude/kids-ai-design-marketplace-QdjQD`, a branch from the repository's
+    first week, while GitHub had said `main` for months. Delivery went looking
+    for the wrong base, and the failure was luck: had that branch still existed
+    locally, the pull request would have been opened against it quietly.
+
+    The local answers are kept as fallbacks, for a repository with no `gh`, no
+    network or no remote at all. Every one of them is a guess, which is why the
+    start point is verified before anything is committed to it.
+    """
+    live = _gh_default_branch(repo)
+    if live:
+        return live
     head = _git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", check=False)
     if head:
-        return head.rsplit("/", 1)[-1]
-    # A repository with no origin/HEAD is ordinary enough — a fresh clone that
-    # has never fetched it — and guessing is better than refusing, as long as
-    # the guess is checked before anything is pushed to it.
+        # The whole prefix, not the last path segment: a branch name may contain
+        # slashes, and taking the segment after the final slash turned
+        # `claude/kids-ai-design-marketplace-QdjQD` into a name that exists
+        # nowhere.
+        return head.removeprefix("refs/remotes/origin/")
     for candidate in ("main", "master"):
         if _git(repo, "rev-parse", "--verify", f"refs/heads/{candidate}", check=False):
             return candidate
     raise DeliveryError("cannot tell which branch is the default")
+
+
+def _gh_default_branch(repo: Path) -> str | None:
+    """What the forge says, or None if it cannot be asked.
+
+    Never raises. An unreachable network or a repository `gh` does not recognise
+    is a reason to fall back to the local guess, not a reason to fail an
+    approval the operator already gave.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
 
 
 def _start_point(repo: Path, base: str) -> str:
@@ -114,6 +153,20 @@ def open_pull_request(repo: Path, branch: str, title: str, body: str, base: str)
     return result.stdout.strip().splitlines()[-1] if result.stdout.strip() else branch
 
 
+def _discard(repo: Path, paths: list[str], tracked: set[str]) -> None:
+    """Undo edits that were written for a delivery that did not happen.
+
+    Scoped to the paths this action wrote, and nothing else. `git clean` would
+    be shorter and would also delete whatever else the operator had lying around
+    untracked, which is not Foreman's to throw away.
+    """
+    for path in paths:
+        if path in tracked:
+            _git(repo, "checkout", "--", path, check=False)
+        else:
+            (repo / path).unlink(missing_ok=True)
+
+
 def deliver_as_pull_request(
     repo: Path, paths: list[str], verb: str, action_id: int, statement: str, summary: str
 ) -> str:
@@ -124,12 +177,24 @@ def deliver_as_pull_request(
     doing it on a branch would be checking a copy.
 
     The working tree is returned to where it started afterwards, whatever
-    happens. Leaving somebody on a Foreman branch is a small betrayal that only
-    shows up much later, in somebody else's commit.
+    happens — the branch *and* the edits. Leaving somebody on a Foreman branch
+    is a small betrayal that only shows up much later, in somebody else's
+    commit; leaving the edits loose in their tree is the same betrayal with a
+    shorter fuse, because the next `git add -A` sweeps up a change nobody
+    decided to make. The first delivery that failed did exactly that: squibble
+    was left holding an untracked `.github/dependabot.yml` from an approval that
+    had not gone through.
     """
     base = default_branch(repo)
     started_on = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     branch = branch_name(verb, action_id)
+    # Recorded before anything moves: on the way out, a path that git already
+    # knew about is restored and one it did not is removed. Those are different
+    # operations and the difference is only knowable from here.
+    tracked = {
+        path for path in paths if _git(repo, "ls-files", "--error-unmatch", "--", path, check=False)
+    }
+    delivered = False
     try:
         # From the base, explicitly — never from wherever HEAD happens to be.
         # A checkout is not usually sitting on the default branch: the first
@@ -146,8 +211,12 @@ def deliver_as_pull_request(
             f"recorded:\n\n```\n{statement}\n```\n"
         )
         _git(repo, "commit", "-m", f"{summary}\n\n{statement}")
-        return open_pull_request(repo, branch, summary, body, base)
+        url = open_pull_request(repo, branch, summary, body, base)
+        delivered = True
+        return url
     finally:
         # Even on failure: the branch may be left behind for somebody to look
         # at, but the tree they were working in should be as they left it.
         _git(repo, "checkout", started_on, check=False)
+        if not delivered:
+            _discard(repo, paths, tracked)

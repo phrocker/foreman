@@ -9,6 +9,7 @@ made to push to a default branch, even by accident.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -161,3 +162,88 @@ def test_a_delivery_branch_starts_from_the_base_not_from_wherever_head_is(tmp_pa
 
     assert seen["files"] == [".github/dependabot.yml"]
     assert "unrelated.txt" not in seen["files"]
+
+
+def test_a_default_branch_with_a_slash_in_it_survives():
+    """squibble's default branch is `claude/kids-ai-design-marketplace-QdjQD`.
+
+    Reading the last path segment out of `refs/remotes/origin/HEAD` gave
+    `kids-ai-design-marketplace-QdjQD`, a branch that exists nowhere, and the
+    first delivery to that repository failed looking for it.
+    """
+    repo = _repo(Path(tempfile.mkdtemp()) / "r")
+
+    def run(*args):
+        subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True)
+
+    run("branch", "-m", "main", "team/long-lived")
+    run("update-ref", "refs/remotes/origin/team/long-lived", "HEAD")
+    run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/team/long-lived")
+
+    assert default_branch(repo) == "team/long-lived"
+
+
+def test_a_failed_delivery_does_not_leave_its_edits_in_the_tree(tmp_path, monkeypatch):
+    """The first real failure left squibble holding an untracked
+    `.github/dependabot.yml` from an approval that never went through.
+
+    That is worse than the failure: the next `git add -A` sweeps up a change
+    nobody decided to make, on whatever branch the operator happened to be on.
+    """
+    repo = _repo(tmp_path / "r")
+    (repo / "robots.txt").write_text("User-agent: *\nDisallow: /x\n")
+    (repo / "new.txt").write_text("written for a delivery\n")
+
+    def fail(*a, **k):
+        raise DeliveryError("gh pr create: no such remote")
+
+    monkeypatch.setattr("foreman.delivery.open_pull_request", fail)
+    with pytest.raises(DeliveryError):
+        deliver_as_pull_request(
+            repo, ["robots.txt", "new.txt"], "anchor_asset_disallow", 7, "DO x()", "Fix robots"
+        )
+
+    assert not (repo / "new.txt").exists(), "an untracked edit was left behind"
+    assert (repo / "robots.txt").read_text() == "User-agent: *\n", "a tracked edit was left behind"
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip()
+        == ""
+    )
+
+
+def test_the_forge_outranks_a_stale_local_pointer(tmp_path, monkeypatch):
+    """`refs/remotes/origin/HEAD` is a cache written at clone time.
+
+    squibble's still named a branch from the repository's first week while
+    GitHub had said `main` for months, and delivery went looking for a base that
+    was not there. The failure was luck — had the branch still existed locally,
+    the pull request would have been opened against it silently.
+    """
+    repo = _repo(tmp_path / "r")
+
+    def run(*args):
+        subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True)
+
+    run("branch", "stale/first-week")
+    run("update-ref", "refs/remotes/origin/stale/first-week", "HEAD")
+    run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/stale/first-week")
+    assert default_branch(repo) == "stale/first-week"
+
+    monkeypatch.setattr("foreman.delivery._gh_default_branch", lambda _: "main")
+    assert default_branch(repo) == "main"
+
+
+def test_an_unreachable_forge_reports_nothing_rather_than_raising(tmp_path, monkeypatch):
+    """The operator already approved. A network that is down is a reason to fall
+    back to the local guess, not to lose the decision."""
+    from foreman import delivery
+
+    repo = _repo(tmp_path / "r")
+
+    def explode(*a, **k):
+        raise OSError("no network")
+
+    monkeypatch.setattr(delivery.subprocess, "run", explode)
+    assert delivery._gh_default_branch(repo) is None
