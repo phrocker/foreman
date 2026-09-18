@@ -481,6 +481,20 @@
     padding: 1px 5px; border-radius: 4px;
   }
   .turn-body a { color: var(--accent); }
+
+  /* A memory that was kept, stated rather than asked. Quieter than a suggestion
+     because there is nothing to decide — it is a receipt, not a prompt. */
+  .kept {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin-top: 8px;
+    padding: 6px 10px;
+    border-left: 2px solid var(--border-firm);
+    color: var(--text-2);
+    font-size: 0.92em;
+  }
+  .kept-mark { color: var(--text-3); }
   @media (max-width: 900px) {
     /* No room for both; the pane takes the screen when open. */
     .shell[data-chat="open"] .chat-pane { position: fixed; inset: 0; z-index: 10; flex-basis: auto; }
@@ -2100,13 +2114,14 @@ function renderChat(pending) {
       `<div class="suggest"><span>#${sg.action_id} — ${esc(sg.why || sg.decision)}</span>
         <button class="primary sg-approve" data-id="${sg.action_id}">Approve &amp; apply</button>
         <button class="sg-reject" data-id="${sg.action_id}">Reject</button></div>`).join("");
-    // A proposed memory, which is a proposal for exactly the same reason an
-    // approval is: durable state is yours. It is written when you press this.
-    const proposed = (t.remember || []).map((m, mi) =>
-      `<div class="suggest"><span>Remember: “${esc(m.statement)}”${
-        m.why ? ` — ${esc(m.why)}` : ""}${
-        m.about && m.about.length ? ` [${m.about.map((a) => esc(nodeLabel(a))).join(", ")}]` : ""}</span>
-        <button class="primary sg-remember" data-turn="${ti}" data-i="${mi}">Remember</button></div>`).join("");
+    // Already kept, not offered. Asking the operator to confirm a judgement they
+    // had just made themselves was a second chance to forget it, not a
+    // safeguard — what makes this safe is that a memory is retired rather than
+    // deleted, so being wrong costs a correction. Shown so it is never written
+    // silently: you can always see what was kept, and retire it from Memory.
+    const proposed = (t.remember || []).map((m) =>
+      `<div class="kept"><span class="kept-mark">◆</span><span>Remembered: “${esc(m.statement)}”${
+        m.about && m.about.length ? ` [${m.about.map((a) => esc(nodeLabel(a))).join(", ")}]` : ""}</span></div>`).join("");
     return `<div class="turn ${esc(t.role)}">
       <div class="turn-role">${t.role === "user" ? "you" : "foreman"}</div>
       <div class="turn-body">${md(t.content)}</div>
@@ -2126,15 +2141,6 @@ function renderChat(pending) {
     b.addEventListener("click", () => decide(b.dataset.id, "approve")));
   log.querySelectorAll(".sg-reject").forEach((b) =>
     b.addEventListener("click", () => decide(b.dataset.id, "reject")));
-  log.querySelectorAll(".sg-remember").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const m = turns[b.dataset.turn].remember[b.dataset.i];
-      b.disabled = true;
-      // The conversation it came out of travels with it, so "why do we believe
-      // this" stays answerable after everyone has forgotten the exchange.
-      if (await remember(m.statement, m.about || [], conversationId)) b.textContent = "Remembered";
-      else b.disabled = false;
-    }));
 }
 
 $("chatForm").addEventListener("submit", async (e) => {

@@ -12,7 +12,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from foreman.chat import PROMPT, Reply, ask, portfolio_state
+from foreman.chat import PROMPT, Memory, Reply, ask, portfolio_state
 from foreman.config import Project, Registry
 from foreman.connectors import Result
 from foreman.models import Finding, Severity
@@ -190,3 +190,53 @@ def test_the_state_says_how_a_project_delivers_an_approved_change(world):
     state = portfolio_state(store, registry)
     assert "deliver=pull_request" in state
     assert "deliver=worktree" in state
+
+
+class _Canned:
+    """A connector that returns one prepared reply, so the memory path can be
+    exercised without a model."""
+
+    name, capabilities = "canned", frozenset()
+
+    def __init__(self, reply):
+        self.reply = reply
+
+    def available(self):
+        return True
+
+    async def run(self, task, on_text=None):
+        return Result(value=self.reply, cost_usd=0.0, connector=self.name)
+
+
+@pytest.mark.asyncio
+async def test_a_memory_is_kept_rather_than_offered(world):
+    """The button was a second chance to forget, not a safeguard.
+
+    The operator had already made the judgement in the conversation; asking them
+    to confirm it added no protection. What makes this safe is that a memory is
+    retired rather than deleted, so being wrong costs a correction.
+    """
+    registry, store = world
+    reply = Reply(
+        reply="noted",
+        remember=[Memory(statement="Squibble's default branch is main, not the old one.")],
+    )
+    conv, _, _ = await ask(store, registry, "why did that fail?", connectors=[_Canned(reply)])
+
+    kept = [m for m in store.memories() if "default branch" in (m["statement"] or "")]
+    assert len(kept) == 1
+    assert str(kept[0]["id"])
+
+
+@pytest.mark.asyncio
+async def test_the_same_judgement_reached_twice_is_one_memory(world):
+    """A second row would double its weight everywhere it is read and give the
+    operator two things to retire."""
+    registry, store = world
+    reply = Reply(
+        reply="noted", remember=[Memory(statement="Parked domains are parked on purpose.")]
+    )
+    for _ in range(2):
+        await ask(store, registry, "q", connectors=[_Canned(reply)])
+
+    assert len([m for m in store.memories() if "on purpose" in (m["statement"] or "")]) == 1

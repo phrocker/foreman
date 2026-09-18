@@ -79,7 +79,7 @@ used. Leave a list empty rather than padding it.
 `suggest` is usually empty. Offer an approval or rejection only when the state
 plainly supports it, with one sentence saying why.
 
-`remember` is how this conversation stops having to happen again. Offer one
+`remember` is how this conversation stops having to happen again. Record one
 whenever the operator tells you something you could not have read from the state
 above — a constraint, a decision, a preference, or the reason something is the
 way it is. Those are exactly the facts that get explained again next week
@@ -91,7 +91,13 @@ finding: a finding is a problem, a memory is a judgement about how this
 portfolio works. One sentence, still true next month. Name what it bears on in
 `about` as `project|<id>`, `rule|<name>` or `finding|<id>`.
 
-You cannot write one. It is offered, and the operator decides.
+These are kept as you write them — there is no button and nobody confirms. That
+raises the bar rather than lowering it: write only what you would still stand
+behind next month, because a wrong one has to be retired by hand. Being wrong
+costs a correction, not a loss; nothing here is ever deleted.
+
+Approval is untouched by this. A memory says how things are around here. It can
+say a rule is noise; it can never approve an action.
 
 `plan` is for when the operator is describing something they want to *build*
 rather than something that is wrong. Findings are about what exists; a plan is
@@ -427,4 +433,41 @@ async def ask(
         refs={k: v for k, v in reply.refs.items() if v},
         cost_usd=cost,
     )
+    _keep(store, conversation_id, reply)
     return conversation_id, reply, cost
+
+
+def _keep(store: Store, conversation_id: int, reply: Reply) -> None:
+    """Record what the conversation established, without being asked twice.
+
+    A memory used to arrive as an offer with a button on it. The operator's
+    objection to that is the right one: the thing worth keeping was already
+    identified, by them, in the conversation that just happened — making them
+    click again to confirm it is not a safeguard, it is a second chance to
+    forget. What made the button feel necessary was the worry about writing
+    something down wrongly, and retirement is the answer to that: a memory is
+    never deleted and `retire_memory` keeps the retraction as the record, so
+    being wrong here costs a correction rather than a loss.
+
+    Still not approval. A memory says "this is how things are around here"; it
+    can say a rule is noise and it can never approve an action, which is the
+    line that matters and is unchanged.
+
+    Recorded here rather than in the page so `foreman ask` keeps what it learns
+    too — a judgement that survives only when the operator happened to be in a
+    browser is not durable.
+    """
+    for memory in reply.remember:
+        statement = (memory.statement or "").strip()
+        if not statement:
+            continue
+        if any(
+            (row.get("statement") or "").strip() == statement
+            and row.get("retired_at") in (None, "None")
+            for row in store.memories()
+        ):
+            # The same judgement reached twice in two conversations is one
+            # judgement. A second row would double its weight everywhere it is
+            # read and give the operator two things to retire.
+            continue
+        store.remember(statement, about=memory.about or (), conversation_id=conversation_id)

@@ -72,7 +72,11 @@ def _registry() -> dict[str, Domain]:
             name="delivery",
             summary="Build health, review latency and release cadence",
             surfaces=("github",),
-            collectors=("github_activity",),
+            # `github_activity` counts pull requests; `pulls` records each one
+            # with the state that decides it. The counts answer "is review
+            # keeping up"; the rows answer "what is waiting on me", which is the
+            # question somebody standing in front of a board actually has.
+            collectors=("github_activity", "pulls"),
             evaluate=delivery_rules.evaluate,
         ),
         Domain(
