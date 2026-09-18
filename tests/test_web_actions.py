@@ -153,3 +153,44 @@ def test_a_group_decision_needs_a_verb_and_something_to_decide(tmp_path):
     assert (
         client.post("/api/actions/decide", json={"verb": "approve", "ids": []}).status_code == 400
     )
+
+
+def test_approving_reports_where_the_change_landed(tmp_path, monkeypatch):
+    """The link is the point of a pull-request delivery.
+
+    It used to be returned inside a flat list of touched paths and dropped by
+    the page, so approving in the dashboard said the change had worked and left
+    the operator to go and find their own pull request.
+    """
+    from foreman.actions import landed_at
+
+    assert landed_at(["frontend/nginx.conf"]) is None
+    assert (
+        landed_at([".github/dependabot.yml", "https://github.com/o/r/pull/126"])
+        == "https://github.com/o/r/pull/126"
+    )
+    # A merge effect touches no files and returns only the pull request it acted
+    # on, which is just as worth linking.
+    assert landed_at(["https://github.com/o/r/pull/105"]) == "https://github.com/o/r/pull/105"
+
+
+def test_a_stored_landing_is_not_blanked_by_a_later_record(tmp_path):
+    """Nothing writes one twice today. A column that quietly loses the only
+    pointer to a live pull request is not worth the saving."""
+    from foreman.store import SqliteStore
+
+    with SqliteStore(tmp_path / "t.db") as store:
+        action_id = store.record_proposal(
+            project="p",
+            finding_id=None,
+            verb="enable_dependabot",
+            statement="DO x()",
+            class_statement="DO x()",
+            class_key="k",
+            params={},
+            patch_digest="d",
+            files=[".github/dependabot.yml"],
+        )
+        store.record_application(action_id, "applied", landed_at="https://h.test/pull/1")
+        store.record_application(action_id, "applied")
+        assert store.action(action_id)["landed_at"] == "https://h.test/pull/1"

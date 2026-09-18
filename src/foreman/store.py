@@ -116,7 +116,11 @@ class Store(Protocol):
     def pending_actions(self, project: str | None = None) -> list[Record]: ...
     def decide_action(self, action_id: int, decision: str, decided_by: str = "human") -> None: ...
     def record_application(
-        self, action_id: int, outcome: str, error: str | None = None
+        self,
+        action_id: int,
+        outcome: str,
+        error: str | None = None,
+        landed_at: str | None = None,
     ) -> None: ...
     def record_verification(
         self, action_id: int, verification: str, ref: str | None = None
@@ -309,7 +313,13 @@ CREATE TABLE IF NOT EXISTS actions (
     -- is evidence.
     verification    TEXT,              -- verified | broke
     verified_at     TEXT,
-    verification_ref TEXT
+    verification_ref TEXT,
+    -- Where the change actually went, when that is somewhere a person can open:
+    -- the pull request a `pull_request` delivery raised, or the one a merge
+    -- landed. Stored because the URL was previously returned once to whoever
+    -- happened to call the API and then lost, so approving in the dashboard
+    -- told you it had worked and not where to look.
+    landed_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_actions_class ON actions (class_key, decision);
 CREATE INDEX IF NOT EXISTS idx_actions_open ON actions (project, decision);
@@ -497,6 +507,10 @@ def _additive_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE actions ADD COLUMN verification TEXT")
         conn.execute("ALTER TABLE actions ADD COLUMN verified_at TEXT")
         conn.execute("ALTER TABLE actions ADD COLUMN verification_ref TEXT")
+    # The pull request an approval produced. Actions applied before this existed
+    # keep a null: the URL was never written down and cannot be recovered.
+    if "landed_at" not in _columns(conn, "actions"):
+        conn.execute("ALTER TABLE actions ADD COLUMN landed_at TEXT")
     # Every audit already run spent money that was never written down. Nothing
     # recovers those, but the column has to exist before the next one can be.
     if "cost_usd" not in _columns(conn, "runs"):
@@ -781,7 +795,8 @@ class SqliteStore:
         Rules with no decided findings are excluded rather than shown at 0% —
         an unmeasured rule and a bad one are different things.
         """
-        return _many(self._db.execute("""
+        return _many(
+            self._db.execute("""
             SELECT rule,
                    source,
                    SUM(outcome = 'acted')     AS acted,
@@ -791,7 +806,8 @@ class SqliteStore:
             WHERE outcome IS NOT NULL
             GROUP BY rule, source
             ORDER BY dismissed DESC, decided DESC
-            """))
+            """)
+        )
 
     # --- the action ledger -------------------------------------------------
 
@@ -874,10 +890,22 @@ class SqliteStore:
         )
         self._db.commit()
 
-    def record_application(self, action_id: int, outcome: str, error: str | None = None) -> None:
+    def record_application(
+        self,
+        action_id: int,
+        outcome: str,
+        error: str | None = None,
+        landed_at: str | None = None,
+    ) -> None:
         self._db.execute(
-            "UPDATE actions SET applied_at = ?, outcome = ?, error = ? WHERE id = ?",
-            (utcnow(), outcome, error, action_id),
+            # `landed_at` is coalesced rather than overwritten: a re-record of
+            # the same action must not blank a URL that was captured the first
+            # time. Nothing writes one twice today, and a column that quietly
+            # loses the only pointer to a live pull request is not worth the
+            # saving.
+            "UPDATE actions SET applied_at = ?, outcome = ?, error = ?, "
+            "landed_at = COALESCE(?, landed_at) WHERE id = ?",
+            (utcnow(), outcome, error, landed_at, action_id),
         )
         self._db.commit()
 
@@ -894,7 +922,7 @@ class SqliteStore:
 
     def unverified_actions(self, project: str | None = None) -> list[Record]:
         """Applied actions whose checks have not been consulted yet."""
-        sql = "SELECT * FROM actions " "WHERE outcome = 'applied' AND verification IS NULL"
+        sql = "SELECT * FROM actions WHERE outcome = 'applied' AND verification IS NULL"
         params: tuple[str, ...] = ()
         if project:
             sql += " AND project = ?"
@@ -954,7 +982,8 @@ class SqliteStore:
                 # id DESC breaks the tie: timestamps are second-resolution, so
                 # two conversations started in the same second would otherwise
                 # order arbitrarily.
-                "GROUP BY c.id ORDER BY COALESCE(last_at, c.started_at) DESC, c.id DESC " "LIMIT ?",
+                "GROUP BY c.id ORDER BY COALESCE(last_at, c.started_at) DESC, c.id DESC "
+                "LIMIT ?",
                 (limit,),
             )
         )
@@ -996,7 +1025,8 @@ class SqliteStore:
         # Two aggregates joined, not one join then aggregated: `runs` has many
         # rows per project, so counting findings across that join multiplies every
         # finding by the number of runs.
-        return _many(self._db.execute("""
+        return _many(
+            self._db.execute("""
             SELECT
                 r.project                  AS project,
                 r.last_run                 AS last_run,
@@ -1015,7 +1045,8 @@ class SqliteStore:
                 FROM findings WHERE resolved_at IS NULL GROUP BY project
             ) f ON f.project = r.project
             ORDER BY high DESC, medium DESC, low DESC, r.project
-            """))
+            """)
+        )
 
     def open_findings(self, project: str | None = None) -> list[Record]:
         sql = "SELECT * FROM findings WHERE resolved_at IS NULL"

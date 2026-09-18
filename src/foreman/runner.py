@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable, Sequence
 
 from . import plans
-from .actions import OpNotApplicable, Stale, propose, rehydrate
+from .actions import OpNotApplicable, Stale, landed_at, propose, rehydrate
 from .actions import apply as apply_patch
 from .actions.sagform import policy_allows
 from .collectors import COLLECTORS, OPTIONAL
@@ -365,7 +365,7 @@ def apply_action(
         store.record_application(action_id, "stale", str(exc))
         raise Stale(str(exc)) from None
     store.decide_action(action_id, "approved", decided_by)
-    store.record_application(action_id, "applied")
+    store.record_application(action_id, "applied", landed_at=landed_at(written))
     if row["finding_id"] is not None:
         store.set_finding_outcome(row["finding_id"], "acted")
     return written

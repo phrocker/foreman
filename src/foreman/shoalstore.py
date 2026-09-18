@@ -131,6 +131,11 @@ FIELDS: dict[str, tuple[str, ...]] = {
         "verification",
         "verified_at",
         "verification_ref",
+        # Declared even though `record_application` omits the cell when there is
+        # no URL. This tuple is what gives an absent cell a null, and without the
+        # name here shoal returned a record with no `landed_at` key at all while
+        # SQLite returned one holding None — the same question, two answers.
+        "landed_at",
     ),
     "report": (
         "project",
@@ -732,20 +737,24 @@ class ShoalStore:
             ]
         )
 
-    def record_application(self, action_id: int, outcome: str, error: str | None = None) -> None:
-        self._write(
-            [
-                self._put(
-                    _rid("action", _pad(action_id)),
-                    "action",
-                    {
-                        "applied_at": utcnow(),
-                        "outcome": outcome,
-                        "error": error,
-                    },
-                )
-            ]
-        )
+    def record_application(
+        self,
+        action_id: int,
+        outcome: str,
+        error: str | None = None,
+        landed_at: str | None = None,
+    ) -> None:
+        cells: dict[str, str | None] = {
+            "applied_at": utcnow(),
+            "outcome": outcome,
+            "error": error,
+        }
+        # Only when there is one. A None here would write a null cell over a URL
+        # captured earlier, where SQLite coalesces — and the two stores have to
+        # answer the same question the same way.
+        if landed_at is not None:
+            cells["landed_at"] = landed_at
+        self._write([self._put(_rid("action", _pad(action_id)), "action", cells)])
 
     def record_verification(
         self, action_id: int, verification: str, ref: str | None = None

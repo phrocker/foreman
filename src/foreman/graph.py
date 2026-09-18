@@ -170,8 +170,7 @@ def memory_edges(
     for target in about:
         if kind_of(target) not in MEMORY_ABOUT:
             raise ValueError(
-                f"a memory cannot be about {target!r}: "
-                f"expected one of {', '.join(MEMORY_ABOUT)}"
+                f"a memory cannot be about {target!r}: expected one of {', '.join(MEMORY_ABOUT)}"
             )
         edges.append((memory, ABOUT, target))
         edges.append((target, REMEMBERS, memory))

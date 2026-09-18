@@ -296,6 +296,22 @@ def apply(project: Project, proposal: ActionProposal, action_id: int | None = No
     return done
 
 
+def landed_at(written: Sequence[str]) -> str | None:
+    """Where an applied action can be opened, if anywhere.
+
+    `apply_patch` returns a flat list of what it touched: file paths for an
+    edit, and a URL when the change was delivered as a pull request or when a
+    merge effect acted on one. Only the second kind is a place a person can go
+    and look, and it is the one worth keeping — the URL used to be returned once
+    to whoever called and then dropped, so approving in the dashboard said the
+    change had worked and not where it went.
+    """
+    for item in written:
+        if item.startswith("http://") or item.startswith("https://"):
+            return item
+    return None
+
+
 def _set_all(proposal: ActionProposal) -> list[str]:
     """Set the DNS records a proposal names, re-reading each one first.
 
@@ -323,8 +339,7 @@ def _set_all(proposal: ActionProposal) -> list[str]:
             live = record_set_text(read_records(record.domain, record.type, record.name, token))
             if live != record.before:
                 raise GoDaddyError(
-                    f"it now reads {live or 'as unset'} rather than "
-                    f"{record.before or 'as unset'}"
+                    f"it now reads {live or 'as unset'} rather than {record.before or 'as unset'}"
                 )
             replace_records(record.domain, record.type, record.name, record.data, record.ttl, token)
         except (GoDaddyError, SecretsUnavailable) as exc:

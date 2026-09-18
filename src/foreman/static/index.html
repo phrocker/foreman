@@ -333,6 +333,32 @@
      object at any fill level, rather than two unrelated colours meeting. */
   .meter { height: 5px; border-radius: 3px; background: var(--surface-alt); overflow: hidden; }
   .meter > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+  /* Where an approval went. A pull request is the review surface for anything
+     an operator cannot undo, so the link to it is the most important thing on
+     the page for the few seconds after approving — and it used to be returned
+     to the API caller and thrown away. */
+  #landed {
+    border: 1px solid var(--border-firm);
+    border-left: 3px solid var(--good);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 12px;
+  }
+  #landed .landed-title { font-weight: 550; }
+  #landed a { color: var(--accent); }
+  #landed .landed-dismiss {
+    margin-left: auto;
+    background: none;
+    border: 0;
+    color: var(--text-3);
+    cursor: pointer;
+    padding: 0 4px;
+  }
   .meter.earned > span { background: var(--good); }
   .statement {
     font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--text-3);
@@ -588,6 +614,7 @@
       <button id="eligibleBtn" title="Apply only what a class has earned under its own policy">Apply earned</button>
     </div>
     <div class="hint" id="actionSummary"></div>
+    <div id="landed" hidden></div>
     <div id="actionList"></div>
   </section>
 
@@ -1167,6 +1194,41 @@ function rejectGroup(group) {
  *  page load and the click — so the reply is a per-action report and whatever
  *  was refused is named rather than folded into a single failure.
  */
+/** Show where approvals went, for the ones that went somewhere openable.
+ *
+ * A pull request is the review surface for any change Foreman cannot undo, so
+ * the link to it is the whole point of approving — and until this existed the
+ * URL was returned by the API and dropped on the floor, leaving the operator to
+ * go and find their own pull request. Nothing is shown for an edit that landed
+ * in a working tree: there is no page for that and an empty banner would train
+ * you to ignore a full one.
+ */
+function showLanded(items) {
+  const box = document.getElementById("landed");
+  const links = items.filter((d) => d.landed_at);
+  if (!links.length) {
+    box.hidden = true;
+    return;
+  }
+  box.innerHTML =
+    '<span class="landed-title">Opened</span>' +
+    links.map((d) =>
+      `<a href="${esc(d.landed_at)}" target="_blank" rel="noopener">` +
+      `${esc(d.project || "#" + d.id)} — ${esc(prNumber(d.landed_at))}</a>`
+    ).join("") +
+    '<button class="landed-dismiss" title="Dismiss">✕</button>';
+  box.hidden = false;
+  box.querySelector(".landed-dismiss").addEventListener("click", () => {
+    box.hidden = true;
+  });
+}
+
+/** "pull/126" reads as a pull request; the full URL is noise beside the link. */
+function prNumber(url) {
+  const m = /\/(pull|merge_requests)\/(\d+)/.exec(url || "");
+  return m ? `#${m[2]}` : url;
+}
+
 async function decideMany(ids, verb) {
   const res = await fetch("/api/actions/decide", {
     method: "POST",
@@ -1178,6 +1240,7 @@ async function decideMany(ids, verb) {
     alert(body.detail || `Failed with ${res.status}`);
   } else {
     const body = await res.json();
+    showLanded(body.decided || []);
     if (body.refused.length) {
       alert(
         `${body.decided.length} recorded, ${body.refused.length} refused:\n\n` +
@@ -1202,6 +1265,9 @@ async function decide(id, verb) {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     alert(body.detail || `Failed with ${res.status}`);
+  } else {
+    const body = await res.json().catch(() => ({}));
+    showLanded([{ id, project: action && action.project, landed_at: body.landed_at }]);
   }
   load();
 }

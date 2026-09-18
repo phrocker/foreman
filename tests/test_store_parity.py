@@ -387,6 +387,31 @@ def test_verification_is_counted_apart_from_application(store):
     assert (stats["verified"], stats["broke"]) == (0, 1)
 
 
+def test_where_a_change_landed_survives_the_round_trip(store):
+    """The pull request an approval opened, in both substrates.
+
+    SQLite coalesces a null so a second write cannot blank it; shoal omits the
+    cell for the same reason. Two mechanisms, and the question they have to
+    answer the same way is this one.
+    """
+    action_id = _propose(store)
+    store.decide_action(action_id, "approved")
+    store.record_application(action_id, "applied", landed_at="https://h.test/pull/126")
+    assert store.action(action_id)["landed_at"] == "https://h.test/pull/126"
+
+    store.record_application(action_id, "applied")
+    assert store.action(action_id)["landed_at"] == "https://h.test/pull/126"
+
+
+def test_an_action_that_landed_nowhere_openable_says_so(store):
+    """An edit into a working tree has no page to link, and `None` is the answer
+    that lets the dashboard show nothing rather than an empty link."""
+    action_id = _propose(store)
+    store.decide_action(action_id, "approved")
+    store.record_application(action_id, "applied")
+    assert store.action(action_id)["landed_at"] is None
+
+
 def test_params_and_files_survive_the_round_trip(store):
     action_id = _propose(store)
     row = store.action(action_id)

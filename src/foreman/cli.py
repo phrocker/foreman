@@ -342,8 +342,7 @@ def actions(
                 record = "[dim]no prior decisions — this class is new[/]"
             else:
                 record = (
-                    f"approved {stats['approvals']}/{decided} "
-                    f"across {stats['projects']} project(s)"
+                    f"approved {stats['approvals']}/{decided} across {stats['projects']} project(s)"
                 )
                 if stats["rejections"]:
                     record += f", [red]{stats['rejections']} rejected[/]"

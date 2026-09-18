@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
 from . import secrets
-from .actions import Stale, effect_of, target_label
+from .actions import Stale, effect_of, landed_at, target_label
 from .actions.sagform import automatable, policy_allows
 from .chat import ChatError, ask
 from .config import find_registry, load_registry
@@ -245,7 +245,11 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             raise HTTPException(400, str(exc)) from None
         finally:
             s.close()
-        return {"applied": written}
+        # The URL separately as well as inside `applied`. The page needs to
+        # offer a link and should not have to guess which of these strings is
+        # one — approving used to report success and leave the operator to find
+        # the pull request themselves.
+        return {"applied": written, "landed_at": landed_at(written)}
 
     @app.post("/api/actions/{action_id}/reject")
     def reject(action_id: int) -> dict[str, Any]:
@@ -291,7 +295,14 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 try:
                     if verb == "approve":
                         written = apply_action(registry, s, action_id)
-                        decided.append({"id": action_id, "project": project, "files": written})
+                        decided.append(
+                            {
+                                "id": action_id,
+                                "project": project,
+                                "files": written,
+                                "landed_at": landed_at(written),
+                            }
+                        )
                     else:
                         reject_action(s, action_id)
                         decided.append({"id": action_id, "project": project, "files": []})
