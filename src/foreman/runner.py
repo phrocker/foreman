@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Callable, Sequence
 
+from . import plans
 from .actions import OpNotApplicable, Stale, propose, rehydrate
 from .actions import apply as apply_patch
 from .actions.sagform import policy_allows
@@ -121,7 +122,8 @@ def _cleared_errors(
             value=None,
         )
         for row in store.latest_observations(project_id)
-        if str(row["key"]).endswith(ERROR_SUFFIX) and row["value"]
+        if str(row["key"]).endswith(ERROR_SUFFIX)
+        and row["value"]
         # Only its own. `pulls_error` belongs to the activity collector, and a
         # dependabot run knows nothing about it — in shoal the collector is the
         # column family and therefore part of the cell's identity, so retracting
@@ -184,7 +186,8 @@ def _retracted_orphans(
         # A cell of a subject this sweep never named, that still holds a value.
         # Without the second half, every night after the first writes another
         # null over a subject that has been gone for months.
-        if row["subject"] not in named and row["value"] is not None
+        if row["subject"] not in named
+        and row["value"] is not None
         # Only its own, for the reason `_cleared_errors` gives: in shoal the
         # collector is the column family and therefore part of a cell's
         # identity. `siteprobe` and `godaddy` both write `domain:example.com`,
@@ -212,6 +215,30 @@ async def collect_all(
     return sum(results)
 
 
+# Gates whose matching rules are meaningless without a stated purpose. A gate
+# listed here turns into a fact on every subject of every plan that carries it.
+EXPECTED_GATES = ("captures",)
+
+
+def _expectations(store: Store) -> dict[str, dict[str, str | None]]:
+    """What each subject is supposed to do, as opposed to what it does.
+
+    Some checks only mean anything against a stated purpose. "No way to get in
+    touch" is a real failure on a lead-generation site and a non-sequitur on a
+    job board, and nothing on the wire tells the two apart — so the rule is told,
+    rather than left to assume that every page that serves wants a lead.
+
+    Read fresh per `check` rather than stored with the observations: a plan is
+    edited between sweeps, and an expectation written into a snapshot would go
+    on being judged against long after it stopped being what anyone intended.
+    """
+    return {
+        subject: {plans.expectation_key(gate): "true"}
+        for gate in EXPECTED_GATES
+        for subject in plans.subjects_expecting(store, gate)
+    }
+
+
 def check_all(
     registry: Registry,
     store: Store,
@@ -232,7 +259,7 @@ def check_all(
             log(f"{target.id}: no snapshot yet")
             continue
         store.retire_rule_findings(target.id)
-        findings = evaluate(target, rows)
+        findings = evaluate(target, rows, declared=_expectations(store))
 
         # A rule re-derives the same finding every night, so a dismissal has to
         # survive re-derivation or dismissing something means dismissing it

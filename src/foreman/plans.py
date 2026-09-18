@@ -508,3 +508,43 @@ def _project_for(registry: Any, subject: str) -> Any:
         if surface is not None and surface.claims(name):
             return project
     return None
+
+
+# The fact a rule reads to know that capture is the point of a subject at all.
+# Not measured — declared, by the act of putting a domain into a plan whose
+# phases include the gate. Kept here beside the gate it mirrors so the two
+# cannot drift into disagreeing about what "expected to capture" means.
+EXPECTED_PREFIX = "expected:"
+
+
+def expectation_key(gate: str) -> str:
+    return f"{EXPECTED_PREFIX}{gate}"
+
+
+def subjects_expecting(store: Any, gate: str) -> set[str]:
+    """Subjects of any plan whose phases include `gate`.
+
+    Which sites are *supposed* to capture a lead is a question about intent, and
+    intent is not visible on the wire. The rules learned that the hard way: the
+    capture checks fired against every serving domain in the registrar portfolio
+    and reported a job board, a Shopify storefront and an app's marketing site
+    as having "no way to get in touch" — all true, all irrelevant, because a
+    lead was never the point of any of them.
+
+    A plan is where that intent is already written down. `Stand up home-services
+    lead generation across 18 domains` says, unambiguously and in the operator's
+    own words, that these are the domains a lead is the point of. Reading it
+    here costs no new configuration and cannot fall out of step with the plan,
+    which is the failure mode of declaring the same thing twice.
+
+    Every status, not just active. A plan that completed is a site that launched
+    and is now live, and a site that *stops* capturing after launch is the most
+    expensive version of this failure — silence there would be the whole bug
+    again, arriving later.
+    """
+    out: set[str] = set()
+    for row in store.plans():
+        plan_id = int(row["id"])
+        if any(p["gate"] == gate for p in store.phases(plan_id)):
+            out.update(json.loads(row["subjects"] or "[]"))
+    return out

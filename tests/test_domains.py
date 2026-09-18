@@ -20,6 +20,7 @@ from foreman.collectors import capture as cap
 from foreman.collectors import godaddy as gd
 from foreman.collectors import siteprobe as sp
 from foreman.config import Project, RegistrarSurface
+from foreman.rules import domains as domain_rules
 from foreman.rules.domains import evaluate
 
 
@@ -993,10 +994,15 @@ async def test_a_domain_that_resolves_nowhere_still_carries_the_capture_cells(wi
 
 
 def _judge_capture(facts):
-    """Judge capture facts against a domain that is registered, serving and
-    otherwise healthy."""
+    """Judge capture facts against a domain that is registered, serving,
+    otherwise healthy, and declared by a plan to be meant to capture leads.
+
+    The last of those is the one worth naming. Capture is judged only where
+    somebody said a lead was the point — every test below would pass against a
+    job board otherwise, which is exactly the bug this default encodes away."""
     serving = {
         **sp.BLANK,
+        domain_rules.CAPTURE_EXPECTED: "true",
         "resolves": "true",
         "parked": "false",
         "serving": "true",
@@ -1068,3 +1074,24 @@ def test_a_form_whose_markup_states_no_method_is_not_reported_as_a_get_form():
     submitted by the builder's own script."""
     found = _judge_capture({"domain:a.test": {"capture_route": "form", "form_method": ""}})
     assert "site_contact_form_uses_get" not in found
+
+
+def test_a_site_nobody_said_should_capture_leads_is_not_judged_on_capture():
+    """The bug this guard exists for, in one line.
+
+    `nationalbusinessparkway.com` connects people to job postings. It serves a
+    real page, it has no contact form, and both of those are correct. The rule
+    reported it as having "no way to get in touch" because it assumed every page
+    that serves wants a lead — a goal invented for somebody who never set it.
+    """
+    found = _judge_capture(
+        {"domain:a.test": {domain_rules.CAPTURE_EXPECTED: None, "capture_route": "none"}}
+    )
+    assert found == {}
+
+
+def test_a_declared_lead_site_is_still_judged():
+    """The guard has to stay narrow: silence everywhere would be the opposite
+    mistake and would retire the check rather than scope it."""
+    found = _judge_capture({"domain:a.test": {"capture_route": "none"}})
+    assert "site_captures_nothing" in found

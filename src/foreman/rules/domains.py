@@ -22,12 +22,16 @@ connection, a host that does not recognise the name it was given, a certificate
 for someone else. Each of those is a decision that has already been made and has
 since stopped holding.
 
-The third half is capture, and it is quieter still. A lead-generation site that
-serves beautifully and captures nothing is a failure that looks like a success,
-so what is judged is a *serving* page with no form, no phone link and no email
-link at all — and even that is filed low where the served body is thin enough
-that a form mounted by JavaScript is the likelier story. Nothing submits a test
-lead, so nothing here claims a lead arrives.
+The third half is capture, and it is quieter still — quiet enough that it says
+nothing at all about most of the portfolio. A lead-generation site that serves
+beautifully and captures nothing is a failure that looks like a success, but
+whether a lead was ever the point is not visible from outside: a job board, a
+storefront and an app's marketing site all serve real pages that no lead was
+meant to arrive through. So capture is judged only where a plan says it is the
+goal, and what is judged there is a *serving* page with no form, no phone link
+and no email link at all — filed low where the served body is thin enough that a
+form mounted by JavaScript is the likelier story. Nothing submits a test lead,
+so nothing here claims a lead arrives.
 """
 
 from __future__ import annotations
@@ -36,6 +40,11 @@ from datetime import UTC, date, datetime
 
 from ..models import Severity
 from .common import Add, Pages
+
+# Set on a subject that some plan says is meant to capture leads. Declared,
+# not measured: it is written by `runner._expectations` from the plans, and
+# the `expected:` prefix is what tells it from anything a probe found.
+CAPTURE_EXPECTED = "expected:captures"
 
 # Enough warning to act without the finding living on the board for a year.
 EXPIRY_SOON_DAYS = 60
@@ -279,6 +288,20 @@ def _judge_capture(name: str, subject: str, facts: dict[str, str | None], add: A
     every real finding in the portfolio, and the parked judgement is already
     made above rather than made again here.
     """
+    # Capture is only a failure where capture was the point, and nothing on the
+    # wire says what a site is for. This ran against every serving domain in the
+    # portfolio first and reported a job board, a Shopify storefront and an
+    # app's marketing site as having "no way to get in touch" — each true, each
+    # a non-sequitur. `nationalbusinessparkway.com` connects people to job
+    # postings; a contact form was never how it was meant to succeed, and a
+    # finding saying otherwise is the rule inventing a goal for somebody.
+    #
+    # So the purpose is read rather than assumed, from the plan the subject is
+    # in — see `plans.subjects_expecting`. A domain nobody has said that about
+    # produces silence, which is the right answer to a question nobody asked.
+    if not _is_true(facts.get(CAPTURE_EXPECTED)):
+        return
+
     # Both guards, not just `serving`. A domain serving the same holding page
     # as seventy-five others passes the serving check — nothing about it is
     # broken — and is still parked, which is where "no contact form" is a

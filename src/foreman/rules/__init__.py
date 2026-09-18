@@ -31,9 +31,23 @@ def _pages(rows: Sequence[Any]) -> Pages:
     return pages
 
 
-def evaluate(project: Project, rows: Sequence[Any]) -> list[Finding]:
-    """Run every rule set the project opted into."""
+def evaluate(
+    project: Project,
+    rows: Sequence[Any],
+    declared: dict[str, dict[str, str | None]] | None = None,
+) -> list[Finding]:
+    """Run every rule set the project opted into.
+
+    `declared` carries facts that were stated rather than measured — what a
+    subject is *for*, which no probe can see. It is merged into the same
+    subject-keyed mapping the observations produce, because a rule asking "what
+    do I know about this subject" should not have to care which of the two a
+    given answer came from; the keys are prefixed (`expected:`) so a reader
+    can always tell.
+    """
     pages = _pages(rows)
+    for subject, facts in (declared or {}).items():
+        pages.setdefault(subject, {}).update(facts)
     findings: list[Finding] = []
 
     def add(

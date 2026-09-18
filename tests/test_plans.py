@@ -21,6 +21,7 @@ from foreman.plans import (
     plan_proposals,
     progress,
     standing,
+    subjects_expecting,
     summarise,
 )
 
@@ -373,3 +374,44 @@ def test_one_subject_failing_does_not_cost_the_others(monkeypatch):
     plan_proposals(store, _Registry(), log=said.append)
     assert calls == ["bad.test", "good.test"]
     assert any("registrar could not be read" in line for line in said)
+
+
+# --- intent, read from the plan ---------------------------------------------
+
+
+def _store(tmp_path):
+    from foreman.store import SqliteStore
+
+    return SqliteStore(tmp_path / "t.db")
+
+
+def test_a_plan_declares_what_its_subjects_are_for(tmp_path):
+    """The scoping fact the capture rule reads, and where it comes from.
+
+    "No way to get in touch" is a real failure on a lead-generation site and
+    nonsense on a job board, and no probe can tell them apart. The plan already
+    says which is which — in the operator's own words, once — so it is read
+    rather than declared a second time somewhere it could drift.
+    """
+    store = _store(tmp_path)
+    with store as s:
+        plan = s.create_plan("lead gen", ["domain:a.test", "domain:b.test"])
+        s.add_phase(plan, 1, "Serve", "serves", {})
+        s.add_phase(plan, 2, "Capture", "captures", {})
+        other = s.create_plan("ship the job board", ["domain:jobs.test"])
+        s.add_phase(other, 1, "Serve", "serves", {})
+
+        assert subjects_expecting(s, "captures") == {"domain:a.test", "domain:b.test"}
+
+
+def test_a_completed_plan_still_declares_its_subjects(tmp_path):
+    """A plan that finished is a site that launched. A site that *stops*
+    capturing after launch is the expensive version of this failure, so scoping
+    on `active` would reintroduce the whole bug on a delay."""
+    store = _store(tmp_path)
+    with store as s:
+        plan = s.create_plan("lead gen", ["domain:a.test"])
+        s.add_phase(plan, 1, "Capture", "captures", {})
+        s.set_plan_status(plan, "done")
+
+        assert subjects_expecting(s, "captures") == {"domain:a.test"}

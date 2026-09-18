@@ -279,3 +279,49 @@ async def test_a_subject_already_retracted_is_not_retracted_again(tmp_path):
             await collect_project(_project(), ["gcloud"], store)
             assert await collect_project(_project(), ["gcloud"], store) == 2  # one, and its null
             assert await collect_project(_project(), ["gcloud"], store) == 1
+
+
+# --- intent reaches the rules -----------------------------------------------
+
+
+def test_a_plans_intent_reaches_the_rules_that_need_it(tmp_path):
+    """The wire between a plan and a rule, end to end.
+
+    Capture is only a failure where capture was the point: the rule knows that
+    now, and the plan is where it is written down. Both halves passed their own
+    tests while nothing carried the fact from one to the other and the board
+    filled with findings against a job board, a storefront and an app's
+    marketing site. This is the test that fails if the wire comes loose.
+    """
+    from foreman.config import RegistrarSurface
+    from foreman.rules import evaluate as evaluate_project
+    from foreman.runner import _expectations
+
+    project = Project(id="domains", name="Domains", registrar=RegistrarSurface(provider="godaddy"))
+    serving = {
+        "status": "ACTIVE",
+        "resolves": "true",
+        "parked": "false",
+        "serving": "true",
+        "locked": "true",
+        "renew_auto": "true",
+        "capture_route": "none",
+        "body_text_chars": "4200",
+        "https_apex_status": "200",
+        "cert_covers_name": "true",
+    }
+    rows = [
+        {"subject": f"domain:{host}", "key": k, "value": v}
+        for host in ("lead.test", "jobs.test")
+        for k, v in serving.items()
+    ]
+
+    with SqliteStore(tmp_path / "t.db") as store:
+        plan = store.create_plan("lead gen", ["domain:lead.test"])
+        store.add_phase(plan, 1, "Capture", "captures", {})
+        declared = _expectations(store)
+
+    captured = [
+        f for f in evaluate_project(project, rows, declared) if f.rule == "site_captures_nothing"
+    ]
+    assert [f.subjects for f in captured] == [["domain:lead.test"]]
