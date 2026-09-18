@@ -307,6 +307,24 @@
          border-radius: var(--radius); font: 12.5px/1.7 ui-monospace, Menlo, monospace;
          color: var(--text-2); max-height: 190px; overflow-y: auto; white-space: pre-wrap; }
   .err { color: var(--high); }
+
+  /* Work: one open pull request per row, gate first. */
+  .work { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; }
+  .work-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .work-head a { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .work-title { color: var(--text); }
+  .work-meta { color: var(--text-3); font-size: 0.9em; margin-top: 4px; }
+  .work-meta code { font-size: 0.95em; }
+  .work-act { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .work-act .hint { margin: 0; }
+  .chip {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--border-firm); color: var(--text-2); font-size: 0.85em;
+  }
+  .chip.ok   { border-color: var(--good);   color: var(--good); }
+  .chip.bad  { border-color: var(--high);   color: var(--high); }
+  .chip.warn { border-color: var(--medium); color: var(--medium); }
+  .chip.wait { border-color: var(--low);    color: var(--low); }
   section { margin-bottom: 30px; }
   /* Tabs */
   .tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border); }
@@ -595,6 +613,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab" data-tab="findings" role="tab" aria-selected="true">Findings <span class="count" id="countFindings"></span></button>
     <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
+    <button class="tab" data-tab="work"     role="tab" aria-selected="false">Work <span class="count" id="countWork"></span></button>
     <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
     <button class="tab" data-tab="history"  role="tab" aria-selected="false">History <span class="count" id="countHistory"></span></button>
     <button class="tab" data-tab="memory"   role="tab" aria-selected="false">Memory <span class="count" id="countMemory"></span></button>
@@ -630,6 +649,12 @@
     <div class="hint" id="actionSummary"></div>
     <div id="landed" hidden></div>
     <div id="actionList"></div>
+  </section>
+
+  <section id="panel-work" role="tabpanel" hidden>
+    <div class="hint">Open pull requests across the portfolio, ordered by what is in the way. Nothing here merges: the diff is the review and the merge is yours.</div>
+    <div id="workList"></div>
+    <div id="reviseLog" class="log" hidden></div>
   </section>
 
   <section id="panel-drift" role="tabpanel" hidden>
@@ -725,6 +750,7 @@ const SEV = {
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
+  pulls: [],
   declared: [],
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
@@ -818,7 +844,7 @@ let stale = [];
 async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports, declared] =
+         settings, plans, reports, declared, pulls] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -833,10 +859,11 @@ async function load() {
     fetchPart("/api/plans", []),
     fetchPart("/api/reports", []),
     fetchPart("/api/projects", []),
+    fetchPart("/api/pulls", []),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
-    connectors, skills, memories, settings, plans, reports, declared,
+    connectors, skills, memories, settings, plans, reports, declared, pulls,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -845,7 +872,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["drift", renderDrift], ["history", renderHistory],
+    ["work", renderWork], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -874,6 +901,12 @@ function renderStale() {
 function renderCounts() {
   $("countFindings").textContent = visible().length || "";
   $("countActions").textContent = visibleActions().length || "";
+  // Blocked ones only. A count of every open pull request is a number that
+  // never goes down and stops being read; what deserves the badge is what is
+  // waiting on somebody.
+  $("countWork").textContent =
+    state.pulls.filter((r) => r.blocking && (!state.project || r.project === state.project))
+      .length || "";
   $("countDrift").textContent = visibleDrift().length || "";
   $("countHistory").textContent = visibleHistory().length || "";
   $("countPlans").textContent = state.plans.length || "";
@@ -886,6 +919,7 @@ function renderCounts() {
  *  project look like it had done nothing on the other tabs. */
 function applyFilters() {
   renderFindings();
+  renderWork();
   renderActions();
   renderDrift();
   renderHistory();
@@ -1284,6 +1318,96 @@ async function decide(id, verb) {
     showLanded([{ id, project: action && action.project, landed_at: body.landed_at }]);
   }
   load();
+}
+
+// --- work: open pull requests ----------------------------------------------
+
+/** What is in a pull request's way, as a word and a colour.
+ *
+ *  One gate per row on purpose. A pull request with a red build and three
+ *  unanswered comments has one thing to do first, and listing both invites
+ *  answering the reviewer on a branch that does not build. */
+function gateChip(row) {
+  if (!row.blocking) return '<span class="chip ok">clear</span>';
+  const tone = row.blocking === "checks failing" ? "bad"
+    : row.blocking === "checks running" ? "wait" : "warn";
+  return `<span class="chip ${tone}">${esc(row.blocking)}</span>`;
+}
+
+function renderWork() {
+  const rows = state.pulls.filter((r) => !state.project || r.project === state.project);
+  const list = $("workList");
+  if (!rows.length) {
+    list.innerHTML = `<div class="empty">${
+      state.pulls.length
+        ? "Nothing open under the current filters."
+        : "No open pull requests in the last sweep. Run a sweep to refresh."
+    }</div>`;
+    return;
+  }
+  list.innerHTML = rows.map((r) => `
+    <div class="work">
+      <div class="work-head">
+        ${gateChip(r)}
+        <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.slug)}#${r.number}</a>
+        <span class="work-title">${esc(r.title)}</span>
+        ${r.foreman ? '<span class="chip">foreman</span>' : ""}
+        ${r.draft ? '<span class="chip">draft</span>' : ""}
+      </div>
+      <div class="work-meta">
+        ${esc(r.project)} · ${esc(r.author)} · <code>${esc(r.branch)}</code> → <code>${esc(r.base)}</code>
+        · checks ${esc(r.checks || "unknown")}${r.checks_failing ? ` (${r.checks_failing} failing)` : ""}
+        ${r.review_comments ? ` · ${r.review_comments} unresolved comment${r.review_comments === 1 ? "" : "s"}` : ""}
+      </div>
+      ${r.revisable ? `<div class="work-act">
+        <button class="primary revise" data-subject="${esc(r.subject)}">Address comments</button>
+        <span class="hint">An agent answers the review on <code>${esc(r.branch)}</code> and pushes a commit. It never merges — you do.</span>
+      </div>` : ""}
+    </div>`).join("");
+
+  list.querySelectorAll(".revise").forEach((b) =>
+    b.addEventListener("click", () => startRevision(b.dataset.subject, b)));
+}
+
+/** Dispatch an agent at one pull request's review comments.
+ *
+ *  It asks first. This spends money and pushes to somebody's branch, which are
+ *  both things that should never happen because a button was near the pointer. */
+async function startRevision(subject, button) {
+  if (!confirm(
+    `Have an agent address the review comments on ${subject.replace("pull:", "")}?\n\n` +
+    "It works in a throwaway copy of the repository, commits what it changes, and " +
+    "pushes to that pull request's branch. It cannot reach the default branch and " +
+    "cannot merge. You review the diff as you would anyone else's."
+  )) return;
+  button.disabled = true;
+  const res = await fetch(`/api/pulls/revise?subject=${encodeURIComponent(subject)}`,
+                          { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+    button.disabled = false;
+    return;
+  }
+  pollRevision();
+}
+
+async function pollRevision() {
+  const box = $("reviseLog");
+  const job = await fetchPart("/api/pulls/revise", null);
+  if (!job) return;
+  box.hidden = !job.log.length && !job.error;
+  box.innerHTML = job.log.map(esc).join("\n") +
+    (job.error ? `\n<span class="err">${esc(job.error)}</span>` : "");
+  box.scrollTop = box.scrollHeight;
+  if (job.running) {
+    setTimeout(pollRevision, 2000);
+  } else {
+    // The pull request's own state moved — its comments may be answered and
+    // its checks will be running again — so the row is re-read rather than
+    // left showing what was true before the agent ran.
+    load();
+  }
 }
 
 // --- drift -----------------------------------------------------------------

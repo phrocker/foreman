@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from . import secrets
 from .actions import Stale, effect_of, landed_at, target_label
 from .actions.sagform import automatable, policy_allows
+from .budget import Budget
 from .chat import ChatError, ask
 from .config import find_registry, load_registry
 from .connectors import build as build_connectors
@@ -35,6 +36,8 @@ from .precision import rank, rule_scores
 from .registry_edit import RegistryError, add_project, set_enabled
 from .registry_edit import projects as registry_projects
 from .report import write_report
+from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
+from .revise import address_review
 from .runner import (
     apply_action,
     apply_eligible,
@@ -46,6 +49,7 @@ from .runner import (
 from .skills import TrackRecord, track_records
 from .skills import label as skill_label
 from .store import Store, open_store
+from .work import open_pulls, pull_facts
 
 STATIC = Path(__file__).parent / "static"
 # Matches the CLI, and a quarter is what a report is usually asked for.
@@ -95,6 +99,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
     db = db_path
     job = Job()
+    # Its own, so a revision and a sweep do not evict each other's log.
+    revision = Job()
 
     def store() -> Store:
         return open_store(db, registry=registry_path)
@@ -880,6 +886,73 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # Buffering a stream defeats it; some proxies do so by default.
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # --- pull requests -------------------------------------------------------
+
+    @app.get("/api/pulls")
+    def pulls(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        s = store()
+        try:
+            return open_pulls(s, load_registry(registry_path), project=project)
+        finally:
+            s.close()
+
+    @app.post("/api/pulls/revise")
+    async def revise(subject: str = Query(...)) -> dict[str, Any]:
+        """Have an agent answer the review comments on one pull request.
+
+        A job rather than a request: this reads a repository, edits it and runs
+        a build, which takes minutes. The operator watches the same log the
+        nightly sweep writes to, because a run that acts on a remote should not
+        be something that happens quietly while a spinner turns.
+        """
+        with revision.lock:
+            if revision.running:
+                raise HTTPException(409, "a revision is already in progress")
+            revision.running = True
+            revision.started_at = utcnow()
+            revision.finished_at = None
+            revision.error = None
+            revision.log = []
+
+        def note(message: str) -> None:
+            with revision.lock:
+                revision.log.append(message)
+
+        async def work() -> None:
+            try:
+                s = store()
+                try:
+                    project, facts = pull_facts(s, load_registry(registry_path), subject)
+                    outcome = await address_review(
+                        project, s, facts, budget=Budget(REVISE_CEILING_USD), log=note
+                    )
+                    note(
+                        f"pushed {len(outcome.files)} file(s): {', '.join(outcome.files)}"
+                        if outcome.pushed
+                        else f"nothing pushed — {outcome.note}"
+                    )
+                    if outcome.revision:
+                        note(outcome.revision.summary)
+                        for item in outcome.revision.declined:
+                            note(f"declined {item.path}: {item.why}")
+                    note(f"${outcome.cost_usd:.2f}")
+                finally:
+                    s.close()
+            except Exception as exc:  # noqa: BLE001 — surfaced in the UI, not swallowed
+                with revision.lock:
+                    revision.error = f"{type(exc).__name__}: {exc}"
+            finally:
+                with revision.lock:
+                    revision.running = False
+                    revision.finished_at = utcnow()
+
+        asyncio.create_task(work())
+        return revision.as_dict()
+
+    @app.get("/api/pulls/revise")
+    def revise_status() -> dict[str, Any]:
+        return revision.as_dict()
 
     @app.get("/api/run")
     def run_status() -> dict[str, Any]:
