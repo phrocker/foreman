@@ -102,6 +102,37 @@ def set_enabled(path: Path, project_id: str, enabled: bool) -> dict[str, Any]:
     raise RegistryError(f"no project {project_id!r} in the registry")
 
 
+def set_delivery(path: Path, project_id: str, mode: str) -> dict[str, Any]:
+    """Choose what approving a change to this project actually does.
+
+    `worktree` writes the patch into the local checkout and stops; the operator
+    is left holding a dirty tree and decides what becomes of it. `pull_request`
+    branches from the default, commits with the SAG statement in the message,
+    pushes and opens a pull request.
+
+    A project property rather than a fourth kind of effect, and that is the
+    point: the operation, its class key and its guardrail are identical either
+    way, so the approval evidence behind `enable_dependabot` is one body of
+    evidence rather than two halves split by how the result was handed over.
+
+    The mode is checked here as well as by the loader. `_save` would catch it,
+    but only after writing a temporary file and rolling it back, and the error
+    would name a pydantic field rather than the two words that are valid.
+    """
+    from .delivery import MODES
+
+    if mode not in MODES:
+        raise RegistryError(f"unknown delivery {mode!r}; known: {list(MODES)}")
+
+    document = _load(path)
+    for entry in document.get("projects") or []:
+        if entry.get("id") == project_id:
+            entry["deliver"] = mode
+            _save(path, document)
+            return {"id": project_id, "deliver": mode}
+    raise RegistryError(f"no project {project_id!r} in the registry")
+
+
 def add_project(path: Path, project: dict[str, Any]) -> dict[str, Any]:
     """Declare a new project.
 

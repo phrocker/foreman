@@ -119,3 +119,45 @@ def test_an_unknown_delivery_mode_is_refused():
 
     with pytest.raises(ValueError, match="unknown delivery"):
         Project(id="p", name="P", deliver="pull-request")
+
+
+def test_a_delivery_branch_starts_from_the_base_not_from_wherever_head_is(tmp_path, monkeypatch):
+    """The bug this caught, before it reached a real repository.
+
+    A checkout is not usually sitting on the default branch. NBP was two commits
+    into `feat/admin-dashboard` when its first pull-request delivery was about to
+    run, and branching from HEAD would have opened a pull request against `main`
+    carrying the dependabot config *and* both admin-dashboard commits — one
+    change approved, three delivered.
+    """
+    repo = _repo(tmp_path / "r")
+
+    def run(*args):
+        subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True)
+
+    run("checkout", "-q", "-b", "feat/elsewhere")
+    (repo / "unrelated.txt").write_text("work in progress\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "unrelated work")
+
+    (repo / ".github").mkdir()
+    (repo / ".github" / "dependabot.yml").write_text("version: 2\n")
+
+    seen: dict = {}
+
+    def fake_pr(repo_, branch, title, body, base):
+        seen["files"] = subprocess.run(
+            ["git", "-C", str(repo_), "diff", "--name-only", base, branch],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        return "https://example.test/pr/1"
+
+    monkeypatch.setattr("foreman.delivery.open_pull_request", fake_pr)
+    deliver_as_pull_request(
+        repo, [".github/dependabot.yml"], "enable_dependabot", 25, "DO x()", "Enable Dependabot"
+    )
+
+    assert seen["files"] == [".github/dependabot.yml"]
+    assert "unrelated.txt" not in seen["files"]

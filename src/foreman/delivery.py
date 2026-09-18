@@ -67,6 +67,22 @@ def default_branch(repo: Path) -> str:
     raise DeliveryError("cannot tell which branch is the default")
 
 
+def _start_point(repo: Path, base: str) -> str:
+    """The commit a delivery branch starts from.
+
+    `origin/<base>` in preference to the local branch of the same name. A local
+    `main` that has not been pulled in a fortnight still produces a correct pull
+    request — GitHub diffs against the base as it is at merge time — but the
+    branch carries a stale history that makes the change harder to read and can
+    conflict for no reason. Falls back to the local ref for a repository with no
+    remote, which is every test and some real checkouts.
+    """
+    for ref in (f"refs/remotes/origin/{base}", f"refs/heads/{base}"):
+        if _git(repo, "rev-parse", "--verify", "--quiet", ref, check=False):
+            return ref
+    raise DeliveryError(f"cannot find the base branch {base!r} to branch from")
+
+
 def open_pull_request(repo: Path, branch: str, title: str, body: str, base: str) -> str:
     """Push the branch and open a pull request for it. Returns its URL."""
     if branch == base:
@@ -115,7 +131,13 @@ def deliver_as_pull_request(
     started_on = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     branch = branch_name(verb, action_id)
     try:
-        _git(repo, "checkout", "-b", branch)
+        # From the base, explicitly — never from wherever HEAD happens to be.
+        # A checkout is not usually sitting on the default branch: the first
+        # real use of this would have branched off a feature branch two commits
+        # ahead of main, and the pull request for "add dependabot.yml" would
+        # have carried both of them. The operator would have been asked to
+        # review one change and shown three.
+        _git(repo, "checkout", "-b", branch, _start_point(repo, base))
         _git(repo, "add", "--", *paths)
         body = (
             f"{summary}\n\n"
