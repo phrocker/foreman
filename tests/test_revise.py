@@ -16,7 +16,7 @@ import pytest
 
 from foreman.config import GitHubSurface, Project
 from foreman.connectors import Result
-from foreman.revise import Revision, address_review
+from foreman.revise import address_review
 from foreman.store import SqliteStore
 
 
@@ -86,7 +86,10 @@ class _Agent:
         self.seen.append(task)
         if self.edit:
             self.edit(task.read_dirs[0])
-        return Result(value=Revision(summary=self.summary), cost_usd=0.0, connector=self.name)
+        # Built from the task's own schema, as a real connector does. Returning
+        # a fixed type instead made the fake agree with whichever entry point
+        # was written first and disagree with the next one.
+        return Result(value=task.schema(summary=self.summary), cost_usd=0.0, connector=self.name)
 
 
 @pytest.fixture
@@ -300,3 +303,103 @@ def test_a_stewarded_projects_queue_is_not_on_the_board_unasked(tmp_path):
 
         assert [r["project"] for r in open_pulls(store, registry)] == ["mine"]
         assert [r["project"] for r in open_pulls(store, registry, project="theirs")] == ["theirs"]
+
+
+# --- fixing a finding no operation can answer -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_stewarded_project_is_refused_before_a_worktree_exists(world):
+    """Read every day, written to never — including by an agent."""
+    from foreman.fix import fix_findings
+
+    project, store = world
+    watched = project.model_copy(update={"tags": ["stewarded"]})
+    agent = _Agent()
+    result = await fix_findings(
+        watched,
+        store,
+        [{"id": 1, "rule": "r", "severity": "high", "summary": "s", "subjects": "[]"}],
+        connectors=[agent],
+    )
+    assert not result.pushed and "stewarded" in result.note
+    assert agent.seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_fix_branches_from_the_base_and_opens_a_pull_request(world, monkeypatch):
+    """The branch is new, cut from the base, so there is no existing work an
+    agent could quietly rewrite."""
+    from foreman import fix as fixmod
+
+    project, store = world
+    seen = {}
+
+    def fake_pr(repo, branch, title, body, base):
+        seen.update(branch=branch, base=base, title=title, body=body)
+        return "https://h.test/pull/9"
+
+    monkeypatch.setattr(fixmod, "open_pull_request", fake_pr)
+
+    def edit(work):
+        (work / "legal.ts").write_text("export const email = OPERATOR.generalEmail;\n")
+
+    result = await fixmod.fix_findings(
+        project,
+        store,
+        [
+            {
+                "id": 884,
+                "rule": "duplicate_meta_description",
+                "severity": "high",
+                "summary": "9 pages share one meta description",
+                "subjects": '["https://s.test/a", "https://s.test/b"]',
+                "detail": "Usually one template.",
+            }
+        ],
+        connectors=[_Agent(edit, summary="Give each page its own description")],
+    )
+
+    assert result.pushed and result.note == "https://h.test/pull/9"
+    assert seen["base"] == "main"
+    assert seen["branch"].startswith("foreman/fix-duplicate_meta_description")
+    # The body has to say what was refused as well as what changed: a reviewer
+    # who sees only the diff cannot tell "did not apply" from "chose not to".
+    assert "duplicate_meta_description" in seen["body"]
+    assert "the merge is yours" in seen["body"]
+
+
+@pytest.mark.asyncio
+async def test_findings_are_fixed_together_so_two_agents_do_not_fight(world, monkeypatch):
+    """Duplicate titles and duplicate meta descriptions are one page-template
+    change. Two agents sent at one template produce two branches that conflict."""
+    from foreman import fix as fixmod
+
+    project, store = world
+    monkeypatch.setattr(fixmod, "open_pull_request", lambda *a: "https://h.test/pull/9")
+    agent = _Agent(lambda work: (work / "legal.ts").write_text("changed\n"))
+
+    await fixmod.fix_findings(
+        project,
+        store,
+        [
+            {
+                "id": 1,
+                "rule": "duplicate_title",
+                "severity": "high",
+                "summary": "3 pages share one title",
+                "subjects": "[]",
+            },
+            {
+                "id": 2,
+                "rule": "duplicate_meta_description",
+                "severity": "high",
+                "summary": "9 pages share one meta description",
+                "subjects": "[]",
+            },
+        ],
+        connectors=[agent],
+    )
+    assert len(agent.seen) == 1, "one dispatch, one branch"
+    body = agent.seen[0].instructions
+    assert "3 pages share one title" in body and "9 pages share one meta description" in body

@@ -19,14 +19,18 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
 from . import secrets
-from .actions import Stale, effect_of, landed_at, target_label
+from .actions import Stale, _ops, effect_of, landed_at, target_label
 from .actions.sagform import automatable, policy_allows
+from .adversary import DEFAULT_CEILING_USD as REVIEW_CEILING_USD
+from .adversary import LENSES, diff_of, review_change, summarise
 from .budget import Budget
 from .chat import ChatError, ask
 from .config import find_registry, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import project_drift
+from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
+from .fix import fix_findings
 from .graph import MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import describe
 from .models import Observation, utcnow
@@ -38,7 +42,7 @@ from .registry_edit import RegistryError, add_project, set_enabled
 from .registry_edit import projects as registry_projects
 from .report import write_report
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
-from .revise import address_review
+from .revise import _git, address_review
 from .runner import (
     apply_action,
     apply_eligible,
@@ -72,11 +76,25 @@ def _proposed(reply: Any) -> list[dict[str, Any]]:
 
 @dataclass
 class Job:
-    """State of the one run the UI can trigger.
+    """State of one kind of run the UI can trigger.
 
-    Deliberately single-slot: two concurrent sweeps would interleave writes into
-    the same snapshot and produce a diff against a half-written run.
+    Single-slot per kind, and that is a real constraint rather than a
+    simplification: two concurrent sweeps would interleave writes into the same
+    snapshot and produce a diff against a half-written run, and two agents in
+    one repository would fight over branches.
+
+    Different kinds run alongside each other freely — a sweep reading and an
+    agent writing on a branch have nothing to collide over — which is why these
+    are keyed rather than global. They also stopped sharing a log the first time
+    a revision's output was evicted by a sweep that happened to start.
     """
+
+    # What this job is, for the activity view to label it without guessing.
+    kind: str = "run"
+    # What it is acting on: a project, a pull request, a finding. Free text,
+    # because the useful answer differs per kind and inventing a schema for it
+    # would be inventing one for a log line.
+    target: str = ""
 
     running: bool = False
     started_at: str | None = None
@@ -88,6 +106,8 @@ class Job:
     def as_dict(self) -> dict[str, Any]:
         with self.lock:
             return {
+                "kind": self.kind,
+                "target": self.target,
                 "running": self.running,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
@@ -98,15 +118,55 @@ class Job:
 
 # Enough to hide the latency of a page's worth of registrar reads, few enough
 # that a dashboard refresh is not a burst somebody rate-limits.
+# Run kinds that cost money and are worth watching. The collectors a sweep
+# uses are not here: nobody wonders whether `tls` is still going.
+AGENT_RUNS = ("fix", "revise", "review")
+
 STALENESS_WORKERS = 8
 
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
     db = db_path
-    job = Job()
-    # Its own, so a revision and a sweep do not evict each other's log.
-    revision = Job()
+    # One slot per kind of work. A sweep, a revision, a fix and a review can all
+    # be in flight at once without evicting each other's log — which they did,
+    # the first time a revision's output vanished because a sweep started.
+    jobs: dict[str, Job] = {
+        "sweep": Job(kind="sweep"),
+        "revise": Job(kind="revise"),
+        "fix": Job(kind="fix"),
+        "review": Job(kind="review"),
+    }
+    job = jobs["sweep"]
+    revision = jobs["revise"]
+
+    def start(name: str, target: str) -> Job:
+        """Claim a job slot, or refuse because that kind is already running."""
+        slot = jobs[name]
+        with slot.lock:
+            if slot.running:
+                raise HTTPException(409, f"a {name} is already in progress")
+            slot.running = True
+            slot.target = target
+            slot.started_at = utcnow()
+            slot.finished_at = None
+            slot.error = None
+            slot.log = []
+        return slot
+
+    def finish(slot: Job, error: str | None = None) -> None:
+        with slot.lock:
+            slot.running = False
+            slot.finished_at = utcnow()
+            if error:
+                slot.error = error
+
+    def note_to(slot: Job):
+        def note(message: str) -> None:
+            with slot.lock:
+                slot.log.append(message)
+
+        return note
 
     def store() -> Store:
         return open_store(db, registry=registry_path)
@@ -465,6 +525,14 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         except secrets.SecretsUnavailable as exc:
             backend, usable = str(exc), False
         return {
+            # Which rules an operation can answer. The page needs it to tell
+            # "queue an action for this" from "send an agent at this" — the
+            # first earns trust through an equivalence class and the second
+            # never can, and offering both on one finding would blur the only
+            # line that matters here.
+            "answerable": sorted(
+                {rule for op in _ops().values() for rule in getattr(op, "answers", ())}
+            ),
             "keyring": backend,
             "usable": usable,
             "credentials": [
@@ -1035,6 +1103,139 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     @app.get("/api/pulls/revise")
     def revise_status() -> dict[str, Any]:
         return revision.as_dict()
+
+    @app.post("/api/findings/{finding_id}/fix")
+    async def fix_finding(finding_id: int, also: str = Query("")) -> dict[str, Any]:
+        """Send an agent at a finding no operation can answer.
+
+        `also` names further finding ids to fix in the same pass, comma
+        separated. They are fixed together because they arrive together: two
+        agents sent at one page template produce two branches that conflict,
+        and the operator's own standing instruction is that squibble's duplicate
+        titles and duplicate meta descriptions are one change.
+        """
+        ids = [finding_id] + [int(x) for x in also.split(",") if x.strip().isdigit()]
+        s = store()
+        try:
+            rows = [r for r in (s.finding(i) for i in ids) if r]
+        finally:
+            s.close()
+        if not rows:
+            raise HTTPException(404, "no such finding")
+        projects = {r["project"] for r in rows}
+        if len(projects) > 1:
+            raise HTTPException(400, "findings from different projects cannot share a branch")
+
+        slot = start("fix", ", ".join(f"#{r['id']}" for r in rows))
+        note = note_to(slot)
+
+        async def work() -> None:
+            try:
+                st = store()
+                try:
+                    project = load_registry(registry_path).get(rows[0]["project"])
+                    outcome = await fix_findings(
+                        project, st, rows, budget=Budget(FIX_CEILING_USD), log=note
+                    )
+                    note(
+                        f"opened {outcome.note}"
+                        if outcome.pushed
+                        else f"nothing opened — {outcome.note}"
+                    )
+                    if outcome.revision:
+                        for item in getattr(outcome.revision, "declined", []):
+                            note(f"declined: {item.why}")
+                    note(f"${outcome.cost_usd:.2f}")
+                finally:
+                    st.close()
+            except Exception as exc:  # noqa: BLE001 — surfaced in the UI
+                finish(slot, f"{type(exc).__name__}: {exc}")
+            else:
+                finish(slot)
+
+        asyncio.create_task(work())
+        return slot.as_dict()
+
+    @app.post("/api/pulls/review")
+    async def review_pull(subject: str = Query(...)) -> dict[str, Any]:
+        """Read one pull request's diff from four angles at once.
+
+        Separate dispatches rather than one prompt with four headings: an agent
+        asked for four kinds of problem finds the first kind and then
+        pattern-matches, and the correctness pass and the scope pass disagree
+        usefully only when neither has read the other's answer.
+        """
+        slot = start("review", subject)
+        note = note_to(slot)
+
+        async def work() -> None:
+            try:
+                st = store()
+                try:
+                    project, facts = pull_facts(st, load_registry(registry_path), subject)
+                    if project.repo is None or not project.repo.exists():
+                        note("no local checkout, so there is no diff to read")
+                        return
+                    branch, base = str(facts.get("branch")), str(facts.get("base"))
+                    _git(project.repo, "fetch", "origin", branch, check=False)
+                    diff = diff_of(project.repo, f"origin/{base}", f"origin/{branch}")
+                    note(f"reading {len(diff)} characters of diff from {len(LENSES)} angles")
+                    found = await review_change(
+                        project,
+                        st,
+                        subject,
+                        facts.get("title") or subject,
+                        diff,
+                        budget=Budget(REVIEW_CEILING_USD),
+                        log=note,
+                    )
+                    note(summarise(found))
+                finally:
+                    st.close()
+            except Exception as exc:  # noqa: BLE001 — surfaced in the UI
+                finish(slot, f"{type(exc).__name__}: {exc}")
+            else:
+                finish(slot)
+
+        asyncio.create_task(work())
+        return slot.as_dict()
+
+    @app.get("/api/activity")
+    def activity() -> dict[str, Any]:
+        """What is running now, and what agent work ran recently.
+
+        One place, because "is it doing anything" was answerable only by knowing
+        which tab's log to look at. The live half is this process's job slots;
+        the recent half is the run log, which survives a restart and is where
+        the cost actually lives.
+        """
+        s = store()
+        try:
+            registry = load_registry(registry_path)
+            recent: list[dict[str, Any]] = []
+            for target in registry.active:
+                for collector in AGENT_RUNS:
+                    ids = s.recent_runs(target.id, collector, limit=3)
+                    for row in s.runs(ids):
+                        recent.append(
+                            {
+                                "project": target.id,
+                                "kind": collector,
+                                "started_at": row["started_at"],
+                                "finished_at": row["finished_at"],
+                                "ok": bool(row["ok"]),
+                                "error": row["error"],
+                                "cost_usd": row["cost_usd"],
+                                "connector": row["connector"],
+                            }
+                        )
+        finally:
+            s.close()
+        recent.sort(key=lambda r: str(r["started_at"] or ""), reverse=True)
+        return {
+            "jobs": [j.as_dict() for j in jobs.values()],
+            "recent": recent[:40],
+        }
 
     @app.get("/api/run")
     def run_status() -> dict[str, Any]:

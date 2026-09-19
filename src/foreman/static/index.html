@@ -325,6 +325,10 @@
   .chip.bad  { border-color: var(--high);   color: var(--high); }
   .chip.warn { border-color: var(--medium); color: var(--medium); }
   .chip.wait { border-color: var(--low);    color: var(--low); }
+  .act-head { font-size: 0.95em; color: var(--text-2); margin: 18px 0 8px; font-weight: 550; }
+  .acts { display: flex; flex-direction: column; gap: 2px; }
+  .act { display: flex; gap: 12px; align-items: baseline; padding: 5px 8px;
+         border-bottom: 1px solid var(--border); font-size: 0.92em; }
   section { margin-bottom: 30px; }
   /* Tabs */
   .tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border); }
@@ -614,6 +618,7 @@
     <button class="tab" data-tab="findings" role="tab" aria-selected="true">Findings <span class="count" id="countFindings"></span></button>
     <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
     <button class="tab" data-tab="work"     role="tab" aria-selected="false">Work <span class="count" id="countWork"></span></button>
+    <button class="tab" data-tab="activity" role="tab" aria-selected="false">Activity <span class="count" id="countActivity"></span></button>
     <button class="tab" data-tab="drift"    role="tab" aria-selected="false">Drift <span class="count" id="countDrift"></span></button>
     <button class="tab" data-tab="history"  role="tab" aria-selected="false">History <span class="count" id="countHistory"></span></button>
     <button class="tab" data-tab="memory"   role="tab" aria-selected="false">Memory <span class="count" id="countMemory"></span></button>
@@ -655,6 +660,12 @@
     <div class="hint">Open pull requests across the portfolio, ordered by what is in the way. Nothing here merges: the diff is the review and the merge is yours.</div>
     <div id="workList"></div>
     <div id="reviseLog" class="log" hidden></div>
+  </section>
+
+  <section id="panel-activity" role="tabpanel" hidden>
+    <div class="hint">What Foreman is doing now, and what its agents have done recently. Anything that costs money runs here and says what it spent.</div>
+    <div id="activityNow"></div>
+    <div id="activityPast"></div>
   </section>
 
   <section id="panel-drift" role="tabpanel" hidden>
@@ -750,7 +761,7 @@ const SEV = {
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
-  pulls: [],
+  pulls: [], activity: null,
   declared: [],
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
@@ -844,7 +855,7 @@ let stale = [];
 async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports, declared, pulls] =
+         settings, plans, reports, declared, pulls, activity] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -860,10 +871,11 @@ async function load() {
     fetchPart("/api/reports", []),
     fetchPart("/api/projects", []),
     fetchPart("/api/pulls", []),
+    fetchPart("/api/activity", null),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
-    connectors, skills, memories, settings, plans, reports, declared, pulls,
+    connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -878,7 +890,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["work", renderWork], ["drift", renderDrift], ["history", renderHistory],
+    ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -930,6 +942,8 @@ function renderCounts() {
   $("countWork").textContent =
     state.pulls.filter((r) => r.blocking && (!state.project || r.project === state.project))
       .length || "";
+  $("countActivity").textContent =
+    (state.activity ? state.activity.jobs.filter((j) => j.running).length : 0) || "";
   $("countDrift").textContent = visibleDrift().length || "";
   $("countHistory").textContent = visibleHistory().length || "";
   $("countPlans").textContent = state.plans.length || "";
@@ -1382,14 +1396,19 @@ function renderWork() {
         · checks ${esc(r.checks || "unknown")}${r.checks_failing ? ` (${r.checks_failing} failing)` : ""}
         ${r.review_comments ? ` · ${r.review_comments} unresolved comment${r.review_comments === 1 ? "" : "s"}` : ""}
       </div>
-      ${r.revisable ? `<div class="work-act">
-        <button class="primary revise" data-subject="${esc(r.subject)}">Address comments</button>
-        <span class="hint">An agent answers the review on <code>${esc(r.branch)}</code> and pushes a commit. It never merges — you do.</span>
-      </div>` : ""}
+      <div class="work-act">
+        ${r.revisable ? `<button class="primary revise" data-subject="${esc(r.subject)}">Address comments</button>` : ""}
+        <button class="adv-review" data-subject="${esc(r.subject)}">Adversarial review</button>
+        <span class="hint">${r.revisable
+          ? `An agent answers the review on <code>${esc(r.branch)}</code> and pushes a commit. `
+          : ""}Four agents read the diff from angles that have not seen each other's answers. Nothing merges and nothing is posted to GitHub.</span>
+      </div>
     </div>`).join("");
 
   list.querySelectorAll(".revise").forEach((b) =>
     b.addEventListener("click", () => startRevision(b.dataset.subject, b)));
+  list.querySelectorAll(".adv-review").forEach((b) =>
+    b.addEventListener("click", () => reviewPull(b.dataset.subject, b)));
 }
 
 /** Dispatch an agent at one pull request's review comments.
@@ -1431,6 +1450,162 @@ async function pollRevision() {
     // left showing what was true before the agent ran.
     load();
   }
+}
+
+/** Whether an agent could be sent at this finding.
+ *
+ *  Needs somewhere to work, and nothing to already be doing the job. A finding
+ *  an operation answers goes through the action ledger instead — that path has
+ *  an equivalence class behind it and earns trust; this one never can, and
+ *  offering both would blur the only line that matters. */
+function fixable(f) {
+  const project = (state.declared || []).find((p) => p.id === f.project);
+  const answerable = (state.settings && state.settings.answerable) || [];
+  return Boolean(project && project.fixable && !f.outcome && !answerable.includes(f.rule));
+}
+
+/** Other open findings on the same project that share a cause.
+ *
+ *  Duplicate titles and duplicate meta descriptions are one page-template
+ *  change, and sending two agents at one template produces two branches that
+ *  conflict. Grouped by project and by the family of the rule rather than by
+ *  anything cleverer: a guess that over-groups costs one wider diff, and a
+ *  guess that under-groups costs a merge conflict. */
+const FAMILIES = [["duplicate_meta_description", "duplicate_title", "missing_meta_description"]];
+function siblingsOf(f) {
+  const family = FAMILIES.find((g) => g.includes(f.rule));
+  if (!family) return [];
+  return state.findings
+    .filter((o) => o.id !== f.id && o.project === f.project && !o.outcome &&
+                   family.includes(o.rule))
+    .map((o) => o.id);
+}
+
+// --- activity ---------------------------------------------------------------
+
+/** What is running, and what agent work ran recently.
+ *
+ *  One place, because "is it doing anything" used to be answerable only by
+ *  knowing which tab's log to look at. The live half is this process; the
+ *  recent half is the run log, which survives a restart and is where the cost
+ *  actually is. */
+function renderActivity() {
+  const a = state.activity;
+  const now = $("activityNow");
+  const past = $("activityPast");
+  if (!a) { now.innerHTML = '<div class="empty">Could not read activity.</div>'; return; }
+
+  const running = a.jobs.filter((j) => j.running);
+  now.innerHTML = running.length
+    ? running.map((j) => `
+        <div class="work">
+          <div class="work-head">
+            <span class="chip wait">running</span>
+            <span class="work-title">${esc(j.kind)}${j.target ? " — " + esc(j.target) : ""}</span>
+            <span class="src">started ${esc(j.started_at || "")}</span>
+          </div>
+          <div class="log">${j.log.map(esc).join("\n") ||
+            "<span class=\"src\">no output yet</span>"}${
+            j.error ? `\n<span class="err">${esc(j.error)}</span>` : ""}</div>
+        </div>`).join("")
+    : '<div class="empty">Nothing running.</div>';
+
+  // A finished job keeps its log until the next one of its kind replaces it.
+  // That is the only place the detail of what an agent decided survives, and
+  // throwing it away the moment it finished was how "what did it say?" became
+  // unanswerable a second after it mattered.
+  const done = a.jobs.filter((j) => !j.running && (j.log.length || j.error));
+  const recent = a.recent.map((r) => `
+    <div class="act">
+      <span class="chip ${r.ok && !r.error ? "ok" : "bad"}">${esc(r.kind)}</span>
+      <span>${esc(r.project)}</span>
+      <span class="src">${esc(r.started_at || "")}</span>
+      <span class="src">${r.cost_usd ? usd(r.cost_usd) : "—"}</span>
+      <span class="src">${esc(r.connector || "")}</span>
+      ${r.error ? `<span class="err">${esc(r.error)}</span>` : ""}
+    </div>`).join("");
+
+  past.innerHTML =
+    (done.length ? `<h3 class="act-head">Last output</h3>` + done.map((j) => `
+       <div class="work">
+         <div class="work-head"><span class="work-title">${esc(j.kind)}${
+           j.target ? " — " + esc(j.target) : ""}</span>
+           <span class="src">finished ${esc(j.finished_at || "")}</span></div>
+         <div class="log">${j.log.map(esc).join("\n")}${
+           j.error ? `\n<span class="err">${esc(j.error)}</span>` : ""}</div>
+       </div>`).join("") : "") +
+    (recent
+      ? `<h3 class="act-head">Recent agent runs</h3><div class="acts">${recent}</div>`
+      : '<div class="empty">No agent has run yet.</div>');
+}
+
+/** Poll while anything is running, and stop when nothing is.
+ *
+ *  Started by whatever dispatched the work rather than running always: a
+ *  dashboard left open overnight should not be asking every two seconds
+ *  whether something it never started has finished. */
+let activityTimer = null;
+async function watchActivity() {
+  clearTimeout(activityTimer);
+  const a = await fetchPart("/api/activity", null);
+  if (!a) return;
+  state.activity = a;
+  renderActivity();
+  renderCounts();
+  if (a.jobs.some((j) => j.running)) {
+    activityTimer = setTimeout(watchActivity, 2000);
+  } else {
+    // The work changed the world — a branch, a pull request, findings against
+    // it — so the rest of the board is now behind.
+    load();
+  }
+}
+
+/** Send an agent at a finding nothing can fix mechanically. */
+async function fixFinding(id, alsoIds, button) {
+  const all = [id, ...alsoIds];
+  if (!confirm(
+    `Have an agent fix ${all.length === 1 ? "this finding" : all.length + " findings together"}?\n\n` +
+    "It works in a throwaway copy of the repository, on a new branch cut from " +
+    "the default, and opens a pull request. It cannot merge — you review the " +
+    "diff as you would anyone else's.\n\n" +
+    "This costs money and is not free to run twice."
+  )) return;
+  button.disabled = true;
+  const qs = alsoIds.length ? `?also=${encodeURIComponent(alsoIds.join(","))}` : "";
+  const res = await fetch(`/api/findings/${id}/fix${qs}`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+    button.disabled = false;
+    return;
+  }
+  showTab("activity");
+  watchActivity();
+}
+
+/** Read one pull request's diff from four angles that have not seen each
+ *  other's answers. */
+async function reviewPull(subject, button) {
+  if (!confirm(
+    `Have four agents review ${subject.replace("pull:", "")}?\n\n` +
+    "Each reads the diff from one angle — does it work, did it do more than it " +
+    "was asked, does it actually fix the thing, what else does it touch — " +
+    "without seeing the others' answers.\n\n" +
+    "Nothing is posted to GitHub. What they find lands here as findings you can " +
+    "dismiss, and dismissing is what makes their precision mean anything."
+  )) return;
+  button.disabled = true;
+  const res = await fetch(`/api/pulls/review?subject=${encodeURIComponent(subject)}`,
+                          { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+    button.disabled = false;
+    return;
+  }
+  showTab("activity");
+  watchActivity();
 }
 
 // --- drift -----------------------------------------------------------------
@@ -2082,6 +2257,9 @@ function renderFindings() {
       : `<div class="decide">
           <button class="decide-acted" data-id="${f.id}">I fixed this</button>
           <button class="decide-dismissed" data-id="${f.id}">Not worth it</button>
+          ${fixable(f) ? `<button class="primary fix-it" data-id="${f.id}" data-also="${
+              esc(siblingsOf(f).join(","))}">Have an agent fix it${
+              siblingsOf(f).length ? ` (with ${siblingsOf(f).length} more)` : ""}</button>` : ""}
           <span class="decide-note">Either answer teaches the rule whether it earns its keep.</span>
         </div>`;
     const detail = open ? `<tr class="detail"><td colspan="4"><div class="detail-inner">
@@ -2112,6 +2290,12 @@ function renderFindings() {
 
   document.querySelectorAll(".decide-acted").forEach((b) =>
     b.addEventListener("click", (e) => { e.stopPropagation(); decide(b.dataset.id, "acted"); }));
+  document.querySelectorAll(".fix-it").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const also = (b.dataset.also || "").split(",").filter(Boolean).map(Number);
+      fixFinding(Number(b.dataset.id), also, b);
+    }));
   document.querySelectorAll(".decide-dismissed").forEach((b) =>
     b.addEventListener("click", (e) => {
       e.stopPropagation();

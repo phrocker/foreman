@@ -34,7 +34,8 @@ import json
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,6 +135,29 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
+@contextmanager
+def worktree(repo: Path, start: str) -> Iterator[Path]:
+    """A throwaway checkout at `start`, removed whatever happens.
+
+    The property that makes agent work tolerable to leave running: a run takes
+    minutes, and a tool that switches branches under somebody who is working is
+    a tool nobody leaves on. The operator's checkout is never touched.
+
+    Removal is unconditional. A worktree left behind accumulates copies of the
+    repository in the temporary directory and leaves `git worktree list` naming
+    paths that no longer exist — and the failing runs, which is when it would
+    happen, are the ones nobody goes back to tidy up after.
+    """
+    tree = Path(tempfile.mkdtemp(prefix="foreman-work-"))
+    work = tree / "repo"
+    try:
+        _git(repo, "worktree", "add", "--detach", str(work), start)
+        yield work
+    finally:
+        _git(repo, "worktree", "remove", "--force", str(work), check=False)
+        shutil.rmtree(tree, ignore_errors=True)
+
+
 def _threads(raw: str | None) -> list[dict]:
     try:
         items = json.loads(raw or "[]")
@@ -199,87 +223,82 @@ async def address_review(
     run_id = store.start_run(project.id, "revise")
     spent = 0.0
     backend: str | None = None
-    tree = Path(tempfile.mkdtemp(prefix="foreman-revise-"))
-    work = tree / "repo"
+    _git(project.repo, "fetch", "origin", branch)
     try:
-        _git(project.repo, "fetch", "origin", branch)
-        # Detached from the fetched remote tip rather than from a local branch
-        # of the same name, which may be behind, ahead, or somebody's own work
-        # in progress under a coincidental name.
-        _git(project.repo, "worktree", "add", "--detach", str(work), f"origin/{branch}")
-        _git(work, "checkout", "-B", branch, f"origin/{branch}")
+        # From the fetched remote tip rather than a local branch of the same
+        # name, which may be behind, ahead, or somebody's own work in progress
+        # under a coincidental name.
+        with worktree(project.repo, f"origin/{branch}") as work:
+            _git(work, "checkout", "-B", branch, f"origin/{branch}")
 
-        task = Task(
-            instructions=PROMPT.format(
-                title=facts.get("title") or "",
-                branch=branch,
-                base=facts.get("base") or "",
-                slug=slug,
-                url=facts.get("url") or "",
-                threads=_render(threads),
-            ),
-            schema=Revision,
-            # It reads the checkout and edits it, and it runs the project's own
-            # build to see whether what it wrote works. It is granted no skills
-            # and no web.
-            needs=frozenset({REPO, SHELL}),
-            timeout_s=timeout_s,
-            read_dirs=(work,),
-            model=model,
-        )
-        connector = choose(connectors, task)
-        backend = connector.name
-        store.relate(skill_run_edges(run_id, "revise", project.id, backend))
-        log(f"{project.id}: revising {slug}#{facts.get('number') or ''} via {backend} …")
+            task = Task(
+                instructions=PROMPT.format(
+                    title=facts.get("title") or "",
+                    branch=branch,
+                    base=facts.get("base") or "",
+                    slug=slug,
+                    url=facts.get("url") or "",
+                    threads=_render(threads),
+                ),
+                schema=Revision,
+                # It reads the checkout and edits it, and it runs the project's own
+                # build to see whether what it wrote works. It is granted no skills
+                # and no web.
+                needs=frozenset({REPO, SHELL}),
+                timeout_s=timeout_s,
+                read_dirs=(work,),
+                model=model,
+            )
+            connector = choose(connectors, task)
+            backend = connector.name
+            store.relate(skill_run_edges(run_id, "revise", project.id, backend))
+            log(f"{project.id}: revising {slug}#{facts.get('number') or ''} via {backend} …")
 
-        try:
-            result = await connector.run(task)
-        except ConnectorError as exc:
-            spent = exc.cost_usd
-            raise
+            try:
+                result = await connector.run(task)
+            except ConnectorError as exc:
+                spent = exc.cost_usd
+                raise
 
-        spent = result.cost_usd
-        revision = result.value
-        if budget is not None and spent:
-            budget.charge(spent)
+            spent = result.cost_usd
+            revision = result.value
+            if budget is not None and spent:
+                budget.charge(spent)
 
-        # Staged first, then asked. Slicing the porcelain's status columns off
-        # the front of each line looks equivalent and is not — the width varies
-        # with the status, and it silently returned `ooter.tsx` for a modified
-        # file until a test compared the name it produced against the name on
-        # disk. `diff --cached --name-only` is git answering the question.
-        _git(work, "add", "-A")
-        files = tuple(
-            sorted(f for f in _git(work, "diff", "--cached", "--name-only").splitlines() if f)
-        )
-        if not files:
-            # A real answer, and the commonest one when every comment was
-            # declined. Committing nothing would be an empty push and a
-            # notification for no change.
-            return Result(False, (), revision, spent, "the agent changed nothing")
+            # Staged first, then asked. Slicing the porcelain's status columns off
+            # the front of each line looks equivalent and is not — the width varies
+            # with the status, and it silently returned `ooter.tsx` for a modified
+            # file until a test compared the name it produced against the name on
+            # disk. `diff --cached --name-only` is git answering the question.
+            _git(work, "add", "-A")
+            files = tuple(
+                sorted(f for f in _git(work, "diff", "--cached", "--name-only").splitlines() if f)
+            )
+            if not files:
+                # A real answer, and the commonest one when every comment was
+                # declined. Committing nothing would be an empty push and a
+                # notification for no change.
+                return Result(False, (), revision, spent, "the agent changed nothing")
 
-        _git(
-            work,
-            "commit",
-            "-m",
-            f"{revision.summary}\n\n"
-            "Written by an agent in answer to review comments on this pull "
-            "request, and pushed to its branch. Nothing was approved or merged: "
-            "the diff is the review.",
-        )
-        # Named explicitly, and never with --force. The remote refusing a
-        # non-fast-forward is the backstop for every way this could be wrong.
-        _git(work, "push", "origin", f"{branch}:{branch}")
-        # Written on success only, and written now rather than worked out later:
-        # this pull request stops being observable the moment it closes, and a
-        # revision that merged and left no trace is the one worth counting.
-        store.relate(revision_edges(run_id, project.id, slug, facts.get("number") or ""))
-        log(f"{project.id}: pushed {len(files)} file(s) to {branch}")
-        return Result(True, files, revision, spent)
+            _git(
+                work,
+                "commit",
+                "-m",
+                f"{revision.summary}\n\n"
+                "Written by an agent in answer to review comments on this pull "
+                "request, and pushed to its branch. Nothing was approved or merged: "
+                "the diff is the review.",
+            )
+            # Named explicitly, and never with --force. The remote refusing a
+            # non-fast-forward is the backstop for every way this could be wrong.
+            _git(work, "push", "origin", f"{branch}:{branch}")
+            # Written on success only, and written now rather than worked out later:
+            # this pull request stops being observable the moment it closes, and a
+            # revision that merged and left no trace is the one worth counting.
+            store.relate(revision_edges(run_id, project.id, slug, facts.get("number") or ""))
+            log(f"{project.id}: pushed {len(files)} file(s) to {branch}")
+            return Result(True, files, revision, spent)
     finally:
+        # The worktree is `worktree`'s business now, and it removes it whatever
+        # happened. This only has to close the run.
         store.finish_run(run_id, ok=True, cost_usd=spent, connector=backend)
-        # The worktree goes whatever happened. Leaving one behind accumulates
-        # copies of the repository in the temporary directory and leaves `git
-        # worktree list` naming paths that no longer exist.
-        _git(project.repo, "worktree", "remove", "--force", str(work), check=False)
-        shutil.rmtree(tree, ignore_errors=True)
