@@ -266,7 +266,6 @@ def test_the_page_only_reads_fields_the_api_sends():
     has to come from somewhere, and the two lists drifting apart is how a
     control disappears without anybody seeing an error.
     """
-    import re
     from pathlib import Path
 
     page = (
