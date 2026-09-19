@@ -8,6 +8,8 @@ crawling would ever reveal.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from ..models import Severity
 from .common import Add, Pages
 
@@ -20,6 +22,14 @@ STALE_PULL_DAYS = 30.0
 PULL_BACKLOG = 15
 QUIET_RELEASE_DAYS = 180.0
 
+# How long a pull request may sit blocked before it is a finding rather than a
+# fact. Short enough that a red build gets looked at the same week; long enough
+# that opening something on Friday afternoon does not file one on Monday.
+BLOCKED_DAYS = 4.0
+# The same, for a reviewer who is still waiting. Longer on purpose: somebody
+# else's comment is not an outage, and chasing it after two days is nagging.
+UNANSWERED_DAYS = 7.0
+
 
 def _number(facts: Pages, key: str) -> float | None:
     value = facts.get(key)
@@ -31,8 +41,102 @@ def _number(facts: Pages, key: str) -> float | None:
         return None
 
 
+def _age_days(created_at: str | None) -> float | None:
+    if not created_at:
+        return None
+    try:
+        started = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(UTC) - started).total_seconds() / 86400
+
+
+def _judge_pull(subject: str, facts: Pages, add: Add) -> None:
+    """One open pull request, judged on what is in its way and for how long.
+
+    The board already shows this; a finding is what makes it survive not being
+    looked at. A pull request that went red this morning and one that has been
+    red for a fortnight are the same row on a list and completely different
+    problems, and only the second one is certain not to resolve itself.
+
+    Age alone is never the fault. Plenty of pull requests sit open on purpose —
+    a draft, a branch waiting on a decision somewhere else — and filing those
+    every night is how a board stops being read. What is judged is a pull
+    request that is *blocked*, which is a different claim.
+    """
+    if str(facts.get("draft")) == "true":
+        return
+    age = _age_days(facts.get("created_at"))
+    if age is None:
+        return
+
+    name = subject.removeprefix("pull:")
+    bot = str(facts.get("author") or "").endswith("[bot]")
+    mine = str(facts.get("foreman")) == "true"
+
+    if str(facts.get("checks")) == "failing" and age >= BLOCKED_DAYS:
+        failed = facts.get("checks_failed_names")
+        add(
+            "pull_request_failing",
+            # A dependency bump that cannot land is the case this was written
+            # for and it is the quieter one: nobody is waiting on it, so it
+            # rots. A person's branch failing is usually already known about.
+            Severity.MEDIUM if bot else Severity.LOW,
+            f"{name} has been failing CI for {age:.0f} days",
+            [subject],
+            f"{facts.get('checks_failing') or '?'} check(s) failing"
+            + (f": {failed}" if failed else "")
+            + ".\n\n"
+            + (
+                "Opened by a bot, which is why this is worth a finding: a "
+                "dependency update nobody is waiting on does not get chased, and "
+                "the advisory it would have closed stays open. `bump_dependency` "
+                "will refuse to merge it while the suite is red, and should."
+                if bot
+                else "Opened by a person, so this is a reminder rather than news."
+            ),
+        )
+        return
+
+    if mine and age >= BLOCKED_DAYS and str(facts.get("checks")) == "passing":
+        add(
+            "foreman_pull_request_undecided",
+            Severity.LOW,
+            f"{name} is Foreman's own and has been waiting {age:.0f} days",
+            [subject],
+            "Foreman opened this, its checks pass, and nobody has merged or "
+            "closed it. A tool that asks for a change and then lets its own "
+            "request rot is worse than one that never asked — either it is "
+            "wanted, in which case merge it, or it is not, in which case "
+            "closing it says so and the next one can be better.",
+        )
+        return
+
+    unanswered = str(facts.get("review")) == "changes_requested" or _number(
+        facts, "review_comments"
+    )
+    if unanswered and age >= UNANSWERED_DAYS:
+        count = int(_number(facts, "review_comments") or 0)
+        add(
+            "review_unanswered",
+            Severity.LOW,
+            f"{name} has {count} unanswered review comment(s) after {age:.0f} days",
+            [subject],
+            "Somebody did the work of reviewing this and nothing has come back. "
+            "Review that goes unanswered is how people stop reviewing.\n\n"
+            "An agent can be sent at this from the Work tab: it answers the "
+            "comments on the branch and pushes a commit. It cannot merge.",
+        )
+
+
 def evaluate(pages: Pages, add: Add) -> None:
     for subject, facts in pages.items():
+        # Pull requests are their own subjects with their own vocabulary, and
+        # none of the repository-level checks below mean anything against one.
+        if subject.startswith("pull:"):
+            _judge_pull(subject, facts, add)
+            continue
+
         if error := facts.get("workflow_error"):
             add(
                 "workflow_unavailable",

@@ -13,7 +13,9 @@ should be made from the numbers rather than before them. The ledger comes first.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,6 +89,42 @@ def reversible_for(op: Op, params: dict[str, Any] | None = None) -> bool:
     if params is not None and refine is not None:
         return bool(refine(params))
     return getattr(op, "reversible", True)
+
+
+# Whether the current re-derivation is only going to be *shown*, never acted on.
+#
+# The dashboard re-derives every pending action to decide which are stale, and
+# that answer is a label. Approving re-derives the same action for real, and
+# that answer is the guardrail — the one that stops an approval granted a week
+# ago being spent against a record somebody has since changed by hand.
+#
+# An op cannot tell those apart from its arguments: it is handed the same
+# project and the same params either way. So the caller says, and an op that
+# reads something expensive off a network may take the cheap answer when it is
+# only going to be a badge. The default is False everywhere, which means the
+# only way to get the cheap read is to ask for it explicitly at a call site
+# that does not act.
+#
+# A ContextVar rather than a parameter because the alternative is threading a
+# flag through `rehydrate`, `build`, and every op's `state` and `render` — a
+# change to the Op protocol so that two of six ops can answer one question
+# faster. Note that it does not cross into a worker thread on its own; a pool
+# that wants it has to set it inside the worker.
+_LABEL_ONLY: ContextVar[bool] = ContextVar("foreman_label_only", default=False)
+
+
+@contextmanager
+def label_only() -> Iterator[None]:
+    """Mark this re-derivation as one that will never act."""
+    token = _LABEL_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _LABEL_ONLY.reset(token)
+
+
+def is_label_only() -> bool:
+    return _LABEL_ONLY.get()
 
 
 def policy_expr_for(op: Op, params: dict[str, Any] | None = None) -> str | None:
@@ -414,6 +452,8 @@ __all__ = [
     "class_key",
     "class_statement",
     "effect_of",
+    "is_label_only",
+    "label_only",
     "policy_expr_for",
     "policy_for",
     "reversible_for",

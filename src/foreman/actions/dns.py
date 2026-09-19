@@ -65,10 +65,14 @@ registrar the same way `state` and `render` do.
 
 from __future__ import annotations
 
+import threading
+import time
+
 from ..collectors.godaddy import GoDaddyError
 from ..collectors.godaddy_dns import WRITABLE, canonical, read_records
 from ..config import Project
 from ..secrets import SecretsUnavailable, get_secret
+from . import is_label_only
 from .base import OpNotApplicable, Patch, RecordSet
 
 APEX = "@"
@@ -127,8 +131,48 @@ def _fqdn(params: dict) -> str:
     return domain if name == APEX else f"{name}.{domain}"
 
 
-def _live(domain: str, record_type: str, name: str) -> str:
-    return canonical(read_records(domain, record_type, name, _token()))
+# A registrar answer, and when it was given. Keyed on the record, so two actions
+# against the same host share one read.
+_CACHE: dict[tuple[str, str, str], tuple[float, str]] = {}
+_CACHE_LOCK = threading.Lock()
+
+# How long a read may stand in. Long enough that three dashboard refreshes cost
+# one request; short enough that it cannot be what makes an action look valid
+# after somebody edited the record by hand.
+CACHE_TTL_S = 60.0
+
+
+def _live(domain: str, record_type: str, name: str, *, cached: bool = False) -> str:
+    """The record as the registrar has it.
+
+    `cached` is off by default, and that default is the whole point. The
+    dashboard lists twenty-two pending actions and re-derives every one of them
+    to decide which are stale — for a DNS record that was a request to GoDaddy
+    each, eighteen of them on every refresh, which is rude before it is slow.
+    That listing is a *label*, so it may read a minute-old answer.
+
+    Approving is not. `apply_action` rehydrates before it acts, and that read is
+    the guardrail — the one that stops an approval granted a week ago being
+    spent against a record that has since moved. A cached answer there would
+    turn a refusal into a silent overwrite, so the acting path never passes
+    `cached` and there is no setting that makes it.
+
+    This is not a second place facts live. `godaddy` records what the registrar
+    holds and the observation model exists for that; this is a request-scoped
+    nicety with a minute on it, deliberately too short to be mistaken for a
+    store.
+    """
+    key = (domain, record_type, name)
+    if cached:
+        with _CACHE_LOCK:
+            hit = _CACHE.get(key)
+            if hit and (time.monotonic() - hit[0]) < CACHE_TTL_S:
+                return hit[1]
+
+    value = canonical(read_records(domain, record_type, name, _token()))
+    with _CACHE_LOCK:
+        _CACHE[key] = (time.monotonic(), value)
+    return value
 
 
 class SetDnsRecord:
@@ -233,7 +277,12 @@ class SetDnsRecord:
     def state(self, project: Project, params: dict) -> dict:
         _claimed(project, params["domain"])
         try:
-            live = _live(params["domain"], params["record_type"], params["name"])
+            live = _live(
+                params["domain"],
+                params["record_type"],
+                params["name"],
+                cached=is_label_only(),
+            )
         except GoDaddyError:
             # A fact rather than an exception. An unreadable registrar must fail
             # this action's guardrail — raising here would surface instead as
@@ -245,7 +294,12 @@ class SetDnsRecord:
     def render(self, project: Project, params: dict) -> Patch:
         _claimed(project, params["domain"])
         try:
-            live = _live(params["domain"], params["record_type"], params["name"])
+            live = _live(
+                params["domain"],
+                params["record_type"],
+                params["name"],
+                cached=is_label_only(),
+            )
         except GoDaddyError as exc:
             # No before-state, no action. Computing a patch against a record
             # nobody could read is how a record set gets replaced by one that

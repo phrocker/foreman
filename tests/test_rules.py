@@ -222,3 +222,87 @@ def test_an_unknown_domain_is_rejected_at_registry_load():
 
     with pytest.raises(ValidationError):
         Project(id="x", domains=["astrology"])
+
+
+# --- pull requests that are stuck ------------------------------------------
+
+
+def _pull(add_days=10.0, **facts):
+    from datetime import UTC, datetime, timedelta
+
+    from foreman.rules import delivery as delivery_rules
+
+    found = {}
+
+    def add(rule, severity, summary, subjects, detail=None):
+        found[rule] = (severity, summary)
+
+    when = (datetime.now(UTC) - timedelta(days=add_days)).isoformat()
+    delivery_rules.evaluate(
+        {"pull:o/r#1": {"created_at": when, **facts}},
+        add,
+    )
+    return found
+
+
+def test_a_bot_bump_that_has_been_red_for_days_is_a_finding():
+    """The case this was written for, and the quiet one: nobody is waiting on a
+    dependency update, so it rots, and the advisory it would have closed stays
+    open."""
+    found = _pull(checks="failing", author="dependabot[bot]", checks_failing="2")
+    assert found["pull_request_failing"][0].value == "medium"
+
+
+def test_a_persons_branch_failing_is_news_to_nobody():
+    """They opened it and they can see it. Same finding, quieter, so it does not
+    crowd out the one nobody is watching."""
+    found = _pull(checks="failing", author="phrocker")
+    assert found["pull_request_failing"][0].value == "low"
+
+
+def test_a_pull_request_that_went_red_this_morning_is_not_yet_a_problem():
+    """A suite that just failed may be a flake and may already be being re-run.
+    Filing it immediately is how a board fills with things that fix themselves."""
+    assert _pull(add_days=0.5, checks="failing", author="dependabot[bot]") == {}
+
+
+def test_a_draft_is_open_on_purpose():
+    """Plenty of pull requests sit open deliberately, and filing those every
+    night is how a board stops being read."""
+    assert _pull(checks="failing", draft="true", author="dependabot[bot]") == {}
+
+
+def test_a_pull_request_with_no_gate_against_it_is_left_alone():
+    """Age is not a fault. Nothing is in this one's way."""
+    assert _pull(add_days=90.0, checks="passing", author="phrocker") == {}
+
+
+def test_foremans_own_request_left_to_rot_is_its_own_finding():
+    """A tool that asks for a change and then lets its own pull request go stale
+    is worse than one that never asked."""
+    found = _pull(checks="passing", foreman="true", author="phrocker")
+    assert "foreman_pull_request_undecided" in found
+
+
+def test_a_reviewer_still_waiting_after_a_week_is_a_finding():
+    """Review that goes unanswered is how people stop reviewing."""
+    found = _pull(add_days=9.0, checks="passing", review_comments="3", author="phrocker")
+    assert "3 unanswered review comment(s)" in found["review_unanswered"][1]
+
+
+def test_a_comment_left_yesterday_is_not_nagging_material():
+    assert _pull(add_days=2.0, checks="passing", review_comments="1", author="phrocker") == {}
+
+
+def test_a_merged_pull_request_has_no_age_and_is_not_judged():
+    """Retraction nulls a subject's cells but leaves the subject. Without the
+    date there is nothing to judge, and guessing would file a finding against
+    something that no longer exists."""
+    from foreman.rules import delivery as delivery_rules
+
+    found = {}
+    delivery_rules.evaluate(
+        {"pull:o/r#1": {"checks": None, "created_at": None}},
+        lambda *a, **k: found.setdefault(a[0], a),
+    )
+    assert found == {}

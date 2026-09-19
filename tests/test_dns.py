@@ -560,3 +560,91 @@ def test_a_merge_still_says_it_is_a_merge(registrar):
     )
     assert effect_of("add_security_header")[0] == "apply"
     assert effect_of("add_security_header")[1] == ""
+
+
+# --- the read behind a badge, and the read behind an act --------------------
+
+
+def test_the_acting_path_never_takes_a_cached_registrar_answer(monkeypatch):
+    """The read `apply_action` makes is the guardrail, not a label.
+
+    It is what stops an approval granted a week ago being spent against a record
+    somebody has since changed by hand. A cached answer there turns a refusal
+    into a silent overwrite, so there must be no way to reach the cheap read
+    from a path that acts.
+    """
+    from foreman.actions import dns
+
+    calls = []
+    monkeypatch.setattr(dns, "read_records", lambda *a, **k: calls.append(1) or "1.2.3.4")
+    monkeypatch.setattr(dns, "_token", lambda: "t")
+    dns._CACHE.clear()
+
+    for _ in range(3):
+        dns._live("a.test", "A", "@")
+    assert len(calls) == 3, "an acting read was served from cache"
+
+
+def test_a_badge_may_stand_on_a_minute_old_answer(monkeypatch):
+    """Eighteen registrar requests every time somebody presses F5 is rude before
+    it is slow."""
+    from foreman.actions import dns
+
+    calls = []
+    monkeypatch.setattr(dns, "read_records", lambda *a, **k: calls.append(1) or "1.2.3.4")
+    monkeypatch.setattr(dns, "_token", lambda: "t")
+    dns._CACHE.clear()
+
+    for _ in range(3):
+        dns._live("a.test", "A", "@", cached=True)
+    assert len(calls) == 1
+
+
+def test_the_cache_expires(monkeypatch):
+    """Short enough that it cannot be what makes an action look valid after the
+    record moved."""
+    from foreman.actions import dns
+
+    calls = []
+    monkeypatch.setattr(dns, "read_records", lambda *a, **k: calls.append(1) or "1.2.3.4")
+    monkeypatch.setattr(dns, "_token", lambda: "t")
+    dns._CACHE.clear()
+
+    clock = [1000.0]
+    monkeypatch.setattr(dns.time, "monotonic", lambda: clock[0])
+    dns._live("a.test", "A", "@", cached=True)
+    clock[0] += dns.CACHE_TTL_S + 1
+    dns._live("a.test", "A", "@", cached=True)
+    assert len(calls) == 2
+
+
+def test_two_records_do_not_share_one_cached_answer(monkeypatch):
+    from foreman.actions import dns
+
+    seen = []
+
+    def read(domain, record_type, name, token):
+        seen.append((domain, record_type, name))
+        return name
+
+    monkeypatch.setattr(dns, "read_records", read)
+    monkeypatch.setattr(dns, "_token", lambda: "t")
+    # `canonical` shapes real registrar records; here the identity keeps the
+    # test about the cache key and nothing else.
+    monkeypatch.setattr(dns, "canonical", lambda v: v)
+    dns._CACHE.clear()
+
+    assert dns._live("a.test", "TXT", "_foreman", cached=True) == "_foreman"
+    assert dns._live("a.test", "TXT", "www", cached=True) == "www"
+    assert len(seen) == 2
+
+
+def test_label_only_is_off_unless_a_caller_asks(monkeypatch):
+    """The default is what makes this safe: the cheap read is reachable only
+    from a call site that has said it will not act."""
+    from foreman.actions import is_label_only, label_only
+
+    assert is_label_only() is False
+    with label_only():
+        assert is_label_only() is True
+    assert is_label_only() is False

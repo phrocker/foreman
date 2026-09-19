@@ -241,11 +241,16 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         eighteen requests to one registrar, and the fix for a slow page is not a
         burst that gets Foreman rate-limited.
         """
-        from .actions import rehydrate
+        from .actions import label_only, rehydrate
 
         def check(row: Any) -> str | None:
             try:
-                rehydrate(registry.get(row["project"]), row)
+                # Inside the worker, not around the pool: a ContextVar does not
+                # cross a thread boundary on its own, and set outside it this
+                # would read as "cached" here and be false everywhere it
+                # mattered.
+                with label_only():
+                    rehydrate(registry.get(row["project"]), row)
             except Stale as exc:
                 return str(exc)
             except KeyError:
