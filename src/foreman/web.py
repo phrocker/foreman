@@ -48,6 +48,7 @@ from .runner import (
     apply_eligible,
     check_all,
     collect_all,
+    collect_project,
     propose_actions,
     reject_action,
 )
@@ -1103,6 +1104,10 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         for item in outcome.revision.declined:
                             note(f"declined {item.path}: {item.why}")
                     note(f"${outcome.cost_usd:.2f}")
+                    if outcome.pushed:
+                        # The push restarted this pull request's checks, so the
+                        # row the operator is about to look at is already stale.
+                        await refresh_pulls(project, s, note)
                 finally:
                     s.close()
             except Exception as exc:  # noqa: BLE001 — surfaced in the UI, not swallowed
@@ -1119,6 +1124,24 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     @app.get("/api/pulls/revise")
     def revise_status() -> dict[str, Any]:
         return revision.as_dict()
+
+    async def refresh_pulls(project, st, note) -> None:
+        """Re-read one project's pull requests, right after changing them.
+
+        A fix opens a pull request and a revision pushes to one, and until this
+        existed neither showed up until the next sweep — so the operator watched
+        a job announce a URL and then found the Work tab still claiming the
+        board was as it had been. Sweeping the whole portfolio to see one new
+        row is the wrong price for that.
+
+        Failures are swallowed deliberately: the work already succeeded, the
+        pull request already exists, and a refresh that could turn a completed
+        job red would be reporting the wrong thing as broken.
+        """
+        try:
+            await collect_project(project, ["pulls"], st, log=note)
+        except Exception as exc:  # noqa: BLE001 — the work is done; this is a view
+            note(f"could not refresh the pull request list: {exc}")
 
     @app.post("/api/findings/{finding_id}/fix")
     async def fix_finding(finding_id: int, also: str = Query("")) -> dict[str, Any]:
@@ -1162,6 +1185,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         for item in getattr(outcome.revision, "declined", []):
                             note(f"declined: {item.why}")
                     note(f"${outcome.cost_usd:.2f}")
+                    if outcome.pushed:
+                        await refresh_pulls(project, st, note)
                 finally:
                     st.close()
             except Exception as exc:  # noqa: BLE001 — surfaced in the UI
