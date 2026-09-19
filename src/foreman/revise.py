@@ -174,6 +174,12 @@ async def address_review(
         from .connectors.claudecode import ClaudeCodeConnector
 
         connectors = [ClaudeCodeConnector()]
+    # Before anything, including the checkout test. A stewarded project could
+    # one day have a local clone — that is a convenience for reading it, never
+    # permission to push to it.
+    if not project.writable:
+        note = f"{project.id} is stewarded; Foreman never writes to it"
+        return Result(False, (), None, 0.0, note)
     if project.repo is None or not project.repo.exists():
         return Result(False, (), None, 0.0, "no local checkout to work in")
 

@@ -127,6 +127,10 @@ class AdsSurface(BaseModel):
 SURFACES = ("web", "github", "cloud", "ads", "registrar")
 
 
+# A project watched rather than owned: read every day, written to never.
+STEWARDED = "stewarded"
+
+
 class Project(BaseModel):
     id: str
     name: str | None = None
@@ -181,7 +185,27 @@ class Project(BaseModel):
 
     @property
     def fixable(self) -> bool:
+        # Stewarded before anything else. A project can be watched closely and
+        # still be nobody's to write to — Apache Accumulo is twenty repositories
+        # the operator chairs the PMC of, which is a reason to read it every day
+        # and never a reason to push to it. Today it has no `repo` and so fails
+        # the second test anyway; that is a coincidence of configuration, and a
+        # constraint that holds by coincidence is not a constraint.
+        if STEWARDED in self.tags:
+            return False
         return self.repo is not None and self.repo.exists()
+
+    @property
+    def writable(self) -> bool:
+        """Whether Foreman may ever change anything here.
+
+        Separate from `fixable` because they answer different questions and
+        only happen to agree. `fixable` asks whether there is a checkout to
+        compute a patch against; this asks whether writing is permitted at all.
+        A stewarded project answers no to both, and must go on answering no to
+        this one if it ever gains a local clone.
+        """
+        return STEWARDED not in self.tags
 
     def surface(self, name: str) -> object | None:
         return getattr(self, name, None)

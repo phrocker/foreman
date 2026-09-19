@@ -2393,10 +2393,13 @@ function showTab(name) {
   state.tab = name;
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute("aria-selected", String(t.dataset.tab === name)));
-  for (const panel of
-       ["findings", "actions", "drift", "history", "memory", "plans", "reports",
-        "rules", "settings"]) {
-    $("panel-" + panel).hidden = panel !== name;
+  // Asked of the document rather than listed here. This was a hardcoded array
+  // of panel names, and adding the Work tab without adding it to that array
+  // produced the worst possible symptom: the tab highlighted, its badge
+  // counted, and the panel stayed hidden — a feature that looked wired up and
+  // showed nothing. The panels are already in the DOM; they are the list.
+  for (const panel of document.querySelectorAll('[role="tabpanel"]')) {
+    panel.hidden = panel.id !== "panel-" + name;
   }
   try { localStorage.setItem("foreman-tab", name); } catch {}
 }

@@ -28,7 +28,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .actions import target_label
+from .actions import _ops, target_label
 from .config import Registry
 from .connectors import Connector, ConnectorError, Task, choose
 from .graph import FROM_SKILL, SEEN_ON, key_of, node
@@ -99,6 +99,14 @@ costs a correction, not a loss; nothing here is ever deleted.
 
 Approval is untouched by this. A memory says how things are around here. It can
 say a rule is noise; it can never approve an action.
+
+Only the rules listed under "Rules an operation can fix" have an operation
+behind them. For any other finding there is nothing to queue, nothing to
+approve, and no button anywhere that starts one — say that plainly and say what
+fixing it would take by hand. Never send the operator to a control to make it
+happen; if you are about to name a tab or a button, it must be one listed here.
+Offering a way to act that does not exist is worse than saying you cannot,
+because it sends somebody looking for it.
 
 A pull request carrying unresolved comments can be handed to an agent: it works
 in a throwaway copy of the repository, makes the changes the reviewer asked for,
@@ -223,6 +231,20 @@ def portfolio_state(store: Store, registry: Registry) -> str:
                 f"{'opened by Foreman' if row['foreman'] else 'opened by ' + row['author']}"
                 + ("; an agent can be sent to address the comments" if row["revisable"] else "")
             )
+
+    # Which rules an operation can actually answer. Without this the model has
+    # no way to tell "nobody has queued a fix yet" from "nothing in this tool
+    # can fix that", and it guessed — twice — telling the operator to queue a
+    # duplicate-meta-description fix from the Work tab, which lists pull
+    # requests and has no such button. An invented affordance is worse than a
+    # refusal: it sends somebody looking for a control that was never built.
+    answerable = sorted({rule for op in _ops().values() for rule in getattr(op, "answers", ())})
+    lines.append("\n### Rules an operation can fix")
+    lines.append(
+        ", ".join(answerable)
+        + ". Every other rule has no operation behind it: a finding under one can "
+        "be dismissed or fixed by hand, and there is nothing to queue or approve."
+    )
 
     findings = store.open_findings()
     lines.append(f"\n### Open findings ({len(findings)})")

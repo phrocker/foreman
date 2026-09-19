@@ -194,3 +194,37 @@ def test_a_stored_landing_is_not_blanked_by_a_later_record(tmp_path):
         store.record_application(action_id, "applied", landed_at="https://h.test/pull/1")
         store.record_application(action_id, "applied")
         assert store.action(action_id)["landed_at"] == "https://h.test/pull/1"
+
+
+def test_every_tab_has_a_panel_and_every_panel_a_tab():
+    """The Work tab shipped highlighted, badged, and showing nothing.
+
+    `showTab` iterated a hardcoded list of panel names; adding a tab without
+    adding it there left the panel hidden forever. The worst shape of bug — it
+    looked wired up. The list is read from the DOM now, and this holds the
+    pairing that made it possible.
+    """
+    import re
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parents[1] / "src" / "foreman" / "static" / "index.html"
+    ).read_text()
+    tabs = set(re.findall(r'class="tab"[^>]*data-tab="([^"]+)"', page))
+    panels = {m.removeprefix("panel-") for m in re.findall(r'id="(panel-[^"]+)"', page)}
+
+    assert tabs, "no tabs found; the selector has drifted from the markup"
+    assert tabs == panels, (
+        f"tabs without panels: {tabs - panels}; panels without tabs: {panels - tabs}"
+    )
+
+
+def test_no_panel_list_is_hardcoded_in_the_tab_switcher():
+    """The specific mistake, named so it cannot come back quietly."""
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parents[1] / "src" / "foreman" / "static" / "index.html"
+    ).read_text()
+    switcher = page.split("function showTab(")[1].split("\n}")[0]
+    assert '[role="tabpanel"]' in switcher, "showTab should ask the DOM which panels exist"

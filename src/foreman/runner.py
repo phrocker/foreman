@@ -346,6 +346,15 @@ def apply_action(
         raise ValueError(f"action {action_id} was already {row['decision']}")
 
     target = registry.get(row["project"])
+    # Again, at the point of acting. `propose` already refuses to create one for
+    # a stewarded project, so reaching here means an action outlived the tag
+    # being added — a registry edited after the fact, or a row from before the
+    # rule existed. Both are exactly when a guard matters, and a check that only
+    # runs where actions are born does not cover either.
+    if not target.writable:
+        store.record_application(action_id, "refused", "this project is stewarded, not owned")
+        raise Stale(f"{target.id} is stewarded: Foreman reads it and never writes to it")
+
     try:
         fresh = rehydrate(target, row)
     except Stale as exc:

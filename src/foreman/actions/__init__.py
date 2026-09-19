@@ -260,6 +260,13 @@ def propose(project: Project, findings: Sequence[Any]) -> list[ActionProposal]:
     """
     from ..domains import ops_for
 
+    # The first question, asked before any op sees the project. A stewarded
+    # project is read every day and written to never, and the cheapest way to
+    # guarantee that is for no proposal about it to exist — nothing to approve,
+    # nothing to apply eligible, nothing a mistaken click could reach.
+    if not project.writable:
+        return []
+
     proposals: list[ActionProposal] = []
     available = ops_for(project.active_domains)
     for finding in findings:

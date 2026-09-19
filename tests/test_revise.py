@@ -256,3 +256,47 @@ def test_a_merged_pull_request_stops_being_listed(tmp_path):
         store.finish_run(merged, ok=True)
 
         assert [r["number"] for r in open_pulls(store, registry)] == [1]
+
+
+def test_a_stewarded_projects_queue_is_not_on_the_board_unasked(tmp_path):
+    """Accumulo has 108 open pull requests and none of them are the operator's
+    to merge. Listing them buried the nine that actually wait on somebody —
+    exactly the failure a board ordered by what is blocking exists to avoid.
+    Naming the project still shows them; the PMC chair has real reasons to look,
+    just not on the board that answers "what is waiting on me".
+    """
+    from foreman.config import Registry
+    from foreman.models import Observation
+    from foreman.work import open_pulls
+
+    registry = Registry(
+        projects=[
+            Project(id="mine", name="Mine", github=GitHubSurface(owner="o", repo="mine")),
+            Project(
+                id="theirs",
+                name="Theirs",
+                tags=["stewarded"],
+                github=GitHubSurface(owner="a", repo="theirs"),
+            ),
+        ]
+    )
+    with SqliteStore(tmp_path / "t.db") as store:
+        for pid, slug in (("mine", "o/mine"), ("theirs", "a/theirs")):
+            run = store.start_run(pid, "pulls")
+            store.record(
+                run,
+                [
+                    Observation(
+                        project=pid,
+                        collector="pulls",
+                        subject=f"pull:{slug}#1",
+                        key=key,
+                        value=value,
+                    )
+                    for key, value in (("url", f"https://h.test/{slug}/1"), ("title", "t"))
+                ],
+            )
+            store.finish_run(run, ok=True)
+
+        assert [r["project"] for r in open_pulls(store, registry)] == ["mine"]
+        assert [r["project"] for r in open_pulls(store, registry, project="theirs")] == ["theirs"]

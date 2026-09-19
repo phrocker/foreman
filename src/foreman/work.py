@@ -29,6 +29,10 @@ REVIEW = "review comments unaddressed"
 CHANGES = "changes requested"
 DRAFT = "draft"
 
+# A project watched rather than owned. Its review queue belongs to its
+# community, not to whoever is reading this board.
+STEWARDED = "stewarded"
+
 
 def _facts(store: Store, project: str) -> dict[str, dict[str, str | None]]:
     out: dict[str, dict[str, str | None]] = {}
@@ -73,6 +77,14 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
     rows: list[dict[str, Any]] = []
     for target in targets:
         if target.github is None:
+            continue
+        # A stewarded project's pull requests are not the operator's to merge.
+        # Accumulo has 108 open, and listing them unasked buried the nine that
+        # actually wait on somebody here — which is the whole failure this board
+        # was built to avoid. Naming the project still shows them: the PMC chair
+        # has real reasons to look, just not on the board that answers "what is
+        # waiting on me".
+        if project is None and STEWARDED in (target.tags or ()):
             continue
         for subject, facts in _facts(store, target.id).items():
             # A pull request that merged between sweeps has its cells retracted

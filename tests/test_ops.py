@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from foreman.actions import OPS, propose
@@ -254,3 +256,50 @@ def test_enabling_updates_needs_no_build_verification(tmp_path):
     project = gh_project(tmp_path, {"go.mod": "module x\n"})
     (action,) = propose(project, [DEPENDABOT_FINDING])
     assert AUTO_POLICY_EXPR in action.statement
+
+
+# --- stewarded projects are read, never written -----------------------------
+
+
+def test_a_stewarded_project_yields_no_proposals_at_all():
+    """Apache Accumulo is twenty repositories the operator chairs the PMC of.
+    That is a reason to read it every day and never a reason to push to it.
+
+    The cheapest guarantee is that no proposal about it exists: nothing to
+    approve, nothing for `apply-eligible` to reach, nothing a mistaken click
+    can find.
+    """
+    from foreman.actions import propose
+    from foreman.config import Project
+
+    finding = {
+        "id": 1,
+        "project": "acc",
+        "rule": "dependabot_not_configured",
+        "subjects": "[]",
+    }
+    watched = Project(
+        id="acc", name="Acc", tags=["stewarded"], github={"owner": "a", "repo": "acc"}
+    )
+    assert propose(watched, [finding]) == []
+
+
+def test_stewarded_is_checked_before_the_checkout_is():
+    """Today Accumulo has no `repo` and so fails the fixable test anyway. That
+    is a coincidence of configuration, and a constraint that holds by
+    coincidence is not a constraint — a local clone is a convenience for reading
+    it, never permission to push."""
+    from foreman.config import Project
+
+    cloned = Project(id="acc", name="Acc", tags=["stewarded"], repo=Path("."))
+    assert cloned.repo.exists()
+    assert cloned.fixable is False
+    assert cloned.writable is False
+
+
+def test_an_owned_project_is_writable():
+    """The guard has to stay narrow: refusing everywhere would be the opposite
+    mistake and would retire the tool rather than scope it."""
+    from foreman.config import Project
+
+    assert Project(id="mine", name="Mine", repo=Path(".")).writable is True
