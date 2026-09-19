@@ -240,3 +240,41 @@ async def test_the_same_judgement_reached_twice_is_one_memory(world):
         await ask(store, registry, "q", connectors=[_Canned(reply)])
 
     assert len([m for m in store.memories() if "on purpose" in (m["statement"] or "")]) == 1
+
+
+def test_everything_with_a_tab_is_in_the_state(world):
+    """The bug that has now happened twice.
+
+    A collector's output reached the board and not the assistant: first pull
+    requests — "no data on that PR" while the Work tab showed it — and then
+    plans, "no plan is carried in the state I'm given" with three listed beside
+    it. `portfolio_state` is assembled in one place precisely so there is no
+    question about what the model looked at, and that only holds if everything
+    the operator can see is in it.
+    """
+    registry, store = world
+    plan = store.create_plan("do the thing", ["domain:a.test"])
+    store.add_phase(plan, 1, "Serve", "serves", {})
+
+    state = portfolio_state(store, registry)
+    headings = (
+        "### Projects",
+        "### Plans",
+        "### Open findings",
+        "### Rules an operation can fix",
+    )
+    for heading in headings:
+        assert heading in state, f"{heading} is missing from the state"
+    assert "do the thing" in state
+    assert "gate `serves`" in state
+
+
+def test_a_superseded_plan_is_not_carried(world):
+    """It is the record of what was intended in September, not a thing anybody
+    is being asked about now."""
+    registry, store = world
+    plan = store.create_plan("the old shape", ["domain:a.test"])
+    store.add_phase(plan, 1, "Serve", "serves", {})
+    store.set_plan_status(plan, "superseded")
+
+    assert "the old shape" not in portfolio_state(store, registry)

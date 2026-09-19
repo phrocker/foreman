@@ -33,7 +33,7 @@ from .config import Registry
 from .connectors import Connector, ConnectorError, Task, choose
 from .graph import FROM_SKILL, SEEN_ON, key_of, node
 from .memory import describe
-from .plans import GATES
+from .plans import GATES, plan_progress
 from .store import Store
 from .work import open_pulls
 
@@ -245,6 +245,30 @@ def portfolio_state(store: Store, registry: Registry) -> str:
         + ". Every other rule has no operation behind it: a finding under one can "
         "be dismissed or fixed by hand, and there is nothing to queue or approve."
     )
+
+    # Plans, because "what does Deployed mean in the ProCare Edge plan" was
+    # answered with "no plan is carried in the state I'm given" while the Plans
+    # tab beside it listed three. Twice now a collector's output has reached the
+    # board and not the assistant; the rule this encodes is that anything with a
+    # tab has to be in here.
+    #
+    # Summarised rather than enumerated. Twenty-two subjects across five phases
+    # is a hundred and ten cells, and the question people actually ask is where
+    # a plan has got to — the per-subject grid is what the tab is for.
+    plans = [p for p in store.plans() if p["status"] != "superseded"]
+    if plans:
+        lines.append(f"\n### Plans ({len(plans)})")
+        for row in plans:
+            progress = plan_progress(store, int(row["id"]))
+            lines.append(f"- plan {row['id']}: {row['goal']} [{row['status']}]")
+            for phase in progress.get("summary", []):
+                states = ("passed", "pending", "blocked", "unknown")
+                counts = ", ".join(f"{phase[k]} {k}" for k in states if phase[k])
+                gate = phase["gate"]
+                lines.append(
+                    f"    {phase['position']}. {phase['phase']} — gate `{gate}`"
+                    f" ({phase['gate_summary']}) — {counts}"
+                )
 
     findings = store.open_findings()
     lines.append(f"\n### Open findings ({len(findings)})")

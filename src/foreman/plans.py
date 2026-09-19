@@ -423,6 +423,12 @@ def plan_progress(store: Any, plan_id: int) -> dict[str, Any]:
                 # The key a confirmation is stored under, so a reader knows
                 # which cells are somebody's word rather than a measurement.
                 "confirm_key": p.params.get("key") if p.gate == "confirmed" else None,
+                # What this phase is, in the plan's own words. The gate summary
+                # says how the phase is decided — "you have confirmed this step
+                # yourself" — which is about the mechanism and tells nobody what
+                # to go and do. A phase called Deployed with that underneath it
+                # is a box and not an instruction.
+                "note": p.params.get("note") or "",
             }
             for p in sorted(phases, key=lambda p: p.position)
         ],

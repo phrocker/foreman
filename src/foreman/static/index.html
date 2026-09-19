@@ -325,6 +325,8 @@
   .chip.bad  { border-color: var(--high);   color: var(--high); }
   .chip.warn { border-color: var(--medium); color: var(--medium); }
   .chip.wait { border-color: var(--low);    color: var(--low); }
+  .phase-note { color: var(--text); font-size: 0.92em; margin: 4px 0 6px; }
+  .phase-how { font-style: italic; opacity: 0.75; }
   .act-head { font-size: 0.95em; color: var(--text-2); margin: 18px 0 8px; font-weight: 550; }
   .acts { display: flex; flex-direction: column; gap: 2px; }
   .act { display: flex; gap: 12px; align-items: baseline; padding: 5px 8px;
@@ -1910,10 +1912,16 @@ function renderPlans() {
         const counts = ["passed", "pending", "blocked", "unknown"]
           .filter((k) => line[k])
           .map((k) => `${line[k]} ${STATE_LABEL[k]}`).join(" · ");
+        // The plan's own words first, the gate second. "Deployed — you have
+        // confirmed this step yourself" describes the mechanism and tells
+        // nobody what to go and do; the note is the instruction the box was
+        // standing in for, and it was being stored and never shown.
+        const phase = (plan.phases || []).find((p) => p.position === line.position) || {};
         return `<div class="phase-cell">
           <div class="phase-name">${line.position}. ${esc(line.phase)}</div>
           <div class="phase-gate">${esc(counts)}</div>
-          <div class="phase-gate">${esc(line.gate_summary)}</div>
+          ${phase.note ? `<div class="phase-note">${esc(phase.note)}</div>` : ""}
+          <div class="phase-gate phase-how">${esc(line.gate_summary)}</div>
         </div>`;
       }).join("")}</div>`;
 
