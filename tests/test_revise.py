@@ -219,3 +219,40 @@ async def test_the_worktree_is_removed_even_when_the_agent_fails(world):
         check=True,
     ).stdout
     assert "foreman-revise-" not in listed
+
+
+def test_a_merged_pull_request_stops_being_listed(tmp_path):
+    """`pulls` enumerates, so the runner nulls the cells of a subject a clean
+    sweep no longer names. The row survives holding nothing, and squibble#107
+    appeared on the board with a blank title the day after it was merged."""
+    from foreman.config import Registry
+    from foreman.models import Observation
+    from foreman.work import open_pulls
+
+    registry = Registry(
+        projects=[Project(id="p", name="P", github=GitHubSurface(owner="o", repo="r"))]
+    )
+    with SqliteStore(tmp_path / "t.db") as store:
+        run = store.start_run("p", "pulls")
+
+        def ob(subject, key, value):
+            return Observation(
+                project="p", collector="pulls", subject=subject, key=key, value=value
+            )
+
+        store.record(
+            run,
+            [
+                ob("pull:o/r#1", "url", "https://h.test/pull/1"),
+                ob("pull:o/r#1", "title", "still open"),
+                ob("pull:o/r#2", "url", "https://h.test/pull/2"),
+                ob("pull:o/r#2", "title", "merged since"),
+            ],
+        )
+        store.finish_run(run, ok=True)
+
+        merged = store.start_run("p", "pulls")
+        store.record(merged, [ob("pull:o/r#2", "url", None), ob("pull:o/r#2", "title", None)])
+        store.finish_run(merged, ok=True)
+
+        assert [r["number"] for r in open_pulls(store, registry)] == [1]

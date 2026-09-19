@@ -14,6 +14,7 @@ system on and then stays out of its way.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from ..config import Project
@@ -42,9 +43,48 @@ MAX_DEPTH = 2
 PR_LIMIT = 10
 
 
+def _git_ok(repo: Path) -> bool:
+    """Whether git can answer questions about this directory at all."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--git-dir"],
+        capture_output=True,
+        timeout=30,
+    )
+    return proc.returncode == 0
+
+
+def _tracked(repo: Path, rel: str) -> bool:
+    """Whether git knows about this file.
+
+    Dependabot reads the repository, not the disk. A manifest that git ignores
+    does not exist as far as it is concerned, and naming its directory in the
+    config produces an update job that fails every week against a path the
+    remote has never seen.
+
+    Squibble is the case that found this: Next.js writes a `package.json` into
+    `.next`, `.gitignore` has `/.next/`, and Foreman duly wrote a fourth npm
+    entry for a local build artifact. It was merged before anybody noticed,
+    because a config file has no build to break.
+
+    Asked only where git can answer — `_detect` skips this filter entirely for a
+    directory that is not a checkout. Treating "cannot ask" as "not tracked"
+    looks like the cautious reading and is the opposite: it removes every entry
+    and silently turns `enable_dependabot` into an op that proposes nothing.
+    A filter that cannot see should not vote.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--error-unmatch", "--", rel],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.returncode == 0
+
+
 def _detect(repo: Path) -> list[tuple[str, str]]:
     """(ecosystem, directory) pairs this repository actually contains."""
     found: set[tuple[str, str]] = set()
+    checkout = _git_ok(repo)
 
     for ecosystem, manifests in MANIFESTS:
         for manifest in manifests:
@@ -53,6 +93,8 @@ def _detect(repo: Path) -> list[tuple[str, str]]:
                     continue
                 rel = path.parent.relative_to(repo)
                 if len(rel.parts) >= MAX_DEPTH:
+                    continue
+                if checkout and not _tracked(repo, str(path.relative_to(repo))):
                     continue
                 found.add((ecosystem, "/" + str(rel) if str(rel) != "." else "/"))
 

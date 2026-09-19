@@ -75,6 +75,13 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
         if target.github is None:
             continue
         for subject, facts in _facts(store, target.id).items():
+            # A pull request that merged between sweeps has its cells retracted
+            # — `pulls` enumerates, so the runner nulls what a clean sweep no
+            # longer names. The row survives as a subject holding nothing, and
+            # listing it put squibble#107 on the board with a blank title and no
+            # branch the day after it was merged. Retracted is closed.
+            if not facts.get("url"):
+                continue
             slug, _, number = subject.removeprefix("pull:").partition("#")
             reason = blocking(facts)
             rows.append(

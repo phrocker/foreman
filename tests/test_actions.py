@@ -139,3 +139,28 @@ def test_the_auto_policy_expression_binds_as_written():
     rejected_once = {"class": {"approvals": 12, "rejections": 1}}
     assert policy_allows(f"DO x() P:auto:{AUTO_POLICY_EXPR}", rejected_once) is False
     assert policy_allows(f"DO x() P:auto:{naive}", rejected_once) is False
+
+
+def test_a_manifest_git_ignores_is_not_a_place_dependabot_can_look(tmp_path):
+    """Dependabot reads the repository, not the disk.
+
+    Next.js writes a `package.json` into `.next`, squibble's `.gitignore` has
+    `/.next/`, and Foreman duly wrote a fourth npm entry for a local build
+    artifact. It was merged before anybody noticed, because a config file has no
+    build to break — and the update job it created would have failed every week
+    against a path the remote has never seen.
+    """
+    import subprocess
+
+    from foreman.actions.dependabot import _detect
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / ".gitignore").write_text("/.next/\n")
+    (repo / "package.json").write_text("{}")
+    (repo / ".next").mkdir()
+    (repo / ".next" / "package.json").write_text("{}")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, check=True)
+
+    assert _detect(repo) == [("npm", "/")]

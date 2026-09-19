@@ -35,6 +35,7 @@ from .graph import FROM_SKILL, SEEN_ON, key_of, node
 from .memory import describe
 from .plans import GATES
 from .store import Store
+from .work import open_pulls
 
 TIMEOUT_S = 180
 
@@ -98,6 +99,14 @@ costs a correction, not a loss; nothing here is ever deleted.
 
 Approval is untouched by this. A memory says how things are around here. It can
 say a rule is noise; it can never approve an action.
+
+A pull request carrying unresolved comments can be handed to an agent: it works
+in a throwaway copy of the repository, makes the changes the reviewer asked for,
+and pushes a commit to that pull request's branch. It cannot reach the default
+branch and it cannot merge. Say so when the operator asks about one that is
+marked as revisable, and name the button — it is on the Work tab. Do not offer
+it for a pull request with no unresolved comments; there would be nothing to
+act on.
 
 `plan` is for when the operator is describing something they want to *build*
 rather than something that is wrong. Findings are about what exists; a plan is
@@ -195,6 +204,25 @@ def portfolio_state(store: Store, registry: Registry) -> str:
             f"fixable={'yes' if project.fixable else 'no'} "
             f"deliver={project.deliver}"
         )
+
+    # Pull requests, because "can you address the comment on #106" was answered
+    # with "no data on that PR" while the Work tab was showing it. The collector
+    # and the dashboard had it; the only thing that could not see it was the
+    # thing being asked. State assembled in one place has to include everything
+    # collected, or each new collector silently makes the assistant more wrong.
+    pulls = open_pulls(store, registry)
+    if pulls:
+        lines.append(f"\n### Open pull requests ({len(pulls)})")
+        for row in pulls:
+            gate = row["blocking"] or "nothing blocking"
+            lines.append(
+                f"- {row['slug']}#{row['number']} [{row['project']}] {row['title']} "
+                f"— {gate}; branch {row['branch']} → {row['base']}; "
+                f"checks {row['checks'] or 'unknown'}; "
+                f"{row['review_comments']} unresolved comment(s); "
+                f"{'opened by Foreman' if row['foreman'] else 'opened by ' + row['author']}"
+                + ("; an agent can be sent to address the comments" if row["revisable"] else "")
+            )
 
     findings = store.open_findings()
     lines.append(f"\n### Open findings ({len(findings)})")
