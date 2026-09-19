@@ -30,7 +30,7 @@ from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import project_drift
 from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
-from .fix import fix_findings
+from .fix import build_issue, fix_findings
 from .graph import MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import describe
 from .models import Observation, utcnow
@@ -56,7 +56,7 @@ from .signals import read as read_signals
 from .skills import TrackRecord, merge_label, merge_rate, track_records
 from .skills import label as skill_label
 from .store import Store, open_store
-from .work import open_pulls, pull_facts
+from .work import issue_facts, open_issues, open_pulls, pull_facts
 
 STATIC = Path(__file__).parent / "static"
 # Matches the CLI, and a quarter is what a report is usually asked for.
@@ -122,7 +122,7 @@ class Job:
 # that a dashboard refresh is not a burst somebody rate-limits.
 # Run kinds that cost money and are worth watching. The collectors a sweep
 # uses are not here: nobody wonders whether `tls` is still going.
-AGENT_RUNS = ("fix", "revise", "review")
+AGENT_RUNS = ("build", "fix", "revise", "review")
 
 STALENESS_WORKERS = 8
 
@@ -137,6 +137,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         "sweep": Job(kind="sweep"),
         "revise": Job(kind="revise"),
         "fix": Job(kind="fix"),
+        "build": Job(kind="build"),
         "review": Job(kind="review"),
     }
     job = jobs["sweep"]
@@ -1185,6 +1186,52 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     if outcome.revision:
                         for item in getattr(outcome.revision, "declined", []):
                             note(f"declined: {item.why}")
+                    note(f"${outcome.cost_usd:.2f}")
+                    if outcome.pushed:
+                        await refresh_pulls(project, st, note)
+                finally:
+                    st.close()
+            except Exception as exc:  # noqa: BLE001 — surfaced in the UI
+                finish(slot, f"{type(exc).__name__}: {exc}")
+            else:
+                finish(slot)
+
+        asyncio.create_task(work())
+        return slot.as_dict()
+
+    @app.get("/api/issues")
+    def issues(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        s = store()
+        try:
+            return open_issues(s, load_registry(registry_path), project=project)
+        finally:
+            s.close()
+
+    @app.post("/api/issues/build")
+    async def build(subject: str = Query(...)) -> dict[str, Any]:
+        """Send an agent at one tracked issue.
+
+        One increment, never a whole application. The decomposition into issues
+        is a person's job and is done before this is called — an agent pointed
+        at an empty repository and a large ambition produces a confident first
+        draft nobody can review.
+        """
+        slot = start("build", subject)
+        note = note_to(slot)
+
+        async def work() -> None:
+            try:
+                st = store()
+                try:
+                    project, facts = issue_facts(st, load_registry(registry_path), subject)
+                    outcome = await build_issue(
+                        project, st, facts, budget=Budget(FIX_CEILING_USD), log=note
+                    )
+                    note(
+                        f"opened {outcome.note}"
+                        if outcome.pushed
+                        else f"nothing built — {outcome.note}"
+                    )
                     note(f"${outcome.cost_usd:.2f}")
                     if outcome.pushed:
                         await refresh_pulls(project, st, note)

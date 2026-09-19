@@ -679,6 +679,9 @@
 
   <section id="panel-work" role="tabpanel" hidden>
     <div class="hint">Open pull requests across the portfolio, ordered by what is in the way. Nothing here merges: the diff is the review and the merge is yours.</div>
+    <h3 class="act-head">Issues — work somebody wrote down</h3>
+    <div id="issueList"></div>
+    <h3 class="act-head">Pull requests</h3>
     <div id="workList"></div>
     <div id="reviseLog" class="log" hidden></div>
   </section>
@@ -782,7 +785,7 @@ const SEV = {
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
-  pulls: [], activity: null, signals: [],
+  pulls: [], issues: [], activity: null, signals: [],
   declared: [],
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
@@ -877,7 +880,7 @@ let stale = [];
 async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports, declared, pulls, activity, signals] =
+         settings, plans, reports, declared, pulls, activity, signals, issues] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -895,11 +898,12 @@ async function load() {
     fetchPart("/api/pulls", []),
     fetchPart("/api/activity", null),
     fetchPart("/api/signals", []),
+    fetchPart("/api/issues", []),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
     connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
-    signals,
+    signals, issues,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -914,7 +918,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["working", renderWorking], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
+    ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -985,6 +989,7 @@ function renderCounts() {
 function applyFilters() {
   renderFindings();
   renderWork();
+  renderIssues();
   renderActions();
   renderDrift();
   renderHistory();
@@ -1397,6 +1402,62 @@ function gateChip(row) {
   const tone = row.blocking === "checks failing" ? "bad"
     : row.blocking === "checks running" ? "wait" : "warn";
   return `<span class="chip ${tone}">${esc(row.blocking)}</span>`;
+}
+
+/** Issues: work a person wrote down, as opposed to faults Foreman noticed.
+ *
+ *  Most of the work on any project is this kind, and until it was collected
+ *  Foreman could see the pull requests that answer issues and not the issues
+ *  themselves. Oldest first — an issue nobody has touched in a month is the one
+ *  worth seeing, and the other ordering shows you what you already remember. */
+function renderIssues() {
+  const rows = (state.issues || []).filter((r) => !state.project || r.project === state.project);
+  const list = $("issueList");
+  if (!list) return;
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">No open issues.</div>';
+    return;
+  }
+  list.innerHTML = rows.map((r) => `
+    <div class="work">
+      <div class="work-head">
+        <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.slug)}#${r.number}</a>
+        <span class="work-title">${esc(r.title)}</span>
+        ${r.labels.map((l) => `<span class="chip">${esc(l)}</span>`).join("")}
+      </div>
+      <div class="work-meta">${esc(r.project)} · opened by ${esc(r.author)} · ${
+        esc((r.created_at || "").slice(0, 10))}${r.comments ? ` · ${r.comments} comment(s)` : ""}</div>
+      ${r.buildable ? `<div class="work-act">
+        <button class="primary build-it" data-subject="${esc(r.subject)}">Send an agent</button>
+        <span class="hint">One increment, on a branch, as a pull request you review. An issue that
+        asks a question gets an answer and no code — a plausible decision written into a diff looks
+        settled when it is not.</span>
+      </div>` : ""}
+    </div>`).join("");
+
+  list.querySelectorAll(".build-it").forEach((b) =>
+    b.addEventListener("click", () => buildIssue(b.dataset.subject, b)));
+}
+
+async function buildIssue(subject, button) {
+  if (!confirm(
+    `Send an agent at ${subject.replace("issue:", "")}?\n\n` +
+    "It works in a throwaway copy of the repository, on a new branch cut from " +
+    "the default, and opens a pull request. It cannot merge.\n\n" +
+    "If the issue asks for a decision rather than code, it will say so and " +
+    "build nothing — that is the right answer, and it still costs money."
+  )) return;
+  button.disabled = true;
+  const res = await fetch(`/api/issues/build?subject=${encodeURIComponent(subject)}`,
+                          { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+    button.disabled = false;
+    return;
+  }
+  showTab("activity");
+  watchActivity();
 }
 
 function renderWork() {

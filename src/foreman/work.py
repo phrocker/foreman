@@ -34,11 +34,11 @@ DRAFT = "draft"
 STEWARDED = "stewarded"
 
 
-def _facts(store: Store, project: str) -> dict[str, dict[str, str | None]]:
+def _facts(store: Store, project: str, prefix: str = "pull:") -> dict[str, dict[str, str | None]]:
     out: dict[str, dict[str, str | None]] = {}
     for row in store.latest_observations(project):
         subject = str(row["subject"])
-        if subject.startswith("pull:"):
+        if subject.startswith(prefix):
             out.setdefault(subject, {})[str(row["key"])] = row["value"]
     return out
 
@@ -128,6 +128,57 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
             )
     rows.sort(key=lambda r: (r["blocking"] is not None, r["blocking"] or "", -r["number"]))
     return rows
+
+
+def open_issues(store: Store, registry: Any, project: str | None = None) -> list[dict[str, Any]]:
+    """Issues waiting on somebody, oldest first.
+
+    A finding is something Foreman noticed; an issue is something a person
+    wrote down, and most of the work on any project is the second kind. Oldest
+    first because an issue nobody has touched in a month is the one worth
+    seeing — the opposite ordering shows you what you already remember.
+    """
+    targets = [registry.get(project)] if project else registry.active
+    rows: list[dict[str, Any]] = []
+    for target in targets:
+        if target.github is None or (project is None and STEWARDED in (target.tags or ())):
+            continue
+        for subject, facts in _facts(store, target.id, "issue:").items():
+            if not facts.get("url"):
+                continue
+            slug, _, number = subject.removeprefix("issue:").partition("#")
+            rows.append(
+                {
+                    "project": target.id,
+                    "subject": subject,
+                    "slug": slug,
+                    "number": _int(number),
+                    "title": facts.get("title") or "",
+                    "url": facts.get("url") or "",
+                    "author": facts.get("author") or "",
+                    "labels": [x for x in str(facts.get("labels") or "").split(",") if x],
+                    "comments": _int(facts.get("comments")),
+                    "body": facts.get("body") or "",
+                    "created_at": facts.get("created_at") or "",
+                    # Whether an agent could be sent at it. The same test the
+                    # Fix button uses: somewhere to work, and permission.
+                    "buildable": bool(target.repo and target.repo.exists() and target.writable),
+                }
+            )
+    rows.sort(key=lambda r: (str(r["created_at"]), r["number"]))
+    return rows
+
+
+def issue_facts(store: Store, registry: Any, subject: str) -> tuple[Any, dict[str, Any]]:
+    """One issue's project and facts, for a dispatch that acts on it."""
+    slug, _, number = subject.removeprefix("issue:").partition("#")
+    for target in registry.active:
+        if target.github is None:
+            continue
+        facts = _facts(store, target.id, "issue:").get(subject)
+        if facts is not None:
+            return target, {**facts, "slug": slug, "number": number}
+    raise KeyError(f"no issue {subject!r} in the latest snapshot")
 
 
 def pull_facts(store: Store, registry: Any, subject: str) -> tuple[Any, dict[str, str | None]]:

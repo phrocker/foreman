@@ -403,3 +403,68 @@ async def test_findings_are_fixed_together_so_two_agents_do_not_fight(world, mon
     assert len(agent.seen) == 1, "one dispatch, one branch"
     body = agent.seen[0].instructions
     assert "3 pages share one title" in body and "9 pages share one meta description" in body
+
+
+@pytest.mark.asyncio
+async def test_an_issue_that_asks_a_question_builds_nothing(world, monkeypatch):
+    """Several of these issues are decisions — which brand, which county first,
+    what happens at 2am.
+
+    A plausible answer written into code is worse than an open question,
+    because it looks settled. The agent leaves the tree alone and the reasoning
+    is the answer.
+    """
+    from foreman import fix as fixmod
+
+    project, store = world
+    monkeypatch.setattr(fixmod, "open_pull_request", lambda *a: "https://h.test/pull/1")
+    agent = _Agent(summary="This is a decision, not a change")
+
+    result = await fixmod.build_issue(
+        project,
+        store,
+        {"slug": "o/r", "number": "7", "title": "One brand or twenty-two?", "body": "Decide."},
+        connectors=[agent],
+    )
+    assert not result.pushed
+    assert result.revision is not None
+
+
+@pytest.mark.asyncio
+async def test_a_built_issue_opens_a_pull_request_that_closes_it(world, monkeypatch):
+    from foreman import fix as fixmod
+
+    project, store = world
+    seen = {}
+    monkeypatch.setattr(
+        fixmod,
+        "open_pull_request",
+        lambda repo, branch, title, body, base: seen.update(body=body, branch=branch) or "u",
+    )
+    agent = _Agent(lambda work: (work / "routing.ts").write_text("export const x = 1;\n"))
+
+    result = await fixmod.build_issue(
+        project,
+        store,
+        {"slug": "o/r", "number": "3", "title": "Property model", "body": "Host-based routing."},
+        connectors=[agent],
+    )
+    assert result.pushed and result.files == ("routing.ts",)
+    assert "Closes #3" in seen["body"]
+    assert "issue-3" in seen["branch"]
+
+
+@pytest.mark.asyncio
+async def test_a_stewarded_project_is_refused_an_issue_build(world):
+    from foreman import fix as fixmod
+
+    project, store = world
+    watched = project.model_copy(update={"tags": ["stewarded"]})
+    agent = _Agent()
+    result = await fixmod.build_issue(
+        watched,
+        store,
+        {"slug": "o/r", "number": "1", "title": "t", "body": "b"},
+        connectors=[agent],
+    )
+    assert not result.pushed and "stewarded" in result.note and agent.seen == []

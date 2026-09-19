@@ -83,6 +83,55 @@ class Pulls:
         out: list[Observation] = [ob(f"repo:{slug}", "pulls_error", None)]
         for pull in (p for p in (pulls or []) if isinstance(p, dict)):
             out.extend(await self._one(slug, pull, ob))
+        out.extend(await self._issues(slug, ob))
+        return out
+
+    async def _issues(self, slug: str, ob) -> list[Observation]:
+        """Open issues, as subjects of their own.
+
+        A finding is something Foreman noticed; an issue is something a person
+        wrote down, and most of the work on any project is the second kind. A
+        repository with a brief and eight issues has a plan, and until this
+        existed Foreman could see neither — it watched the pull requests that
+        answer issues and not the issues themselves.
+
+        Pull requests are filtered out. GitHub returns them down this endpoint
+        as issues, and counting them twice would double every number here.
+        """
+        try:
+            issues = await gh_api(f"repos/{slug}/issues?state=open&per_page=100", paginate=True)
+        except GitHubError as exc:
+            return [ob(f"repo:{slug}", "issues_error", str(exc))]
+
+        out: list[Observation] = [ob(f"repo:{slug}", "issues_error", None)]
+        for item in (i for i in (issues or []) if isinstance(i, dict)):
+            if "pull_request" in item:
+                continue
+            number = item.get("number")
+            if number is None:
+                continue
+            subject = f"issue:{slug}#{number}"
+            out += [
+                ob(subject, "title", str(item.get("title") or "")),
+                ob(subject, "url", str(item.get("html_url") or "")),
+                ob(subject, "author", str((item.get("user") or {}).get("login") or "")),
+                ob(subject, "created_at", str(item.get("created_at") or "")),
+                ob(subject, "comments", str(item.get("comments") or 0)),
+                ob(
+                    subject,
+                    "labels",
+                    ",".join(
+                        str(lbl.get("name") or "")
+                        for lbl in (item.get("labels") or [])
+                        if isinstance(lbl, dict)
+                    )
+                    or None,
+                ),
+                # Capped: an issue body is a brief, and the whole of one would
+                # dominate a snapshot. The agent re-reads the full text at
+                # dispatch, so this is for the board rather than for the work.
+                ob(subject, "body", str(item.get("body") or "")[:4000]),
+            ]
         return out
 
     async def _one(self, slug: str, pull: dict, ob) -> list[Observation]:

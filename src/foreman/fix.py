@@ -140,6 +140,155 @@ def _slug(findings: Sequence[Any]) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "-", joined).strip("-") or "findings"
 
 
+ISSUE_PROMPT = """Do the work described in this issue.
+
+## {slug}#{number} — {title}
+
+{body}
+
+## Your checkout
+
+You are in a git worktree at the repository root, on a new branch `{branch}`
+cut from `{base}`. It is a throwaway copy — the operator's own checkout is
+elsewhere and untouched. Read what is already here first; a repository with a
+brief in it has already decided things, and contradicting them quietly is worse
+than asking.
+
+Do what the issue asks and nothing else. An issue asking for one thing has not
+invited a refactor, and a diff carrying unrelated improvement takes longer to
+review and is likelier to be rejected whole.
+
+Where the project has a build or tests, run them. A change that does not build
+is worse than none, because it costs somebody a review to find that out.
+
+Do not commit, push, merge, or run any `git` command that writes. Leave your
+work in the working tree; the caller commits it to this branch and opens a pull
+request that a human reviews.
+
+**If the issue asks for a decision rather than code, say so and do not invent
+one.** Several of these issues are questions — which brand, which county first,
+what happens at 2am — and a plausible answer written into code is worse than an
+open question, because it looks settled. Put your reasoning in `explanation`,
+leave the tree unchanged, and the caller will report that nothing was built.
+
+## Answer
+
+`summary` is one line for the pull request title.
+
+`explanation` is a short paragraph for the pull request body: what you did, or
+what you found that means it should not be done this way.
+
+`addressed` is one entry per thing you changed, naming the file.
+
+`declined` is what you deliberately did not do, with the reason.
+"""
+
+
+async def build_issue(
+    project: Project,
+    store: Store,
+    issue: dict[str, Any],
+    *,
+    budget: Budget | None = None,
+    timeout_s: int = DEFAULT_TIMEOUT_S,
+    connectors: list[Connector] | None = None,
+    model: str | None = None,
+    log=lambda _: None,
+) -> Result:
+    """Send an agent at a tracked issue, and open a pull request for what it did.
+
+    The entry point a project needs before it has any findings. `fix_findings`
+    answers something Foreman noticed; this answers something a person wrote
+    down, which is the whole of greenfield work and most of the work on
+    anything else.
+
+    It is not a way to build an application in one dispatch. An issue is one
+    increment — "add host-based routing", not "build the platform" — and the
+    decomposition into issues is a human's job, done before this is called. A
+    single agent pointed at an empty repository and a large ambition produces a
+    confident first draft that has to be reviewed as one enormous diff, which is
+    the worst shape this work comes in.
+    """
+    if connectors is None:
+        from .connectors.claudecode import ClaudeCodeConnector
+
+        connectors = [ClaudeCodeConnector()]
+    if not project.writable:
+        note = f"{project.id} is stewarded; Foreman never writes to it"
+        return Result(False, (), None, 0.0, note)
+    if project.repo is None or not project.repo.exists():
+        return Result(False, (), None, 0.0, "no local checkout to work in")
+
+    number = str(issue.get("number") or "")
+    base = default_branch(project.repo)
+    run_id = store.start_run(project.id, "build")
+    branch = branch_name(f"issue-{number}", run_id)
+    spent = 0.0
+    backend: str | None = None
+
+    try:
+        with worktree(project.repo, base) as work:
+            _git(work, "checkout", "-b", branch)
+            task = Task(
+                instructions=ISSUE_PROMPT.format(
+                    slug=issue.get("slug") or "",
+                    number=number,
+                    title=issue.get("title") or "",
+                    body=(issue.get("body") or "")[:8000],
+                    branch=branch,
+                    base=base,
+                ),
+                schema=Fix,
+                needs=frozenset({REPO, SHELL}),
+                timeout_s=timeout_s,
+                read_dirs=(work,),
+                model=model,
+            )
+            connector = choose(connectors, task)
+            backend = connector.name
+            store.relate(skill_run_edges(run_id, "build", project.id, backend))
+            log(f"{project.id}: building issue #{number} via {backend} …")
+
+            progress = Progress(log)
+            pulse = asyncio.create_task(beating(progress))
+            try:
+                result = await connector.run(task, on_step=progress.step)
+            except ConnectorError as exc:
+                spent = exc.cost_usd
+                raise
+            finally:
+                pulse.cancel()
+                progress.done()
+
+            spent = result.cost_usd
+            built = result.value
+            if budget is not None and spent:
+                budget.charge(spent)
+
+            _git(work, "add", "-A")
+            files = tuple(
+                sorted(f for f in _git(work, "diff", "--cached", "--name-only").splitlines() if f)
+            )
+            if not files:
+                # Common and correct for an issue that asks a question. The
+                # reasoning is the answer and belongs where the question is.
+                return Result(False, (), built, spent, built.explanation or "nothing was built")
+
+            body = (
+                f"{built.explanation or built.summary}\n\n"
+                f"Closes #{number}.\n\n"
+                "---\n\nWritten by an agent Foreman dispatched at that issue, on a branch "
+                "cut from the default. The diff is the review and the merge is yours."
+            )
+            _git(work, "commit", "-m", f"{built.summary}\n\n{built.explanation}".strip())
+            _git(work, "push", "origin", f"{branch}:{branch}")
+            url = open_pull_request(work, branch, built.summary, body, base)
+            log(f"{project.id}: opened {url}")
+            return Result(True, files, built, spent, url)
+    finally:
+        store.finish_run(run_id, ok=True, cost_usd=spent, connector=backend)
+
+
 async def fix_findings(
     project: Project,
     store: Store,
