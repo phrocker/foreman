@@ -249,7 +249,7 @@ async def test_the_chat_pane_runs_on_a_backend_with_no_tools(tmp_path):
 @pytest.mark.asyncio
 async def test_a_backend_failure_reaches_the_caller_as_a_chat_error(tmp_path):
     class Broken(Fake):
-        async def run(self, task, on_text=None):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
             raise ConnectorError("the backend fell over", 0.4)
 
     registry = Registry(projects=[Project(id="p", name="P")])
@@ -268,7 +268,7 @@ async def test_text_arrives_before_the_answer_does(tmp_path):
     seen: list[str] = []
 
     class Streaming(Fake):
-        async def run(self, task, on_text=None):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
             for piece in ("Two things ", "need ", "you."):
                 on_text(piece)
             return Result(value=Reply(reply="Two things need you."), cost_usd=0.0, connector="s")
@@ -288,7 +288,7 @@ async def test_the_structured_answer_wins_over_whatever_was_streamed(tmp_path):
     the second is validated against the schema, so only the second is stored."""
 
     class Rambling(Fake):
-        async def run(self, task, on_text=None):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
             on_text("hmm, let me look at the findings first…")
             return Result(value=Reply(reply="The stale key."), cost_usd=0.0, connector="s")
 
@@ -364,7 +364,7 @@ async def test_the_answer_streams_even_when_the_model_narrates_nothing(tmp_path)
     seen: list[str] = []
 
     class WritesOnlyJson(Fake):
-        async def run(self, task, on_text=None):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
             # No text_delta at all; the answer appears in the tool input.
             document = ""
             sent = 0
@@ -422,7 +422,7 @@ async def test_findings_reach_the_caller_as_they_close(tmp_path):
     seen: list[dict] = []
 
     class Dribbles(Fake):
-        async def run(self, task, on_text=None, on_item=None):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
             document = ""
             handed = 0
             for piece in (
@@ -440,3 +440,112 @@ async def test_findings_reach_the_caller_as_they_close(tmp_path):
     task = Task(instructions="x", schema=Reply, stream_items="findings")
     await Dribbles().run(task, on_item=seen.append)
     assert [i["rule"] for i in seen] == ["a", "b"]
+
+
+# --- showing a long dispatch is alive ---------------------------------------
+
+
+def test_bursts_of_one_tool_collapse_rather_than_filling_the_log():
+    """A dozen reads in two seconds, one line each, is a wall that hides the
+    shape of the run."""
+    from foreman.progress import Progress
+
+    said: list[str] = []
+    p = Progress(said.append)
+    for _ in range(5):
+        p.step("Read")
+    p.step("Bash")
+    p.done()
+
+    assert len(said) == 2
+    assert "Read ×5" in said[0]
+    assert said[1].strip().endswith("Bash")
+
+
+def test_a_heartbeat_only_speaks_after_a_real_silence():
+    """Shorter and it is noise; much longer and the operator has already gone to
+    look at `ps`."""
+    import foreman.progress as progress_mod
+    from foreman.progress import Progress
+
+    said: list[str] = []
+    clock = [1000.0]
+    real = progress_mod.time.monotonic
+    progress_mod.time.monotonic = lambda: clock[0]
+    try:
+        p = Progress(said.append)
+        p.step("Read")
+        p.beat()
+        assert not [s for s in said if "still working" in s]
+
+        clock[0] += progress_mod.HEARTBEAT_S + 1
+        p.beat()
+        assert any("still working" in s for s in said)
+    finally:
+        progress_mod.time.monotonic = real
+
+
+def test_elapsed_time_is_in_every_line():
+    """The heartbeat says it is alive; the clock says how long you have been
+    waiting. Neither answers "should I still be waiting" on its own."""
+    from foreman.progress import Progress
+
+    said: list[str] = []
+    p = Progress(said.append)
+    p.step("Edit")
+    p.done()
+    assert "m" in said[0] and "s" in said[0]
+
+
+def test_a_tool_start_reaches_on_step_and_not_on_text():
+    """The chat pane asks for neither and must see what it always did."""
+    import asyncio
+    import json
+
+    from pydantic import BaseModel
+
+    from foreman.connectors import Task
+    from foreman.connectors.claudecode import ClaudeCodeConnector
+
+    class Answer(BaseModel):
+        reply: str = ""
+
+    lines = [
+        json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "content_block": {"type": "tool_use", "name": "Bash"},
+                },
+            }
+        ).encode()
+        + b"\n",
+        json.dumps({"type": "result", "result": "{}", "total_cost_usd": 0.0}).encode() + b"\n",
+        b"",
+    ]
+
+    class Proc:
+        class _Out:
+            async def readline(self):
+                return lines.pop(0)
+
+        stdout = _Out()
+
+        class _Err:
+            async def read(self):
+                return b""
+
+        stderr = _Err()
+
+        async def wait(self):
+            return 0
+
+    steps: list[str] = []
+    text: list[str] = []
+    conn = ClaudeCodeConnector()
+    task = Task(instructions="x", schema=Answer)
+    asyncio.run(conn._stream(Proc(), text.append, None, task, steps.append))
+
+    assert steps == ["Bash"]
+    assert text == []

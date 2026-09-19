@@ -130,11 +130,19 @@ class Connector(Protocol):
         task: Task,
         on_text: Callable[[str], None] | None = None,
         on_item: Callable[[dict], None] | None = None,
+        on_step: Callable[[str], None] | None = None,
     ) -> Result:
         """Run the task, optionally reporting progress as it happens.
 
         `on_text` receives the answer as it is written; `on_item` receives each
-        element of `task.stream_items` as it completes.
+        element of `task.stream_items` as it completes; `on_step` receives the
+        name of each tool the backend uses.
+
+        `on_step` exists because the other two are silent exactly when a long
+        dispatch most needs to show it is alive. An agent editing a repository
+        writes into a schema and narrates nothing for twenty minutes, which is
+        indistinguishable from a wedged process — the tools it reaches for are
+        the only evidence otherwise.
 
         Both optional on purpose: a backend that cannot stream never calls them
         and the caller gets the same Result. Nothing may *depend* on having seen

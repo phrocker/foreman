@@ -29,7 +29,7 @@ class _Reviewer:
     def available(self):
         return True
 
-    async def run(self, task, on_text=None, on_item=None):
+    async def run(self, task, on_text=None, on_item=None, on_step=None):
         self.seen.append(task)
         return Result(value=self.critique, cost_usd=0.25, connector=self.name)
 
@@ -106,7 +106,7 @@ async def test_one_angle_failing_does_not_lose_the_others(world):
     calls = []
 
     class Flaky(_Reviewer):
-        async def run(self, task, on_text=None, on_item=None):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
             calls.append(task)
             if len(calls) == 2:
                 raise ConnectorError("the model fell over", cost_usd=0.1)

@@ -89,8 +89,9 @@ class ClaudeCodeConnector:
         task: Task,
         on_text: Callable[[str], None] | None = None,
         on_item: Callable[[dict], None] | None = None,
+        on_step: Callable[[str], None] | None = None,
     ) -> Result:
-        watching = on_text is not None or on_item is not None
+        watching = on_text is not None or on_item is not None or on_step is not None
         proc = await asyncio.create_subprocess_exec(
             *self._command(task, streaming=watching),
             cwd=str(task.read_dirs[0]) if task.read_dirs else None,
@@ -108,7 +109,8 @@ class ClaudeCodeConnector:
                 envelope = _envelope(stdout)
             else:
                 envelope, stderr = await asyncio.wait_for(
-                    self._stream(proc, on_text, on_item, task), timeout=task.timeout_s
+                    self._stream(proc, on_text, on_item, task, on_step),
+                    timeout=task.timeout_s,
                 )
         except TimeoutError:
             proc.kill()
@@ -149,6 +151,7 @@ class ClaudeCodeConnector:
         on_text: Callable[[str], None] | None,
         on_item: Callable[[dict], None] | None,
         task: Task,
+        on_step: Callable[[str], None] | None = None,
     ) -> tuple[dict, bytes]:
         """Read NDJSON as it arrives, forwarding the answer and keeping the result.
 
@@ -158,9 +161,14 @@ class ClaudeCodeConnector:
         meant nothing streamed at all — the answer is recovered from the partial
         JSON of `field` as it is written.
 
-        Tool calls and the agent's own bookkeeping are skipped: they are noise to
-        somebody watching an answer appear. So is a partial line, which is
-        dropped rather than guessed at.
+        Tool calls are noise to somebody watching an answer appear, and they are
+        the only sign of life to somebody watching a twenty-minute agent work.
+        So they go to `on_step` rather than to `on_text`: the chat pane asks for
+        neither and sees what it always did, and a dispatch that edits a
+        repository can show that it is reading, building and writing rather than
+        sitting on one line for a quarter of an hour.
+
+        A partial line is dropped rather than guessed at.
         """
         envelope: dict = {}
         structured = ""
@@ -181,7 +189,17 @@ class ClaudeCodeConnector:
             if event.get("type") != "stream_event":
                 continue
 
-            delta = (event.get("event") or {}).get("delta") or {}
+            inner = event.get("event") or {}
+            # A tool starting is the only thing a long dispatch emits between
+            # "started" and "finished". The name alone is enough to tell reading
+            # from building from writing, and it costs one field rather than
+            # reassembling the tool's arguments out of a JSON delta stream.
+            if on_step and inner.get("type") == "content_block_start":
+                block = inner.get("content_block") or {}
+                if block.get("type") == "tool_use" and block.get("name"):
+                    on_step(str(block["name"]))
+
+            delta = inner.get("delta") or {}
             kind = delta.get("type")
             if kind == "text_delta" and delta.get("text") and on_text:
                 on_text(delta["text"])

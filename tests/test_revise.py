@@ -82,7 +82,7 @@ class _Agent:
     def available(self):
         return True
 
-    async def run(self, task, on_text=None, on_item=None):
+    async def run(self, task, on_text=None, on_item=None, on_step=None):
         self.seen.append(task)
         if self.edit:
             self.edit(task.read_dirs[0])
@@ -209,7 +209,7 @@ async def test_the_worktree_is_removed_even_when_the_agent_fails(world):
     project, store = world
 
     class Boom(_Agent):
-        async def run(self, task, on_text=None, on_item=None):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
             raise RuntimeError("the model fell over")
 
     with pytest.raises(RuntimeError):

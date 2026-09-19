@@ -25,6 +25,7 @@ work an agent could quietly rewrite.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Sequence
@@ -37,6 +38,7 @@ from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import branch_name, default_branch, open_pull_request
 from .graph import skill_run_edges
+from .progress import Progress, beating
 from .revise import Result, _git, worktree
 from .store import Store
 
@@ -195,11 +197,19 @@ async def fix_findings(
             store.relate(skill_run_edges(run_id, "fix", project.id, backend))
             log(f"{project.id}: fixing {len(findings)} finding(s) via {backend} …")
 
+            # A dispatch that edits a repository runs for minutes and, without
+            # this, said one line at the start and one at the end — which looks
+            # exactly like a wedged process for the whole middle.
+            progress = Progress(log)
+            pulse = asyncio.create_task(beating(progress))
             try:
-                result = await connector.run(task)
+                result = await connector.run(task, on_step=progress.step)
             except ConnectorError as exc:
                 spent = exc.cost_usd
                 raise
+            finally:
+                pulse.cancel()
+                progress.done()
 
             spent = result.cost_usd
             fix = result.value

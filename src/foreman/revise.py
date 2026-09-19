@@ -30,6 +30,7 @@ fiction. See #18.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -46,6 +47,7 @@ from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import DeliveryError, default_branch
 from .graph import revision_edges, skill_run_edges
+from .progress import Progress, beating
 from .store import Store
 
 # Long enough for a real change with a build in front of it, and short enough
@@ -254,11 +256,19 @@ async def address_review(
             store.relate(skill_run_edges(run_id, "revise", project.id, backend))
             log(f"{project.id}: revising {slug}#{facts.get('number') or ''} via {backend} …")
 
+            # A dispatch that edits a repository runs for minutes and, without
+            # this, said one line at the start and one at the end — which looks
+            # exactly like a wedged process for the whole middle.
+            progress = Progress(log)
+            pulse = asyncio.create_task(beating(progress))
             try:
-                result = await connector.run(task)
+                result = await connector.run(task, on_step=progress.step)
             except ConnectorError as exc:
                 spent = exc.cost_usd
                 raise
+            finally:
+                pulse.cancel()
+                progress.done()
 
             spent = result.cost_usd
             revision = result.value
