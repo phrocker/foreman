@@ -85,6 +85,34 @@ def _resolves(facts: Facts, params: dict[str, str]) -> bool:
     return any(server.strip().endswith(expected) for server in servers)
 
 
+def _points_at(facts: Facts, params: dict[str, str]) -> bool:
+    """The name resolves to the platform, not merely to something.
+
+    The gate one app serving many hostnames actually needs. `dns_resolves` asks
+    whether the nameservers are where you expect, which is the right question
+    when each property is its own deployment and the wrong one here: these
+    domains keep the registrar's own nameservers and differ only in the address
+    their A record points at. A domain whose nameservers are perfect and whose
+    A record still points at the parking page passes that check and serves a
+    holding page.
+
+    Any of the expected addresses is enough. A load balancer answers on several
+    and which one a resolver hands back is not the operator's business —
+    requiring all of them would fail on a correct setup, which is the worse
+    error of the two.
+    """
+    expected = {a.strip() for a in (params.get("address") or "").split(",") if a.strip()}
+    live = {a.strip() for a in (facts.get("addresses") or "").split(",") if a.strip()}
+    if not live:
+        return False
+    if not expected:
+        # No address named yet — the platform has not been stood up. Resolving
+        # anywhere is all that can be asked, and saying so beats a gate that
+        # passes because its parameter is empty.
+        return True
+    return bool(live & expected)
+
+
 def _serves(facts: Facts, params: dict[str, str]) -> bool:
     """Something real answers on HTTPS.
 
@@ -236,6 +264,12 @@ GATES: dict[str, Gate] = {
             "public DNS answers for this name",
             _resolves,
             needs=("nameservers",),
+        ),
+        Gate(
+            "points_at",
+            "the name resolves to the platform's address",
+            _points_at,
+            needs=("addresses",),
         ),
         Gate(
             "serves",

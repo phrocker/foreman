@@ -415,3 +415,51 @@ def test_a_completed_plan_still_declares_its_subjects(tmp_path):
         s.set_plan_status(plan, "done")
 
         assert subjects_expecting(s, "captures") == {"domain:a.test"}
+
+
+# --- one app, many hostnames -------------------------------------------------
+
+
+def test_a_domain_pointing_at_the_parking_page_has_not_passed(tmp_path):
+    """The gate `dns_resolves` gets wrong for a platform.
+
+    These domains keep the registrar's own nameservers and differ only in the
+    address their A record points at. One whose nameservers are perfect and
+    whose A record still points at the parking page passes the nameserver check
+    and serves a holding page.
+    """
+    facts = {"addresses": "34.102.136.180"}
+    # PENDING, not BLOCKED: blocked means an *earlier* phase has not passed, and
+    # this one has simply not happened yet. The two look alike on a board and
+    # mean opposite things — one is waiting on somebody, the other on itself.
+    assert (
+        standing(_phase(gate="points_at", address="203.0.113.10"), facts, True) is Standing.PENDING
+    )
+
+
+def test_any_of_the_platforms_addresses_is_enough(tmp_path):
+    """A load balancer answers on several and which one a resolver hands back is
+    not the operator's business. Requiring all of them fails on a correct setup,
+    which is the worse error."""
+    facts = {"addresses": "13.248.243.5,76.223.105.230"}
+    phase = _phase(gate="points_at", address="76.223.105.230,203.0.113.9")
+    assert standing(phase, facts, True) is Standing.PASSED
+
+
+def test_a_name_that_resolves_nowhere_has_not_passed():
+    assert (
+        standing(_phase(gate="points_at", address="1.2.3.4"), {"addresses": ""}, True)
+        is Standing.PENDING
+    )
+
+
+def test_before_the_platform_exists_resolving_anywhere_is_all_that_can_be_asked():
+    """Saying so beats a gate that passes because its parameter is empty — and
+    beats one that fails every subject until somebody fills a placeholder in."""
+    assert standing(_phase(gate="points_at"), {"addresses": "1.2.3.4"}, True) is Standing.PASSED
+
+
+def test_a_domain_nobody_probed_is_unknown_rather_than_failing():
+    """The distinction the whole gate machinery exists for: not-yet-measured and
+    measured-and-failed are opposite answers."""
+    assert standing(_phase(gate="points_at", address="1.2.3.4"), {}, True) is Standing.UNKNOWN
