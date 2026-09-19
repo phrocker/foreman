@@ -612,7 +612,23 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         path = registry_path or find_registry()
         if path is None:
             raise HTTPException(404, "no foreman.yaml found")
-        return registry_projects(Path(path))
+        rows = registry_projects(Path(path))
+
+        # The registry view reads the *file*, so it carries what was written
+        # there and not what the loaded Project derives from it. `fixable` and
+        # `writable` are derived — whether the checkout is really on disk,
+        # whether the project is stewarded — and the page needs both to decide
+        # whether an agent can be offered. Without them the Fix button silently
+        # never rendered, which is the same shape of bug as a tab that
+        # highlights and shows nothing: the feature looks built and is not.
+        loaded = {p.id: p for p in load_registry(registry_path).projects}
+        for row in rows:
+            project = loaded.get(row.get("id"))
+            if project is not None:
+                row["fixable"] = project.fixable
+                row["writable"] = project.writable
+                row["deliver"] = project.deliver
+        return rows
 
     @app.patch("/api/projects/{project_id}")
     def track_project(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:

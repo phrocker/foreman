@@ -228,3 +228,51 @@ def test_no_panel_list_is_hardcoded_in_the_tab_switcher():
     ).read_text()
     switcher = page.split("function showTab(")[1].split("\n}")[0]
     assert '[role="tabpanel"]' in switcher, "showTab should ask the DOM which panels exist"
+
+
+def test_the_projects_endpoint_carries_what_the_page_decides_with():
+    """The Fix button silently never rendered.
+
+    `/api/projects` reads the registry *file*, so it carries what was written
+    there — and `fixable` and `writable` are derived: whether the checkout is
+    really on disk, whether the project is stewarded. The page asked for them,
+    got undefined, and quietly offered nothing. Same shape as a tab that
+    highlights and shows an empty panel: the feature looks built and is not.
+    """
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from foreman.web import create_app
+
+    registry = Path(__file__).resolve().parents[1] / "foreman.yaml"
+    if not registry.exists():
+        import pytest
+
+        pytest.skip("no local registry to read")
+
+    client = TestClient(create_app(registry_path=registry))
+    rows = client.get("/api/projects").json()
+    assert rows, "no projects served"
+    for row in rows:
+        for field in ("fixable", "writable", "deliver"):
+            assert field in row, f"{row.get('id')} is missing {field}"
+
+
+def test_the_page_only_reads_fields_the_api_sends():
+    """The general form of the bug above, checked cheaply.
+
+    Not a parser — a reminder. Every name the page reads off a project object
+    has to come from somewhere, and the two lists drifting apart is how a
+    control disappears without anybody seeing an error.
+    """
+    import re
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parents[1] / "src" / "foreman" / "static" / "index.html"
+    ).read_text()
+    # The helper that decides whether an agent can be offered for a finding.
+    helper = page.split("function fixable(")[1].split("\n}")[0]
+    assert "project.fixable" in helper
+    assert "answerable" in helper, "it must also know which rules an op already answers"
