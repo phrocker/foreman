@@ -52,6 +52,7 @@ from .runner import (
     propose_actions,
     reject_action,
 )
+from .signals import read as read_signals
 from .skills import TrackRecord, merge_label, merge_rate, track_records
 from .skills import label as skill_label
 from .store import Store, open_store
@@ -1249,6 +1250,34 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         asyncio.create_task(work())
         return slot.as_dict()
+
+    @app.get("/api/signals")
+    def signals() -> list[dict[str, Any]]:
+        """What is working, and what nothing can read.
+
+        The unmeasured rows are the point. A board that omitted them would let
+        "we do not count leads" pass for "no leads yet", and those are a
+        measurement problem and a business problem respectively.
+        """
+        s = store()
+        try:
+            return [
+                {
+                    "key": sig.key,
+                    "label": sig.label,
+                    "unit": sig.unit,
+                    "value": sig.value,
+                    "previous": sig.previous,
+                    "change": sig.change,
+                    "direction": sig.direction,
+                    "measured": sig.measured,
+                    "blocked_by": sig.blocked_by,
+                    "covers": sig.covers,
+                }
+                for sig in read_signals(s, load_registry(registry_path))
+            ]
+        finally:
+            s.close()
 
     @app.get("/api/activity")
     def activity() -> dict[str, Any]:

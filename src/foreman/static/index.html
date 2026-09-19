@@ -325,6 +325,19 @@
   .chip.bad  { border-color: var(--high);   color: var(--high); }
   .chip.warn { border-color: var(--medium); color: var(--medium); }
   .chip.wait { border-color: var(--low);    color: var(--low); }
+  .link-ish { background: none; border: 0; color: var(--accent); cursor: pointer;
+              padding: 0; font: inherit; text-decoration: underline; }
+  .sig { display: flex; gap: 16px; align-items: baseline; padding: 14px 16px;
+         border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
+  .sig-blocked { border-left: 3px solid var(--medium); }
+  .sig-value { font-size: 1.6em; font-weight: 300; font-variant-numeric: tabular-nums;
+               min-width: 4.5em; color: var(--text); }
+  .sig-dir { font-size: 0.5em; margin-left: 6px; vertical-align: middle; }
+  .sig-better { color: var(--good); }
+  .sig-worse  { color: var(--high); }
+  .sig-flat   { color: var(--text-3); }
+  .sig-label { font-weight: 550; }
+  .sig-unit { color: var(--text-3); font-size: 0.9em; margin-top: 2px; }
   .phase-note { color: var(--text); font-size: 0.92em; margin: 4px 0 6px; }
   .phase-how { font-style: italic; opacity: 0.75; }
   .act-head { font-size: 0.95em; color: var(--text-2); margin: 18px 0 8px; font-weight: 550; }
@@ -617,6 +630,7 @@
   </section>
 
   <nav class="tabs" role="tablist">
+    <button class="tab" data-tab="working"  role="tab" aria-selected="false">Working <span class="count" id="countWorking"></span></button>
     <button class="tab" data-tab="findings" role="tab" aria-selected="true">Findings <span class="count" id="countFindings"></span></button>
     <button class="tab" data-tab="actions"  role="tab" aria-selected="false">Actions <span class="count" id="countActions"></span></button>
     <button class="tab" data-tab="work"     role="tab" aria-selected="false">Work <span class="count" id="countWork"></span></button>
@@ -656,6 +670,11 @@
     <div class="hint" id="actionSummary"></div>
     <div id="landed" hidden></div>
     <div id="actionList"></div>
+  </section>
+
+  <section id="panel-working" role="tabpanel" hidden>
+    <div class="hint">Everything else here is shaped around what is wrong. This is the other half — and the rows nothing can read are the ones worth acting on, because "we do not count leads" and "no leads yet" are different problems.</div>
+    <div id="signalList"></div>
   </section>
 
   <section id="panel-work" role="tabpanel" hidden>
@@ -763,11 +782,12 @@ const SEV = {
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
-  pulls: [], activity: null,
+  pulls: [], activity: null, signals: [],
   declared: [],
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
   tab: "findings", decisiveOnly: true, kind: "", showRetired: true,
+  showSuperseded: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -857,7 +877,7 @@ let stale = [];
 async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports, declared, pulls, activity] =
+         settings, plans, reports, declared, pulls, activity, signals] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -874,10 +894,12 @@ async function load() {
     fetchPart("/api/projects", []),
     fetchPart("/api/pulls", []),
     fetchPart("/api/activity", null),
+    fetchPart("/api/signals", []),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
     connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
+    signals,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -892,7 +914,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
+    ["working", renderWorking], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -941,6 +963,10 @@ function renderCounts() {
   // Blocked ones only. A count of every open pull request is a number that
   // never goes down and stops being read; what deserves the badge is what is
   // waiting on somebody.
+  // The count is what cannot be read, not how many rows there are. A number
+  // that only ever went up with the size of the board would say nothing.
+  $("countWorking").textContent =
+    (state.signals || []).filter((s) => !s.measured).length || "";
   $("countWork").textContent =
     state.pulls.filter((r) => r.blocking && (!state.project || r.project === state.project))
       .length || "";
@@ -1483,6 +1509,59 @@ function siblingsOf(f) {
     .map((o) => o.id);
 }
 
+// --- working: signals rather than faults ------------------------------------
+
+/** What is working, and what nothing can read.
+ *
+ *  Measured rows lead with the number. Unmeasured ones lead with the gap,
+ *  because a signal nobody can take is a decision waiting to be made and not
+ *  an empty cell — and rendering it as `0` would let "we do not count leads"
+ *  pass for "no leads yet". */
+function renderWorking() {
+  const rows = state.signals || [];
+  const list = $("signalList");
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">No signals yet.</div>';
+    return;
+  }
+  const arrow = { better: "▲", worse: "▼", flat: "—", unknown: "" };
+  list.innerHTML = rows.map((s) => s.measured
+    ? `<div class="sig">
+         <div class="sig-value">${esc(fmtSignal(s))}<span class="sig-dir sig-${esc(s.direction)}">${
+           arrow[s.direction] || ""}</span></div>
+         <div class="sig-body">
+           <div class="sig-label">${esc(s.label)}</div>
+           <div class="sig-unit">${esc(s.unit)}${
+             s.change === null ? "" : ` · ${s.change > 0 ? "+" : ""}${fmtNum(s.change)} on the previous window`}</div>
+         </div>
+       </div>`
+    : `<div class="sig sig-blocked">
+         <div class="sig-value">—</div>
+         <div class="sig-body">
+           <div class="sig-label">${esc(s.label)} <span class="chip warn">not measured</span></div>
+           <div class="sig-unit">${esc(s.blocked_by)}</div>
+         </div>
+       </div>`).join("");
+}
+
+/** Wire the superseded toggle after each render. */
+function wirePlanToggle() {
+  const button = $("togglePast");
+  if (!button) return;
+  button.addEventListener("click", () => {
+    state.showSuperseded = !state.showSuperseded;
+    renderPlans();
+  });
+}
+
+function fmtNum(n) {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+function fmtSignal(s) {
+  return s.key === "spend" ? usd(s.value) : fmtNum(s.value);
+}
+
 // --- activity ---------------------------------------------------------------
 
 /** What is running, and what agent work ran recently.
@@ -1901,7 +1980,19 @@ function renderPlans() {
       '<div class="empty">No plans yet. A plan says what should exist; a finding says what exists and is wrong.</div>';
     return;
   }
-  list.innerHTML = state.plans.map((plan) => {
+  // Superseded plans are the record of what was intended, not work anybody is
+  // being asked about. Listing them alongside the live ones made five plans
+  // out of two and buried the question each was meant to answer. They are kept
+  // — a plan is never deleted — and folded away.
+  const live = state.plans.filter((p) => p.status !== "superseded");
+  const past = state.plans.filter((p) => p.status === "superseded");
+  const shown = state.showSuperseded ? state.plans : live;
+  const note = past.length
+    ? `<div class="hint" style="margin-bottom:12px">${past.length} superseded plan(s) kept as the
+       record of what was intended. <button class="link-ish" id="togglePast">${
+         state.showSuperseded ? "Hide them" : "Show them"}</button></div>`
+    : "";
+  list.innerHTML = note + shown.map((plan) => {
     void 0;
     const subjects = Object.entries(plan.subjects || {});
     const head = `<div class="plan-head">
@@ -1949,6 +2040,7 @@ function renderPlans() {
 
   list.querySelectorAll(".confirm-box").forEach((box) =>
     box.addEventListener("change", () => confirmStep(box)));
+  wirePlanToggle();
 }
 
 // --- which projects are swept ----------------------------------------------

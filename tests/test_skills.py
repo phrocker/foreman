@@ -462,3 +462,60 @@ def test_the_latest_word_on_a_pull_request_wins(tmp_path):
             ]
         )
         assert merge_rate(store) == (1, 1)
+
+
+# --- what is working, as opposed to what is wrong ---------------------------
+
+
+def test_a_signal_nothing_can_read_is_still_on_the_board():
+    """ "Leads captured: no way to measure" is the most important row here.
+
+    Leaving it out because there is no collector behind it would let the
+    absence pass for an answer — the gap is the finding.
+    """
+    from foreman.signals import Signal
+
+    leads = Signal("leads", "Leads captured", "leads", "up", blocked_by="nothing counts one")
+    assert not leads.measured
+    assert leads.direction == "unknown"
+    assert leads.blocked_by
+
+
+def test_zero_and_unknown_are_not_the_same_number():
+    """Nought leads with a working counter is a business problem; nought with no
+    counter is a measurement problem. A board that renders both as 0 teaches you
+    to distrust the ones that are real."""
+    from foreman.signals import Signal
+
+    counted = Signal("leads", "Leads", "leads", "up", value=0.0, previous=0.0)
+    uncounted = Signal("leads", "Leads", "leads", "up")
+    assert counted.measured and not uncounted.measured
+    assert counted.direction == "flat" and uncounted.direction == "unknown"
+
+
+def test_direction_is_read_against_what_good_means():
+    """More leads is better and more spend is not, and nothing about the number
+    says which. Reading a rise as good is how a dashboard celebrates its cost."""
+    from foreman.signals import Signal
+
+    leads = Signal("leads", "Leads", "leads", "up", value=10.0, previous=4.0)
+    spend = Signal("spend", "Spend", "usd", "down", value=10.0, previous=4.0)
+    assert leads.direction == "better"
+    assert spend.direction == "worse"
+
+
+def test_a_first_measurement_has_no_direction():
+    """Nothing to compare against is not 'flat'. Flat is a claim."""
+    from foreman.signals import Signal
+
+    assert Signal("x", "X", "u", "up", value=3.0).direction == "unknown"
+
+
+def test_the_unmeasured_list_is_what_to_act_on():
+    from foreman.signals import Signal, unmeasured
+
+    signals = [
+        Signal("a", "A", "u", "up", value=1.0),
+        Signal("b", "B", "u", "up", blocked_by="no collector"),
+    ]
+    assert [s.key for s in unmeasured(signals)] == ["b"]
