@@ -168,6 +168,7 @@ class Store(Protocol):
     def plan(self, plan_id: int) -> Record | None: ...
     def phases(self, plan_id: int) -> list[Record]: ...
     def set_plan_status(self, plan_id: int, status: str) -> None: ...
+    def update_phase(self, phase_id: int, params: dict[str, str]) -> None: ...
 
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
@@ -1176,6 +1177,25 @@ class SqliteStore:
         phase_id = int(cursor.lastrowid)
         self.relate([(node("plan", plan_id), HAS_PHASE, node("phase", phase_id))])
         return phase_id
+
+    def update_phase(self, phase_id: int, params: dict[str, str]) -> None:
+        """Replace one phase's parameters in place.
+
+        Its absence is why this portfolio briefly had five plans and two of
+        them meant anything. Changing a note or filling in an address meant
+        rebuilding the plan and superseding the old one, which churned the
+        board and buried the question each plan was meant to answer.
+
+        Params only. A phase's position, name and gate are what its subjects'
+        recorded standings are keyed against — the confirmations live under a
+        key derived from the name — so changing those is a different plan
+        wearing the same id, and superseding is the honest way to do that.
+        """
+        self._db.execute(
+            "UPDATE phases SET params = ? WHERE id = ?",
+            (json.dumps(params or {}, sort_keys=True), phase_id),
+        )
+        self._db.commit()
 
     def plans(self, status: str | None = None) -> list[Record]:
         sql = "SELECT * FROM plans"

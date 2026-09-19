@@ -412,6 +412,40 @@ def test_an_action_that_landed_nowhere_openable_says_so(store):
     assert store.action(action_id)["landed_at"] is None
 
 
+def test_a_phase_can_be_edited_without_rebuilding_the_plan(store):
+    """Its absence is why this portfolio briefly had five plans and two of them
+    meant anything.
+
+    Changing a note, or filling in an address once the platform had one, meant
+    creating a replacement plan and superseding the old — churning the board and
+    burying the question each plan was meant to answer.
+    """
+    plan = store.create_plan("do the thing", ["domain:a.test"])
+    phase = store.add_phase(plan, 1, "Pointed", "points_at", {"address": "", "note": "soon"})
+
+    store.update_phase(phase, {"address": "34.120.7.46", "note": "soon"})
+
+    rows = store.phases(plan)
+    assert len(rows) == 1, "editing a phase must not add one"
+    import json as _json
+
+    assert _json.loads(rows[0]["params"])["address"] == "34.120.7.46"
+
+
+def test_editing_one_phase_leaves_its_siblings_alone(store):
+    plan = store.create_plan("do the thing", ["domain:a.test"])
+    first = store.add_phase(plan, 1, "One", "serves", {"min_chars": "400"})
+    store.add_phase(plan, 2, "Two", "serves", {"min_chars": "2000"})
+
+    store.update_phase(first, {"min_chars": "999"})
+
+    import json as _json
+
+    kept = {r["name"]: _json.loads(r["params"]) for r in store.phases(plan)}
+    assert kept["One"]["min_chars"] == "999"
+    assert kept["Two"]["min_chars"] == "2000"
+
+
 def test_params_and_files_survive_the_round_trip(store):
     action_id = _propose(store)
     row = store.action(action_id)

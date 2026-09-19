@@ -1019,6 +1019,17 @@ class ShoalStore:
         self.relate([(node("plan", plan_id), HAS_PHASE, node("phase", phase_id))])
         return phase_id
 
+    def update_phase(self, phase_id: int, params: dict[str, str]) -> None:
+        self._write(
+            [
+                self._put(
+                    _rid("phase", _pad(phase_id)),
+                    "phase",
+                    {"params": json.dumps(params or {}, sort_keys=True)},
+                )
+            ]
+        )
+
     def plans(self, status: str | None = None) -> list[Record]:
         rows = [
             r
