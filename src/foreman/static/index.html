@@ -1592,8 +1592,11 @@ async function reviewPull(subject, button) {
     "Each reads the diff from one angle — does it work, did it do more than it " +
     "was asked, does it actually fix the thing, what else does it touch — " +
     "without seeing the others' answers.\n\n" +
-    "Nothing is posted to GitHub. What they find lands here as findings you can " +
-    "dismiss, and dismissing is what makes their precision mean anything."
+    "What they find is posted to the pull request as a review, and kept here as " +
+    "findings you can dismiss. Nothing is blocking — the review never requests " +
+    "changes.\n\n" +
+    "Once posted, the Address-comments button appears on this row: an agent can " +
+    "be sent to answer them."
   )) return;
   button.disabled = true;
   const res = await fetch(`/api/pulls/review?subject=${encodeURIComponent(subject)}`,

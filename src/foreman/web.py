@@ -1227,10 +1227,19 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         subject,
                         facts.get("title") or subject,
                         diff,
+                        # Posted to the pull request, which is where the change
+                        # is read. A queue of comments in another tool is a
+                        # queue nobody opens — and posting is what closes the
+                        # loop, since `revise` reads exactly this endpoint.
+                        post_to=subject,
                         budget=Budget(REVIEW_CEILING_USD),
                         log=note,
                     )
                     note(summarise(found))
+                    if found:
+                        # The pull request now carries comments, so its own row
+                        # is stale and the Address-comments button belongs on it.
+                        await refresh_pulls(project, st, note)
                 finally:
                     st.close()
             except Exception as exc:  # noqa: BLE001 — surfaced in the UI

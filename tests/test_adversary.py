@@ -159,3 +159,134 @@ def test_an_invented_severity_does_not_earn_high():
 
 def test_the_summary_says_which_angles_objected():
     assert summarise([]) == "no objections"
+
+
+# --- posting to the pull request --------------------------------------------
+
+
+def _found(*objections):
+    return [(LENSES[0], o) for o in objections]
+
+
+def test_an_anchored_objection_becomes_a_comment_on_the_diff(monkeypatch):
+    """An anchored comment is what `revise` reads back, so this is the step that
+    closes the loop rather than a nicety."""
+    from foreman import adversary
+
+    sent = {}
+
+    def fake(slug, number, payload):
+        sent.update(slug=slug, number=number, payload=payload)
+        return "https://h.test/pull/1#review"
+
+    monkeypatch.setattr(adversary, "_post", fake)
+    adversary.post_objections(
+        "o/r", 1, _found(Objection(path="a.py", line=12, what="off by one", severity="high"))
+    )
+    assert sent["payload"]["comments"] == [
+        {"path": "a.py", "line": 12, "body": sent["payload"]["comments"][0]["body"]}
+    ]
+    assert "Blocking" in sent["payload"]["comments"][0]["body"]
+
+
+def test_an_objection_with_no_line_still_gets_said(monkeypatch):
+    """A reviewer that cannot place a line honestly says nothing rather than
+    guessing a number. Dropping the objection for it would be the wrong lesson."""
+    from foreman import adversary
+
+    sent = {}
+    monkeypatch.setattr(adversary, "_post", lambda s, n, p: sent.update(payload=p) or "")
+    adversary.post_objections("o/r", 1, _found(Objection(what="the whole shape is wrong")))
+    assert "comments" not in sent["payload"]
+    assert "the whole shape is wrong" in sent["payload"]["body"]
+
+
+def test_one_bad_anchor_does_not_lose_the_other_objections(monkeypatch):
+    """GitHub rejects a review whole if any comment names a line not in the
+    diff. A single bad anchor would otherwise cost fourteen good objections."""
+    from foreman import adversary
+    from foreman.collectors.github import GitHubError
+
+    calls = []
+
+    def fake(slug, number, payload):
+        calls.append(payload)
+        if "comments" in payload:
+            raise GitHubError("line must be part of the diff")
+        return "https://h.test/ok"
+
+    monkeypatch.setattr(adversary, "_post", fake)
+    adversary.post_objections(
+        "o/r",
+        1,
+        _found(
+            Objection(path="a.py", line=9999, what="anchored badly"),
+            Objection(path="b.py", line=3, what="anchored fine"),
+        ),
+    )
+    assert len(calls) == 2
+    assert "comments" not in calls[1]
+    assert "anchored badly" in calls[1]["body"] and "anchored fine" in calls[1]["body"]
+
+
+def test_a_review_never_requests_changes(monkeypatch):
+    """Four agents' opinion of a diff is worth reading and not worth standing in
+    the way of a person who has read it and disagreed."""
+    from foreman import adversary
+
+    sent = {}
+    monkeypatch.setattr(adversary, "_post", lambda s, n, p: sent.update(payload=p) or "")
+    adversary.post_objections("o/r", 1, _found(Objection(what="x", severity="high")))
+    assert sent["payload"]["event"] == "COMMENT"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_post_does_not_lose_the_findings(world, monkeypatch):
+    """The objections are recorded and the run is paid for either way. This is
+    the delivery failing, not the review."""
+    from foreman import adversary
+    from foreman.collectors.github import GitHubError
+
+    project, store = world
+    monkeypatch.setattr(
+        adversary,
+        "post_objections",
+        lambda *a: (_ for _ in ()).throw(GitHubError("no such pull request")),
+    )
+    reviewer = _Reviewer(
+        Critique(verdict="objections", objections=[Objection(what="something", severity="low")])
+    )
+    said = []
+    found = await review_change(
+        project,
+        store,
+        "pull:o/r#1",
+        "goal",
+        DIFF,
+        connectors=[reviewer],
+        post_to="pull:o/r#1",
+        log=said.append,
+    )
+    assert found and store.open_findings("p")
+    assert any("could not post" in line for line in said)
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_posted_when_nobody_objected(world, monkeypatch):
+    """A clean review that announced itself on the pull request would be noise
+    on somebody's notifications for no finding."""
+    from foreman import adversary
+
+    project, store = world
+    posted = []
+    monkeypatch.setattr(adversary, "post_objections", lambda *a: posted.append(a) or "")
+    await review_change(
+        project,
+        store,
+        "pull:o/r#1",
+        "goal",
+        DIFF,
+        connectors=[_Reviewer()],
+        post_to="pull:o/r#1",
+    )
+    assert posted == []

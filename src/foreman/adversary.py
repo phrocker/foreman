@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +36,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .budget import Budget
+from .collectors.github import GitHubError
 from .config import Project
 from .connectors import REPO, Connector, ConnectorError, Task, choose
 from .graph import skill_run_edges
@@ -102,6 +104,12 @@ class Objection(BaseModel):
 
     # Named so a reader can go and look rather than take the reviewer's word.
     path: str = ""
+    # The line in the file *after* the change. Asked for because it is what
+    # turns an objection into a comment GitHub can anchor to the diff — and an
+    # anchored comment is what the revising agent reads back. Optional: a
+    # reviewer that cannot place one honestly says nothing rather than guessing
+    # a number, and an objection with no line still posts, in the review body.
+    line: int | None = None
     what: str
     # `high` is reserved for something that is actually broken, and the prompt
     # says so: a reviewer who reaches for it on style spends the word.
@@ -144,10 +152,16 @@ buries, and it teaches the operator to stop reading you.
 
 `verdict` is `clean` or `objections`.
 
-`objections` is what you actually found. For each: the file, what is wrong in
-one or two sentences, and how bad — `high` only when something is broken or a
-real regression, `medium` when it should change before merge, `low` when it is
-worth saying and would not block.
+`objections` is what you actually found. For each: the file, the line in the
+file as the change leaves it, what is wrong in one or two sentences, and how
+bad — `high` only when something is broken or a real regression, `medium` when
+it should change before merge, `low` when it is worth saying and would not
+block.
+
+Give a line only where you can place one. These become comments anchored to
+the diff, and a guessed line anchors a real objection to the wrong code, which
+is worse than one that arrives unanchored. Leave it out and say where in the
+text instead.
 """
 
 
@@ -206,6 +220,94 @@ async def _one(
     return (lens, result.value, result.cost_usd, None)
 
 
+def _comment(lens: Lens, objection: Objection) -> str:
+    """One objection, written the way a reviewer would leave it."""
+    mark = {"high": "**Blocking.**", "medium": "**Worth changing.**"}.get(
+        str(objection.severity).lower(), "Minor."
+    )
+    return f"{mark} {objection.what}\n\n_Foreman's *{lens.summary}* review._"
+
+
+def post_objections(slug: str, number: str | int, found: Sequence[tuple[Lens, Objection]]) -> str:
+    """Leave the objections on the pull request, as a review.
+
+    Posted rather than merely stored, because the pull request is where the
+    change is read and a queue of comments in another tool is a queue nobody
+    opens. It is also what closes the loop: `revise` reads exactly this
+    endpoint, so an objection posted here is an objection an agent can be sent
+    to answer.
+
+    Anchored where a line was given and in the body where it was not. A review
+    is rejected whole if any one of its comments names a line that is not in
+    the diff, so a single bad anchor would lose fourteen good objections — the
+    fallback re-posts everything in the body rather than dropping them.
+
+    `event: COMMENT`, never `REQUEST_CHANGES`. A review that requests changes
+    is a blocking state on somebody's pull request, and this is four agents'
+    opinion of a diff: worth reading, not worth standing in the way of a person
+    who has read it and disagreed.
+    """
+    inline = [
+        {"path": o.path, "line": int(o.line), "body": _comment(lens, o)}
+        for lens, o in found
+        if o.path and o.line
+    ]
+    loose = [(lens, o) for lens, o in found if not (o.path and o.line)]
+
+    body = [
+        f"Four agents read this diff from angles that had not seen each "
+        f"other's answers. {len(found)} objection(s).",
+    ]
+    if loose:
+        body.append("")
+        for lens, o in loose:
+            where = f"`{o.path}` — " if o.path else ""
+            body.append(f"- **{lens.key}** — {where}{o.what}")
+    body.append("")
+    body.append(
+        "_Nothing here is blocking. Dismiss what is wrong — that is what makes "
+        "this reviewer's precision mean anything._"
+    )
+    payload = {"event": "COMMENT", "body": "\n".join(body)}
+
+    if inline:
+        try:
+            return _post(slug, number, {**payload, "comments": inline})
+        except GitHubError:
+            # One unplaceable line must not cost the other objections. Fold the
+            # anchored ones into the body and post again.
+            payload["body"] += "\n\n" + "\n".join(
+                f"- **{lens.key}** — `{o.path}:{o.line}` — {o.what}"
+                for lens, o in found
+                if o.path and o.line
+            )
+    return _post(slug, number, payload)
+
+
+def _post(slug: str, number: str | int, payload: dict) -> str:
+    proc = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{slug}/pulls/{number}/reviews",
+            "--method",
+            "POST",
+            "--input",
+            "-",
+        ],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise GitHubError(proc.stderr.strip()[:300] or "gh api: review not created")
+    try:
+        return str(json.loads(proc.stdout).get("html_url") or "")
+    except ValueError:
+        return ""
+
+
 async def review_change(
     project: Project,
     store: Store,
@@ -214,6 +316,7 @@ async def review_change(
     diff: str,
     *,
     lenses: Sequence[Lens] = LENSES,
+    post_to: str = "",
     budget: Budget | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     connectors: list[Connector] | None = None,
@@ -243,6 +346,10 @@ async def review_change(
     run_id = store.start_run(project.id, "review")
     spent = 0.0
     findings: list[Finding] = []
+    # Kept alongside the findings because posting needs what a Finding drops:
+    # the line the objection was placed on, which is what lets a comment anchor
+    # to the diff and therefore what lets `revise` read it back.
+    raised: list[tuple[Lens, Objection]] = []
     try:
         results = await asyncio.gather(
             *(
@@ -274,6 +381,7 @@ async def review_change(
                 log(f"{subject}: {lens.key} — clean")
                 continue
             for objection in critique.objections:
+                raised.append((lens, objection))
                 where = f" ({objection.path})" if objection.path else ""
                 findings.append(
                     Finding(
@@ -299,6 +407,21 @@ async def review_change(
 
         if findings:
             store.record_findings(run_id, findings, source="agent:review")
+
+        # Posted last, and only after the findings are stored. A review that
+        # reached GitHub and then failed to record would be advice with no
+        # record of who gave it or what it cost; the other way round leaves a
+        # record of work that can be posted again.
+        if raised and post_to:
+            slug, _, number = post_to.removeprefix("pull:").partition("#")
+            try:
+                url = post_objections(slug, number, raised)
+                where = f": {url}" if url else ""
+                log(f"posted {len(raised)} objection(s) to the pull request{where}")
+            except (GitHubError, OSError) as exc:
+                # Not a failed review. The objections are recorded and the run
+                # is paid for either way; this is the delivery failing.
+                log(f"could not post to the pull request: {exc}")
         return findings
     finally:
         store.finish_run(
