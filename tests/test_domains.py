@@ -1095,3 +1095,52 @@ def test_a_declared_lead_site_is_still_judged():
     mistake and would retire the check rather than scope it."""
     found = _judge_capture({"domain:a.test": {"capture_route": "none"}})
     assert "site_captures_nothing" in found
+
+
+# --- a review body is something to answer ------------------------------------
+
+
+def test_a_review_with_no_anchored_comments_is_still_unresolved():
+    """Foreman's own adversarial review puts an objection it cannot place on a
+    line into the review body.
+
+    Reading only the anchored comments made fifteen real objections invisible to
+    the agent that exists to answer them: the pull request carried a review and
+    the board said nothing was unresolved.
+    """
+    import asyncio
+    import json
+
+    from foreman.collectors import pulls as pulls_mod
+
+    async def fake(path, paginate=False):
+        if path.endswith("/reviews?per_page=100"):
+            return [
+                {
+                    "user": {"login": "foreman"},
+                    "body": "Four agents read this diff.",
+                    "state": "COMMENTED",
+                    "html_url": "https://h.test/r/1",
+                }
+            ]
+        return []
+
+    recorded = []
+
+    def ob(subject, key, value):
+        recorded.append((key, value))
+        return (key, value)
+
+    collector = pulls_mod.Pulls()
+    original = pulls_mod.gh_api
+    pulls_mod.gh_api = fake
+    try:
+        asyncio.run(collector._review("o/r", 1, "pull:o/r#1", ob))
+    finally:
+        pulls_mod.gh_api = original
+
+    facts = dict(recorded)
+    assert facts["review_comments"] == "1"
+    threads = json.loads(facts["review_threads"])
+    assert threads[0]["body"] == "Four agents read this diff."
+    assert threads[0]["path"] == "", "a body has no file to anchor to"

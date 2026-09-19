@@ -162,10 +162,11 @@ class Pulls:
         except GitHubError as exc:
             return [ob(subject, "review_error", str(exc))]
 
+        reviews = [r for r in (reviews or []) if isinstance(r, dict)]
         states = [
             str(r.get("state") or "")
-            for r in (reviews or [])
-            if isinstance(r, dict) and r.get("state") in ("APPROVED", "CHANGES_REQUESTED")
+            for r in reviews
+            if r.get("state") in ("APPROVED", "CHANGES_REQUESTED")
         ]
         # The last word wins. A reviewer who asked for changes and then approved
         # has approved, and counting the earlier state would keep a cleared pull
@@ -181,8 +182,36 @@ class Pulls:
             return out
 
         items = [c for c in (comments or []) if isinstance(c, dict)]
+
+        # A review's own body counts as something to answer, not only the
+        # comments anchored to lines. Foreman's adversarial review puts an
+        # objection it cannot place on a line into the body, and reading only
+        # the anchored ones made fifteen real objections invisible to the agent
+        # that exists to answer them — the pull request carried a review and the
+        # board said nothing was unresolved.
+        bodies = [
+            {
+                "author": str((r.get("user") or {}).get("login") or ""),
+                "path": "",
+                "line": None,
+                "body": str(r.get("body") or "")[:2000],
+                "url": str(r.get("html_url") or ""),
+            }
+            for r in reviews
+            if str(r.get("body") or "").strip()
+        ]
+        items_and_bodies = bodies + [
+            {
+                "author": str((c.get("user") or {}).get("login") or ""),
+                "path": str(c.get("path") or ""),
+                "line": c.get("line") or c.get("original_line"),
+                "body": str(c.get("body") or "")[:2000],
+                "url": str(c.get("html_url") or ""),
+            }
+            for c in items
+        ]
         out += [
-            ob(subject, "review_comments", str(len(items))),
+            ob(subject, "review_comments", str(len(items_and_bodies))),
             ob(subject, "review_error", None),
             # The bodies, capped. This is what an agent asked to address them
             # would be given, and what the dashboard shows without a round trip
@@ -190,20 +219,7 @@ class Pulls:
             ob(
                 subject,
                 "review_threads",
-                json.dumps(
-                    [
-                        {
-                            "author": str((c.get("user") or {}).get("login") or ""),
-                            "path": str(c.get("path") or ""),
-                            "line": c.get("line") or c.get("original_line"),
-                            "body": str(c.get("body") or "")[:2000],
-                            "url": str(c.get("html_url") or ""),
-                        }
-                        for c in items[:20]
-                    ]
-                )
-                if items
-                else None,
+                json.dumps(items_and_bodies[:20]) if items_and_bodies else None,
             ),
         ]
         return out
