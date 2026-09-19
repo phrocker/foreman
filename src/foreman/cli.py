@@ -40,7 +40,7 @@ from .runner import (
     reject_action,
     verify_applied,
 )
-from .skills import track_records
+from .skills import merge_label, merge_rate, track_records
 from .store import default_db, open_store
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
@@ -510,6 +510,17 @@ def skills_cmd(db: Path = typer.Option(None, "--db")) -> None:
     """
     with open_store(db) as store:
         records = track_records(store)
+        # Only for skills that deliver a change. Merge rate is the track record
+        # that can honestly exist for agent-authored work, where the trust
+        # ladder cannot: two features are never equivalent, so a class of
+        # "write a feature" would accumulate approvals while every instance was
+        # novel. This never converts into permission to act — it is evidence
+        # for a person deciding whether to keep pressing the button.
+        merged = {}
+        for record in records:
+            hit, decided = merge_rate(store, record.skill)
+            if decided or hit:
+                merged[record.skill] = merge_label(hit, decided)
     if not records:
         console.print(
             "[dim]No skill has been dispatched yet. `foreman audit` records what "
@@ -517,7 +528,16 @@ def skills_cmd(db: Path = typer.Option(None, "--db")) -> None:
         )
         return
     table = Table(box=None, pad_edge=False)
-    for col in ("skill", "runs", "spent", "per run", "findings", "per finding", "acted on"):
+    for col in (
+        "skill",
+        "runs",
+        "spent",
+        "per run",
+        "findings",
+        "per finding",
+        "acted on",
+        "merged",
+    ):
         table.add_column(col)
     for record in records:
         # Unmeasured is printed as a word, never as 0%: a skill nobody has
@@ -538,6 +558,10 @@ def skills_cmd(db: Path = typer.Option(None, "--db")) -> None:
             str(record.findings),
             f"${per_useful:.2f}" if per_useful is not None else "—",
             standing,
+            # Blank rather than "unmeasured" for a skill that does not push
+            # anything. `/seo-audit` has no merge rate and never will; printing
+            # a word there invites the question of when it will have one.
+            merged.get(record.skill, ""),
         )
     console.print(table)
 

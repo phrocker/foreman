@@ -44,6 +44,10 @@ FOUND_BY = "found_by"
 # deterministic check" is a question about the rule, and answering it by
 # walking to some finding and back would depend on which finding you picked.
 FROM_SKILL = "from_skill"
+# A dispatched run to the pull request it pushed a commit to. Written when
+# the push succeeds, because this is the edge a merge rate is computed over
+# and a run that pushed nothing has nothing to be merged.
+REVISED = "revised"
 CONCERNS = "concerns"
 # A plan and what it is about. `covers` is the edge that makes "what is planned
 # for this domain" a walk rather than a scan of every plan's subject list.
@@ -203,6 +207,21 @@ def skill_run_edges(run_id: int, skill: str, project: str, connector: str) -> li
         (node("skill", skill), RAN, run_node),
         (run_node, AUDITED, node("project", project)),
         (run_node, RAN_VIA, node("connector", connector)),
+    ]
+
+
+def revision_edges(run_id: int, project: str, slug: str, number: str | int) -> list[Edge]:
+    """One `revise` run to the pull request it pushed to.
+
+    The edge merge rate is computed over. It has to be written here rather than
+    inferred later because the pull request stops being observable the moment it
+    closes — `pulls` lists open ones and the runner retracts the rest — and a
+    merged revision that left no trace is exactly the one worth counting.
+    """
+    run_node = node("run", run_id)
+    return [
+        (run_node, REVISED, node("pull", f"{slug}#{number}")),
+        (run_node, AUDITED, node("project", project)),
     ]
 
 

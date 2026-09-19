@@ -44,7 +44,7 @@ from .budget import Budget
 from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import DeliveryError, default_branch
-from .graph import skill_run_edges
+from .graph import revision_edges, skill_run_edges
 from .store import Store
 
 # Long enough for a real change with a build in front of it, and short enough
@@ -264,6 +264,10 @@ async def address_review(
         # Named explicitly, and never with --force. The remote refusing a
         # non-fast-forward is the backstop for every way this could be wrong.
         _git(work, "push", "origin", f"{branch}:{branch}")
+        # Written on success only, and written now rather than worked out later:
+        # this pull request stops being observable the moment it closes, and a
+        # revision that merged and left no trace is the one worth counting.
+        store.relate(revision_edges(run_id, project.id, slug, facts.get("number") or ""))
         log(f"{project.id}: pushed {len(files)} file(s) to {branch}")
         return Result(True, files, revision, spent)
     finally:

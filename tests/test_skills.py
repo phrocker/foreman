@@ -391,3 +391,74 @@ def test_the_page_is_told_unmeasured_apart_from_the_score(tmp_path):
     assert row["standing"] == pytest.approx(0.5)
     assert row["precision"] == "unmeasured"
     assert row["cost_per_acted_finding"] is None
+
+
+# --- merge rate: the track record that can honestly exist -------------------
+
+
+def _revised(store, run_id, number, project="p"):
+    from foreman.graph import revision_edges, skill_run_edges
+
+    store.relate(skill_run_edges(run_id, "revise", project, "fake"))
+    store.relate(revision_edges(run_id, project, "o/r", number))
+
+
+def _pr_event(project, number, *, merged, state="closed", at="2026-09-01T00:00:00+00:00"):
+    from foreman.models import Event
+
+    return Event(
+        project=project,
+        kind="pr",
+        ref=str(number),
+        at=at,
+        fields={"merged": "true" if merged else "false", "state": state},
+    )
+
+
+def test_merge_rate_counts_only_pull_requests_that_were_decided(tmp_path):
+    """A revision pushed this morning is not evidence of anything yet. Leaving
+    it in the denominator makes every new skill look bad and every abandoned one
+    look good."""
+    from foreman.skills import merge_rate
+    from foreman.store import SqliteStore
+
+    with SqliteStore(tmp_path / "t.db") as store:
+        for run, number in ((1, "10"), (2, "11"), (3, "12")):
+            _revised(store, run, number)
+        store.record_events(
+            [
+                _pr_event("p", 10, merged=True),
+                _pr_event("p", 11, merged=False),
+                # 12 is still open: no event says closed, so it is neither.
+                _pr_event("p", 12, merged=False, state="open"),
+            ]
+        )
+        assert merge_rate(store) == (1, 2)
+
+
+def test_a_skill_that_has_pushed_nothing_is_unmeasured(tmp_path):
+    """Unmeasured is the absence of a score, not a low one. Rendering it as 0%
+    would read as "never merged" — the opposite of the truth."""
+    from foreman.skills import merge_label, merge_rate
+    from foreman.store import SqliteStore
+
+    with SqliteStore(tmp_path / "t.db") as store:
+        assert merge_rate(store) == (0, 0)
+        assert merge_label(0, 0) == "unmeasured"
+
+
+def test_the_latest_word_on_a_pull_request_wins(tmp_path):
+    """A pull request that was closed and then reopened and merged has merged.
+    Reading the first event would keep it counted against the skill forever."""
+    from foreman.skills import merge_rate
+    from foreman.store import SqliteStore
+
+    with SqliteStore(tmp_path / "t.db") as store:
+        _revised(store, 1, "10")
+        store.record_events(
+            [
+                _pr_event("p", 10, merged=False, at="2026-09-01T00:00:00+00:00"),
+                _pr_event("p", 10, merged=True, at="2026-09-05T00:00:00+00:00"),
+            ]
+        )
+        assert merge_rate(store) == (1, 1)

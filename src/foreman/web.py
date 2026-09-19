@@ -47,7 +47,7 @@ from .runner import (
     propose_actions,
     reject_action,
 )
-from .skills import TrackRecord, track_records
+from .skills import TrackRecord, merge_label, merge_rate, track_records
 from .skills import label as skill_label
 from .store import Store, open_store
 from .work import open_pulls, pull_facts
@@ -745,6 +745,11 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "measured": record.measured,
             "standing": record.standing,
             "precision": skill_label(record),
+            # Present only for a skill that delivers a change. `/seo-audit` has
+            # no merge rate and never will; a null is how the page knows to
+            # print nothing rather than "unmeasured", which would read as a
+            # score not yet earned instead of a question that does not apply.
+            "merge_rate": None,
             "cost_per_run": record.cost_per_run,
             "findings_per_run": record.findings_per_run,
             "cost_per_acted_finding": record.cost_per_acted_finding,
@@ -763,7 +768,16 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         """
         s = store()
         try:
-            return [_skill_payload(record) for record in track_records(s)]
+            out = []
+            for record in track_records(s):
+                item = _skill_payload(record)
+                hit, decided = merge_rate(s, record.skill)
+                if decided or hit:
+                    item["merge_rate"] = merge_label(hit, decided)
+                    item["merged"] = hit
+                    item["merge_decided"] = decided
+                out.append(item)
+            return out
         finally:
             s.close()
 

@@ -1970,6 +1970,13 @@ function renderSkills() {
       </div>
       <div class="skill-facts">${esc(facts)}</div>
       <div class="skill-stand">${standing}</div>
+      ${k.merge_rate ? `<div class="skill-stand">
+        <span>${esc(k.merge_rate)} of the pull requests it opened were merged</span>
+        <span class="hint">A track record, never a threshold. Work like this can
+        never act unattended — two features are never equivalent, so approvals
+        for it would measure nothing. This measures the skill, not the change:
+        a high rate on trivial revisions says nothing about the one that
+        mattered.</span></div>` : ""}
       ${breakdown("Where it ran", k.projects)}
       ${breakdown("What ran it", k.connectors)}
     </div>`;

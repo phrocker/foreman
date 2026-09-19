@@ -21,11 +21,12 @@ anything about quality at all.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .graph import RAN, YIELDED, key_of, node
+from .graph import RAN, REVISED, YIELDED, key_of, node
 from .precision import score
 from .store import Store
 
@@ -101,6 +102,91 @@ class TrackRecord:
         be evidence.
         """
         return self.cost_usd / self.acted if self.acted else None
+
+
+# What a pull request a revision touched ended up as. `open` is deliberately not
+# a third outcome to average — it is the absence of one.
+MERGED, CLOSED, UNDECIDED = "merged", "closed", "open"
+# How far back to read the event log for a pull request outcome. Generous:
+# these are cheap rows and a revision merged three months ago still counts.
+EVENT_SCAN = 5000
+
+
+def _outcome(events: Sequence[Mapping[str, Any]], ref: str) -> str:
+    """What became of one pull request, from the retained event log.
+
+    Read from history rather than from GitHub because the answer has to survive
+    the pull request closing, and `pulls` only ever lists open ones. The log
+    already records `merged` on every pull-request event, so this costs a range
+    scan rather than an API call.
+    """
+    seen = [e for e in events if str(e.get("kind")) == "pr" and str(e.get("ref")) == ref]
+    if not seen:
+        return UNDECIDED
+    latest = max(seen, key=lambda e: str(e.get("at") or ""))
+    # `fields` crosses the store as JSON text. Both stores return it that way,
+    # and treating it as a mapping fails on a string's missing `.get` rather
+    # than quietly reporting every pull request as undecided — which is the
+    # better failure, and is how this was caught.
+    raw = latest.get("fields")
+    if isinstance(raw, str):
+        try:
+            fields = json.loads(raw or "{}")
+        except ValueError:
+            fields = {}
+    else:
+        fields = raw or {}
+    if str(fields.get("merged")) == "true":
+        return MERGED
+    return CLOSED if str(fields.get("state")) == "closed" else UNDECIDED
+
+
+def merge_rate(store: Store, skill: str = "revise") -> tuple[int, int]:
+    """(merged, decided) across every pull request this skill pushed to.
+
+    The track record that can honestly exist for agent-authored change. The
+    trust ladder cannot: it rests on equivalence classes, and two features are
+    never equivalent, so a class of "write a feature" would accumulate approvals
+    while every instance was novel — a number that looked like earned trust and
+    measured nothing. Whether the work got merged is a real question about a
+    real population.
+
+    It never converts into permission to act. It is evidence for a person
+    deciding whether to keep pressing the button, which is a different thing
+    and has to stay one.
+
+    Only pull requests that reached a decision are counted. A revision pushed
+    this morning is not evidence of anything yet, and leaving it in the
+    denominator makes every new skill look bad and every abandoned one look
+    good. Closed-unmerged counts against; still open counts as neither.
+
+    One caution worth keeping next to the number: this measures the *skill*,
+    not the change. A high rate on trivial revisions says nothing about the one
+    that mattered.
+    """
+    runs = store.neighbors([node("skill", skill)], [RAN], hops=1)
+    pulls = store.neighbors(runs, [REVISED], hops=1) if runs else []
+    if not pulls:
+        return (0, 0)
+
+    events = store.events(limit=EVENT_SCAN)
+    merged = decided = 0
+    for pull in pulls:
+        # `<owner>/<repo>#<number>`; the event log keys on the number.
+        _, _, number = key_of(pull).partition("#")
+        outcome = _outcome(events, number)
+        if outcome == UNDECIDED:
+            continue
+        decided += 1
+        merged += outcome == MERGED
+    return (merged, decided)
+
+
+def merge_label(merged: int, decided: int) -> str:
+    """How a merge rate reads to a person, in the same words precision uses."""
+    if not decided:
+        return "unmeasured"
+    return f"{merged / decided:.0%} of {decided}"
 
 
 def label(record: TrackRecord) -> str:
