@@ -327,6 +327,9 @@
   .chip.wait { border-color: var(--low);    color: var(--low); }
   .link-ish { background: none; border: 0; color: var(--accent); cursor: pointer;
               padding: 0; font: inherit; text-decoration: underline; }
+  .answered { border-left: 3px solid var(--accent); padding: 8px 12px; margin-bottom: 10px;
+              color: var(--text-2); font-size: 0.93em; }
+  .answered a { color: var(--accent); }
   .sig { display: flex; gap: 16px; align-items: baseline; padding: 14px 16px;
          border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
   .sig-blocked { border-left: 3px solid var(--medium); }
@@ -2500,7 +2503,19 @@ function renderFindings() {
               siblingsOf(f).length ? ` (with ${siblingsOf(f).length} more)` : ""}</button>` : ""}
           <span class="decide-note">Either answer teaches the rule whether it earns its keep.</span>
         </div>`;
+    // A pull request already answers this. Agent findings are never retired by
+    // a sweep — they cost money and a nightly run must not delete them — so a
+    // finding somebody has already fixed looked exactly like one nobody had
+    // touched, and the only way to know was to remember dispatching it.
+    const answered = (f.answered_by || []).map((ref) => {
+      const [slug, number] = String(ref).split("#");
+      return `<a href="https://github.com/${esc(slug)}/pull/${esc(number)}"
+                 target="_blank" rel="noopener">${esc(slug)}#${esc(number)}</a>`;
+    }).join(", ");
     const detail = open ? `<tr class="detail"><td colspan="4"><div class="detail-inner">
+        ${answered ? `<div class="answered">An agent opened ${answered} against this. If it has
+          merged, close this with <strong>I fixed this</strong> — a sweep will not, because a
+          finding an agent produced is never retired by one.</div>` : ""}
         ${f.detail ? `<p>${esc(f.detail)}</p>` : ""}
         <div class="rule-tag">${esc(f.rule)}</div>
         <ul class="subjects">${f.subjects.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>

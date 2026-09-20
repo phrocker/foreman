@@ -48,6 +48,11 @@ FROM_SKILL = "from_skill"
 # the push succeeds, because this is the edge a merge rate is computed over
 # and a run that pushed nothing has nothing to be merged.
 REVISED = "revised"
+# A finding to the pull request opened to answer it. Written when the pull
+# request is opened, because that is the only moment both are in hand — and
+# without it a finding an agent has already fixed looks exactly like one
+# nobody has touched, which is how the same work gets dispatched twice.
+ANSWERED_BY = "answered_by"
 CONCERNS = "concerns"
 # A plan and what it is about. `covers` is the edge that makes "what is planned
 # for this domain" a walk rather than a scan of every plan's subject list.
@@ -207,6 +212,21 @@ def skill_run_edges(run_id: int, skill: str, project: str, connector: str) -> li
         (node("skill", skill), RAN, run_node),
         (run_node, AUDITED, node("project", project)),
         (run_node, RAN_VIA, node("connector", connector)),
+    ]
+
+
+def fix_edges(findings: Iterable[Any], slug: str, number: str | int) -> list[Edge]:
+    """Each finding to the pull request that answers it.
+
+    The gap somebody hit within a day: an agent fixed a stale-IRS-limits
+    finding, the pull request merged, and the board went on showing the finding
+    with nothing to say about it. Agent findings are never retired by a sweep —
+    they cost money and a nightly run must not delete them — so the only way to
+    know the work happened was to remember dispatching it.
+    """
+    pull = node("pull", f"{slug}#{number}")
+    return [
+        (node("finding", int(row["id"])), ANSWERED_BY, pull) for row in findings if row.get("id")
     ]
 
 

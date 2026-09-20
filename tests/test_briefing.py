@@ -102,3 +102,44 @@ def test_the_validator_is_deliberately_not_briefed():
         n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_validate"
     )
     assert "briefing" not in ast.get_source_segment(source, validate)
+
+
+# --- a finding an agent already fixed ---------------------------------------
+
+
+def test_a_fix_records_which_findings_its_pull_request_answers():
+    """Within a day of shipping the fix loop somebody asked why a finding was
+    still there after the pull request had merged.
+
+    Agent findings are never retired by a sweep — they cost money and a nightly
+    run must not delete them — so one already fixed looked exactly like one
+    nobody had touched, and the only way to know was to remember dispatching it.
+    """
+    from foreman.graph import ANSWERED_BY, fix_edges, node
+
+    edges = fix_edges([{"id": 1}, {"id": 2}], "o/r", 617)
+    assert edges == [
+        (node("finding", 1), ANSWERED_BY, node("pull", "o/r#617")),
+        (node("finding", 2), ANSWERED_BY, node("pull", "o/r#617")),
+    ]
+
+
+def test_a_finding_with_no_id_is_not_edged_to_anything():
+    """A proposal built from a rule that fired without a stored finding has no
+    id, and an edge from `finding|None` names nothing."""
+    from foreman.graph import fix_edges
+
+    assert fix_edges([{"summary": "no id here"}], "o/r", 1) == []
+
+
+def test_a_pull_request_url_is_parsed_rather_than_assumed():
+    """The forge decides this format and a mis-parse writes an edge to a node
+    nothing else names."""
+    from foreman.config import GitHubSurface, Project
+    from foreman.fix import _pull_ref
+
+    project = Project(id="p", name="P", github=GitHubSurface(owner="o", repo="r"))
+    assert _pull_ref(project, "https://github.com/o/r/pull/617") == ("o/r", "617")
+    # A delivery that returned something else gets an empty number, and the
+    # caller writes no edge rather than a wrong one.
+    assert _pull_ref(project, "some-branch-name")[1] == ""

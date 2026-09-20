@@ -38,7 +38,7 @@ from .budget import Budget
 from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import branch_name, default_branch, open_pull_request
-from .graph import skill_run_edges
+from .graph import fix_edges, skill_run_edges
 from .memory import briefing
 from .progress import Progress, beating
 from .revise import Result, _git, worktree
@@ -292,6 +292,19 @@ def _in_flight(store: Store, project: Project) -> str:
     )
 
 
+def _pull_ref(project: Project, url: str) -> tuple[str, str]:
+    """`(slug, number)` from a pull request URL, or an empty number if it is not
+    one. The forge decides this format and a mis-parse would write an edge to a
+    node nothing else names."""
+    import re as _re
+
+    match = _re.search(r"/([^/]+/[^/]+)/pull/(\d+)", url or "")
+    if match:
+        return match.group(1), match.group(2)
+    slug = project.github.slug if project.github else ""
+    return slug, ""
+
+
 async def build_issue(
     project: Project,
     store: Store,
@@ -491,6 +504,14 @@ async def fix_findings(
             _git(work, "commit", "-m", f"{fix.summary}\n\n{fix.explanation}".strip())
             _git(work, "push", "origin", f"{branch}:{branch}")
             url = open_pull_request(work, branch, fix.summary, body, base)
+            # Written now because this is the only moment the findings and the
+            # pull request are both in hand. Without it a finding an agent has
+            # already fixed looks exactly like one nobody has touched — agent
+            # findings are never retired by a sweep, so the board had nothing to
+            # say about work that had merged.
+            slug, number = _pull_ref(project, url)
+            if number:
+                store.relate(fix_edges(findings, slug, number))
             log(f"{project.id}: opened {url}")
             return Result(True, files, fix, spent, url)
     finally:

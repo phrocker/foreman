@@ -31,7 +31,7 @@ from .connectors import describe as describe_connectors
 from .diff import project_drift
 from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
 from .fix import build_issue, deliver_research, fix_findings
-from .graph import MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
+from .graph import ANSWERED_BY, MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import describe
 from .models import Observation, utcnow
 from .plans import CONFIRM_PREFIX, plan_progress
@@ -208,6 +208,19 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "last_run": max((p_["last_run"] or "" for p_ in projects), default=None) or None,
         }
 
+    def _answered(s: Store, rows: list[dict[str, Any]]) -> None:
+        """Note which findings already have a pull request against them.
+
+        Agent findings are never retired by a sweep — they cost money and a
+        nightly run must not delete them — so a finding an agent has already
+        fixed looked exactly like one nobody had touched. Somebody merged the
+        pull request that answered one and the board had nothing to say about
+        it, which is a fair reason to ask whether the tool is working.
+        """
+        for row in rows:
+            answered = s.neighbors([node("finding", int(row["id"]))], [ANSWERED_BY])
+            row["answered_by"] = [key_of(n) for n in answered]
+
     @app.get("/api/findings")
     def findings(
         project: str | None = Query(None), severity: str | None = Query(None)
@@ -241,6 +254,11 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             item["precision"] = precision_label(row, scores)
             item["also_on"] = len(elsewhere.get(row["rule"], set()) - {row["project"]})
             out.append(item)
+        s2 = store()
+        try:
+            _answered(s2, out)
+        finally:
+            s2.close()
         return out
 
     @app.get("/api/findings/{finding_id}")
