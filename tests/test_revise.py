@@ -577,3 +577,109 @@ async def test_a_first_branch_is_told_it_is_the_only_one(world, monkeypatch):
         connectors=[agent],
     )
     assert "the only open branch" in agent.seen[0].instructions
+
+
+# --- making sure a comment is answered --------------------------------------
+
+
+def _threads(n=3):
+    return [
+        {"id": f"PRRT_{i}", "path": "a.go", "line": i, "body": f"objection {i}"}
+        for i in range(1, n + 1)
+    ]
+
+
+def test_an_answered_comment_is_replied_to_and_resolved(monkeypatch):
+    """The mechanism whose absence cost a run: a revision pushed a commit and
+    said nothing on the threads it had addressed, so five answered objections
+    read as open and the next dispatch was sent to re-fix correct code."""
+    from foreman import adversary
+    from foreman.revise import Addressed, Revision, _answer_threads
+
+    calls = []
+    monkeypatch.setattr(
+        adversary,
+        "answer_thread",
+        lambda tid, body, resolve: calls.append((tid, body, resolve)) or True,
+    )
+    _answer_threads(
+        _threads(2),
+        Revision(summary="s", addressed=[Addressed(thread=1, what="enforced it at load")]),
+        lambda _: None,
+    )
+
+    assert calls[0][0] == "PRRT_1"
+    assert "enforced it at load" in calls[0][1]
+    assert calls[0][2] is True, "an answered thread is resolved"
+
+
+def test_a_declined_comment_gets_a_reason_and_stays_open(monkeypatch):
+    """A thread considered and rejected is more useful with a reason on it than
+    silent — and it must not be closed over a complaint that still stands."""
+    from foreman import adversary
+    from foreman.revise import Declined, Revision, _answer_threads
+
+    calls = []
+    monkeypatch.setattr(
+        adversary,
+        "answer_thread",
+        lambda tid, body, resolve: calls.append((tid, body, resolve)) or True,
+    )
+    _answer_threads(
+        _threads(1),
+        Revision(summary="s", declined=[Declined(thread=1, why="this belongs in #2")]),
+        lambda _: None,
+    )
+
+    assert "this belongs in #2" in calls[0][1]
+    assert calls[0][2] is False
+
+
+def test_a_comment_in_neither_list_is_said_out_loud(monkeypatch):
+    """Silence is how the operator discovers a skipped comment by watching the
+    next dispatch be handed it as though it were new."""
+    from foreman import adversary
+    from foreman.revise import Revision, _answer_threads
+
+    calls = []
+    monkeypatch.setattr(
+        adversary,
+        "answer_thread",
+        lambda tid, body, resolve: calls.append((tid, body, resolve)) or True,
+    )
+    _answer_threads(_threads(1), Revision(summary="s"), lambda _: None)
+
+    assert "did not say whether it acted" in calls[0][1]
+    assert calls[0][2] is False
+
+
+def test_resolution_follows_the_claim_not_the_diff(monkeypatch):
+    """ "I changed this file" is not "and that answers this objection", and the
+    gap between them is where a thread gets closed over a live complaint."""
+    from foreman import adversary
+    from foreman.revise import Addressed, Revision, _answer_threads
+
+    resolved = []
+    monkeypatch.setattr(
+        adversary,
+        "answer_thread",
+        lambda tid, body, resolve: resolved.append((tid, resolve)) or True,
+    )
+    _answer_threads(
+        _threads(3),
+        Revision(summary="s", addressed=[Addressed(thread=2, what="done")]),
+        lambda _: None,
+    )
+
+    assert [r for t, r in resolved] == [False, True, False]
+
+
+def test_the_unresolved_list_is_preferred_over_every_comment_ever_left():
+    """REST has no notion of resolution, so it hands over comments a previous
+    run already answered — which is how a revision comes to re-fix working
+    code."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "src" / "foreman" / "revise.py").read_text()
+    line = next(l for l in source.splitlines() if "open_threads" in l and "_threads(" in l)
+    assert line.index("open_threads") < line.index("review_threads")

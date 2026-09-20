@@ -166,7 +166,14 @@ class Pulls:
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
           reviewThreads(first: 100) {
-            nodes { isResolved isOutdated }
+            nodes {
+              id
+              isResolved
+              isOutdated
+              comments(first: 1) {
+                nodes { path line originalLine body author { login } url }
+              }
+            }
           }
         }
       }
@@ -196,12 +203,39 @@ class Pulls:
         threads = [t for t in (nodes.get("nodes") or []) if isinstance(t, dict)]
         resolved = sum(1 for t in threads if t.get("isResolved"))
         outdated = sum(1 for t in threads if t.get("isOutdated") and not t.get("isResolved"))
+
+        # The unresolved ones, with the id a reply and a resolve both need. This
+        # replaces the REST-derived list: `pulls/{n}/comments` has no notion of
+        # resolution, so an agent sent to answer review comments was handed
+        # every comment ever left — including ones it had itself answered on a
+        # previous run, which is how a revision comes to re-fix working code.
+        open_threads = []
+        for thread in threads:
+            if thread.get("isResolved"):
+                continue
+            first = ((thread.get("comments") or {}).get("nodes") or [{}])[0]
+            open_threads.append(
+                {
+                    "id": thread.get("id"),
+                    "author": str((first.get("author") or {}).get("login") or ""),
+                    "path": str(first.get("path") or ""),
+                    "line": first.get("line") or first.get("originalLine"),
+                    "body": str(first.get("body") or "")[:2000],
+                    "url": str(first.get("url") or ""),
+                    "outdated": bool(thread.get("isOutdated")),
+                }
+            )
         return [
             ob(subject, "threads", str(len(threads))),
             ob(subject, "threads_resolved", str(resolved)),
             ob(subject, "threads_outdated", str(outdated)),
             ob(subject, "threads_open", str(len(threads) - resolved - outdated)),
             ob(subject, "threads_error", None),
+            ob(
+                subject,
+                "open_threads",
+                json.dumps(open_threads[:30]) if open_threads else None,
+            ),
         ]
 
     async def _checks(self, slug: str, pull: dict, subject: str, ob) -> list[Observation]:

@@ -459,3 +459,59 @@ def diff_of(repo: Any, base: str, branch: str) -> str:
 
 def as_json(findings: Sequence[Finding]) -> str:
     return json.dumps([f.model_dump(mode="json") for f in findings])
+
+
+REPLY = """
+mutation($thread: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(
+    input: { pullRequestReviewThreadId: $thread, body: $body }
+  ) { clientMutationId }
+}
+"""
+
+RESOLVE = """
+mutation($thread: ID!) {
+  resolveReviewThread(input: { threadId: $thread }) {
+    thread { isResolved }
+  }
+}
+"""
+
+
+def answer_thread(thread_id: str, body: str, *, resolve: bool) -> bool:
+    """Reply to one review thread, and close it if it was actually answered.
+
+    The mechanism that was missing, and its absence cost real money. A revision
+    pushed a commit and said nothing on the threads it had addressed, so five
+    answered objections on #9 read as open — GitHub only marks a thread
+    outdated when the anchored line itself moves, and these fixes landed thirty
+    lines below. The next dispatch was then handed those same five and sent to
+    re-fix code that was already correct.
+
+    Resolving is claimed by the agent rather than inferred from the diff. An
+    agent that says "I changed this file" has not said "and that answers this
+    objection", and the gap between those two is exactly where a thread gets
+    closed over a complaint that still stands. So the caller passes `resolve`
+    only for threads the agent named as answered.
+
+    A reply is left either way. A thread that was considered and declined is
+    more useful open with a reason on it than open and silent.
+    """
+    try:
+        _graphql(REPLY, thread=thread_id, body=body)
+        if resolve:
+            _graphql(RESOLVE, thread=thread_id)
+    except GitHubError:
+        # The commit is pushed and the work is done. Failing to annotate it is
+        # worth reporting and is not worth undoing anything for.
+        return False
+    return True
+
+
+def _graphql(query: str, **variables: str) -> None:
+    args = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for name, value in variables.items():
+        args += ["-f", f"{name}={value}"]
+    proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise GitHubError(proc.stderr.strip()[:300] or "gh api graphql failed")

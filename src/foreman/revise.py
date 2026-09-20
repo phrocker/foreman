@@ -96,20 +96,37 @@ answer. A plausible change nobody asked for is not.
 
 `summary` is one or two sentences: what you changed, in the reviewer's terms.
 
-`addressed` is one entry per comment you acted on, naming the file and what you
-did about it.
+`addressed` is one entry per comment you acted on: its **number**, the file, and
+what you did about it.
 
-`declined` is one entry per comment you deliberately did not act on, with the
-reason. Leave it empty rather than padding it.
+`declined` is one entry per comment you deliberately did not act on: its
+**number** and the reason.
+
+**Every comment must appear in one list or the other.** A comment you answered
+is marked resolved on the pull request and stops being shown to the next agent;
+one you declined stays open with your reason on it. A comment in neither list
+is one nobody can tell you looked at, and it will be handed to the next
+dispatch as though it were new — which has already cost one run re-fixing code
+that was already correct.
+
+If a comment is asking for something that has since been done — by an earlier
+revision, or on the base branch — say so in `addressed` with that as the
+reason. That is an answer, and it is the one that stops the loop.
 """
 
 
 class Addressed(BaseModel):
+    # Which comment this answers, as numbered in the prompt. Required because
+    # the alternative is inferring it from the diff, and "I changed this file"
+    # is not "and that answers this objection" — the gap between those two is
+    # exactly where a thread gets closed over a complaint that still stands.
+    thread: int = 0
     path: str = ""
     what: str
 
 
 class Declined(BaseModel):
+    thread: int = 0
     path: str = ""
     why: str
 
@@ -172,13 +189,63 @@ def _threads(raw: str | None) -> list[dict]:
 
 
 def _render(threads: Sequence[dict]) -> str:
+    """The comments, numbered, because the answer has to name which one.
+
+    Numbered from one and in the order given, so the agent and the caller agree
+    without either holding an opaque id.
+    """
     out = []
-    for thread in threads:
+    for index, thread in enumerate(threads, start=1):
         where = thread.get("path") or "(no file)"
         if thread.get("line"):
             where += f":{thread['line']}"
-        out.append(f"### {thread.get('author') or 'a reviewer'} on {where}\n\n{thread.get('body')}")
+        out.append(
+            f"### Comment {index} — {thread.get('author') or 'a reviewer'} on {where}\n\n"
+            f"{thread.get('body')}"
+        )
     return "\n\n".join(out)
+
+
+def _answer_threads(threads: Sequence[dict], revision: Revision, log) -> None:
+    """Say on each thread what was done about it, and close the ones answered.
+
+    The mechanism whose absence cost a run. A revision pushed a commit and said
+    nothing on the threads it had addressed, so five answered objections read as
+    open — GitHub marks a thread outdated only when the anchored line itself
+    moves, and those fixes landed thirty lines below. The next dispatch was
+    handed the same five and sent to re-fix correct code.
+
+    Resolution follows what the agent claimed, never what the diff implies. A
+    declined comment gets a reply and stays open, because a thread considered
+    and rejected is more useful with a reason on it than silent.
+    """
+    from .adversary import answer_thread
+
+    answered = {a.thread: a for a in revision.addressed if a.thread}
+    declined = {d.thread: d for d in revision.declined if d.thread}
+    posted = closed = 0
+
+    for index, thread in enumerate(threads, start=1):
+        thread_id = str(thread.get("id") or "")
+        if not thread_id:
+            continue
+        if (item := answered.get(index)) is not None:
+            body, resolve = f"Addressed: {item.what}", True
+        elif (item := declined.get(index)) is not None:
+            body, resolve = f"Not changed: {item.why}", False
+        else:
+            # Neither list mentions it. Saying so out loud beats silence: the
+            # operator can see the agent skipped one rather than discovering it
+            # when the next dispatch is handed the same comment.
+            body, resolve = (
+                "Foreman's agent did not say whether it acted on this. Left open.",
+                False,
+            )
+        if answer_thread(thread_id, f"{body}\n\n_Foreman._", resolve=resolve):
+            posted += 1
+            closed += resolve
+    if posted:
+        log(f"replied to {posted} thread(s), resolved {closed}")
 
 
 async def address_review(
@@ -214,7 +281,11 @@ async def address_review(
 
     branch = str(facts.get("branch") or "")
     slug = str(facts.get("slug") or "")
-    threads = _threads(facts.get("review_threads"))
+    # The unresolved ones, when the collector could read them. `review_threads`
+    # comes from REST, which has no notion of resolution, so it hands over every
+    # comment ever left — including ones a previous run already answered, which
+    # is how a revision comes to re-fix working code.
+    threads = _threads(facts.get("open_threads")) or _threads(facts.get("review_threads"))
     if not branch:
         return Result(False, (), None, 0.0, "the pull request names no branch")
     if not threads:
@@ -310,6 +381,7 @@ async def address_review(
             # this pull request stops being observable the moment it closes, and a
             # revision that merged and left no trace is the one worth counting.
             store.relate(revision_edges(run_id, project.id, slug, facts.get("number") or ""))
+            _answer_threads(threads, revision, log)
             log(f"{project.id}: pushed {len(files)} file(s) to {branch}")
             return Result(True, files, revision, spent)
     finally:
