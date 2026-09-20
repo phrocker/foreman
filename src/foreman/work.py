@@ -61,6 +61,16 @@ def blocking(facts: dict[str, str | None]) -> str | None:
         return PENDING
     if str(facts.get("review")) == "changes_requested":
         return CHANGES
+    # Threads still pointing at live code, not every comment ever left. The
+    # comments endpoint counts a pull request whose objections have all been
+    # answered exactly the same as one nobody has touched, which made this
+    # board unable to say the thing an operator most wants to know.
+    #
+    # `threads` is absent on a pull request collected before this existed, or
+    # where the GraphQL read failed; the comment count is the fallback, and
+    # over-reporting is the right way to be wrong here.
+    if facts.get("threads") is not None:
+        return REVIEW if _int(facts.get("threads_open")) else None
     if _int(facts.get("review_comments")):
         return REVIEW
     return None
@@ -111,6 +121,16 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
                     "checks_failing": _int(facts.get("checks_failing")),
                     "review": facts.get("review") or "none",
                     "review_comments": _int(facts.get("review_comments")),
+                    # Three states, because `outdated` is the honest middle: the
+                    # code a thread points at has changed, which usually means
+                    # somebody answered it and sometimes means they moved the
+                    # line. Counting it resolved lets a revision clear a board
+                    # by editing around the complaint; counting it open leaves a
+                    # board that never goes green after real work.
+                    "threads_open": _int(facts.get("threads_open")),
+                    "threads_outdated": _int(facts.get("threads_outdated")),
+                    "threads_resolved": _int(facts.get("threads_resolved")),
+                    "threads": _int(facts.get("threads")),
                     "foreman": str(facts.get("foreman")) == "true",
                     "draft": str(facts.get("draft")) == "true",
                     "blocking": reason,
@@ -121,7 +141,11 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
                         target.repo
                         and target.repo.exists()
                         and facts.get("branch")
-                        and _int(facts.get("review_comments"))
+                        and (
+                            _int(facts.get("threads_open"))
+                            if facts.get("threads") is not None
+                            else _int(facts.get("review_comments"))
+                        )
                     ),
                     "created_at": facts.get("created_at") or "",
                 }

@@ -468,3 +468,48 @@ async def test_a_stewarded_project_is_refused_an_issue_build(world):
         connectors=[agent],
     )
     assert not result.pushed and "stewarded" in result.note and agent.seen == []
+
+
+# --- knowing when nothing is left to answer ---------------------------------
+
+
+def _pull_with(**facts):
+    from foreman.work import blocking
+
+    return blocking({"serving": "true", "checks": "passing", "draft": "false", **facts})
+
+
+def test_a_pull_request_whose_threads_are_all_answered_is_clear():
+    """The question this was built for: how do you know when no comments remain?
+
+    The comments endpoint counts a pull request whose objections have all been
+    answered exactly the same as one nobody has touched, so the board could
+    never say 'nothing left to do'.
+    """
+    assert _pull_with(threads="13", threads_open="0", threads_resolved="13") is None
+
+
+def test_an_open_thread_still_blocks():
+    from foreman.work import REVIEW
+
+    assert _pull_with(threads="13", threads_open="5", threads_outdated="8") == REVIEW
+
+
+def test_outdated_is_neither_open_nor_resolved():
+    """GitHub marks a thread outdated when the code it points at has changed —
+    usually because somebody answered it, sometimes because they moved the line.
+
+    Counting it resolved lets a revision clear a board by editing around the
+    complaint; counting it open leaves a board that never goes green after real
+    work. It is its own number and the reader decides.
+    """
+    assert _pull_with(threads="8", threads_open="0", threads_outdated="8") is None
+
+
+def test_a_pull_request_collected_before_threads_existed_falls_back():
+    """Over-reporting is the right way to be wrong here: a board that says there
+    is work when there is none costs a click, and the reverse costs a merge."""
+    from foreman.work import REVIEW
+
+    assert _pull_with(review_comments="3") == REVIEW
+    assert _pull_with(review_comments="0") is None

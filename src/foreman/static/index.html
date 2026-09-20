@@ -1515,6 +1515,21 @@ async function researchIssue(subject, button) {
   watchActivity();
 }
 
+/** Review threads in three states, because `outdated` is the honest middle.
+ *
+ *  GitHub marks a thread outdated when the code it points at has changed —
+ *  usually because somebody answered it, sometimes because they moved the line.
+ *  Calling that resolved lets a revision clear the board by editing around the
+ *  complaint; calling it open leaves a board that never goes green after real
+ *  work. So it is its own number and the reader decides. */
+function threadState(r) {
+  const parts = [];
+  if (r.threads_open) parts.push(`${r.threads_open} open`);
+  if (r.threads_outdated) parts.push(`${r.threads_outdated} outdated`);
+  if (r.threads_resolved) parts.push(`${r.threads_resolved} resolved`);
+  return parts.length ? parts.join(", ") + " of " + r.threads : `${r.threads} threads`;
+}
+
 function renderWork() {
   const rows = state.pulls.filter((r) => !state.project || r.project === state.project);
   const list = $("workList");
@@ -1538,7 +1553,8 @@ function renderWork() {
       <div class="work-meta">
         ${esc(r.project)} · ${esc(r.author)} · <code>${esc(r.branch)}</code> → <code>${esc(r.base)}</code>
         · checks ${esc(r.checks || "unknown")}${r.checks_failing ? ` (${r.checks_failing} failing)` : ""}
-        ${r.review_comments ? ` · ${r.review_comments} unresolved comment${r.review_comments === 1 ? "" : "s"}` : ""}
+        ${r.threads ? ` · ${threadState(r)}` : (r.review_comments
+            ? ` · ${r.review_comments} comment${r.review_comments === 1 ? "" : "s"}` : "")}
       </div>
       <div class="work-act">
         ${r.revisable ? `<button class="primary revise" data-subject="${esc(r.subject)}">Address comments</button>` : ""}

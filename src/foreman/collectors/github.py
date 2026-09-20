@@ -85,6 +85,37 @@ async def gh_api(path: str, *, paginate: bool = False) -> Any:
     return _api_parse(out.decode("utf-8", "replace").strip(), path, paginate=paginate)
 
 
+async def gh_graphql(query: str, **variables: Any) -> Any:
+    """One GraphQL query, parsed.
+
+    Here because REST cannot answer whether a review thread is resolved. The
+    comments endpoint returns every comment ever left, so a pull request whose
+    objections have all been answered counts exactly the same as one nobody has
+    touched — which made the board unable to say the thing an operator most
+    wants to know, that there is nothing left to do.
+    """
+    args = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for name, value in variables.items():
+        args += ["-F", f"{name}={value}"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+    except FileNotFoundError as exc:
+        raise GitHubError("the gh CLI is not installed") from exc
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_S)
+    except TimeoutError:
+        proc.kill()
+        raise GitHubError("gh api graphql timed out") from None
+    if proc.returncode != 0:
+        raise GitHubError(err.decode("utf-8", "replace").strip()[:200] or "gh graphql failed")
+    try:
+        return json.loads(out.decode("utf-8", "replace") or "{}")
+    except json.JSONDecodeError as exc:
+        raise GitHubError("gh graphql returned unparseable output") from exc
+
+
 def gh_api_blocking(path: str, *, paginate: bool = False) -> Any:
     """The same read, synchronously.
 

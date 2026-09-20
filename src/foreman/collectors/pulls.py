@@ -34,7 +34,7 @@ import json
 
 from ..config import Project
 from ..models import Observation
-from .github import GitHubError, gh_api
+from .github import GitHubError, gh_api, gh_graphql
 
 # GitHub answers mergeable_state with a vocabulary wider than the question. Only
 # the ones that change what an operator can do are kept apart; the rest collapse
@@ -157,6 +157,53 @@ class Pulls:
         out.extend(await self._review(slug, number, subject, ob))
         return out
 
+    # Resolution lives only in GraphQL. REST returns every comment ever left, so
+    # a pull request whose objections have all been answered counted the same as
+    # one nobody had touched — which is the one thing an operator most wants the
+    # board to be able to say.
+    THREADS = """
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100) {
+            nodes { isResolved isOutdated }
+          }
+        }
+      }
+    }
+    """
+
+    async def _threads(self, slug: str, number: int, subject: str, ob) -> list[Observation]:
+        """How many review threads are open, answered, or merely stale.
+
+        Three states rather than two, because `isOutdated` is the honest middle.
+        An outdated thread points at code that has since changed — usually
+        because somebody answered it — but GitHub marks it outdated whether the
+        change addressed the objection or merely moved the line. Counting it as
+        resolved would let a revision clear a board by editing around the
+        complaint; counting it as open would leave a board that never goes green
+        after any real work. It is its own number and the reader decides.
+        """
+        owner, _, name = slug.partition("/")
+        try:
+            payload = await gh_graphql(self.THREADS, owner=owner, name=name, number=int(number))
+        except (GitHubError, ValueError) as exc:
+            return [ob(subject, "threads_error", str(exc))]
+
+        nodes = (
+            ((payload.get("data") or {}).get("repository") or {}).get("pullRequest") or {}
+        ).get("reviewThreads") or {}
+        threads = [t for t in (nodes.get("nodes") or []) if isinstance(t, dict)]
+        resolved = sum(1 for t in threads if t.get("isResolved"))
+        outdated = sum(1 for t in threads if t.get("isOutdated") and not t.get("isResolved"))
+        return [
+            ob(subject, "threads", str(len(threads))),
+            ob(subject, "threads_resolved", str(resolved)),
+            ob(subject, "threads_outdated", str(outdated)),
+            ob(subject, "threads_open", str(len(threads) - resolved - outdated)),
+            ob(subject, "threads_error", None),
+        ]
+
     async def _checks(self, slug: str, pull: dict, subject: str, ob) -> list[Observation]:
         """What CI concluded about the head commit.
 
@@ -231,6 +278,7 @@ class Pulls:
             return out
 
         items = [c for c in (comments or []) if isinstance(c, dict)]
+        out += await self._threads(slug, number, subject, ob)
 
         # A review's own body counts as something to answer, not only the
         # comments anchored to lines. Foreman's adversarial review puts an
