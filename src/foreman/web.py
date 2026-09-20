@@ -30,7 +30,7 @@ from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import project_drift
 from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
-from .fix import build_issue, fix_findings
+from .fix import build_issue, deliver_research, fix_findings
 from .graph import MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import describe
 from .models import Observation, utcnow
@@ -41,6 +41,9 @@ from .precision import rank, rule_scores
 from .registry_edit import RegistryError, add_project, set_enabled
 from .registry_edit import projects as registry_projects
 from .report import write_report
+from .research import COUNTY_FACETS
+from .research import DEFAULT_CEILING_USD as RESEARCH_CEILING_USD
+from .research import research as run_research
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
 from .revise import _git, address_review
 from .runner import (
@@ -122,7 +125,7 @@ class Job:
 # that a dashboard refresh is not a burst somebody rate-limits.
 # Run kinds that cost money and are worth watching. The collectors a sweep
 # uses are not here: nobody wonders whether `tls` is still going.
-AGENT_RUNS = ("build", "fix", "revise", "review")
+AGENT_RUNS = ("build", "research", "fix", "revise", "review")
 
 STALENESS_WORKERS = 8
 
@@ -138,6 +141,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         "revise": Job(kind="revise"),
         "fix": Job(kind="fix"),
         "build": Job(kind="build"),
+        "research": Job(kind="research"),
         "review": Job(kind="review"),
     }
     job = jobs["sweep"]
@@ -1234,6 +1238,51 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     )
                     note(f"${outcome.cost_usd:.2f}")
                     if outcome.pushed:
+                        await refresh_pulls(project, st, note)
+                finally:
+                    st.close()
+            except Exception as exc:  # noqa: BLE001 — surfaced in the UI
+                finish(slot, f"{type(exc).__name__}: {exc}")
+            else:
+                finish(slot)
+
+        asyncio.create_task(work())
+        return slot.as_dict()
+
+    @app.post("/api/issues/research")
+    async def research_issue(subject: str = Query(...), about: str = Query("")) -> dict[str, Any]:
+        """Gather evidence for an issue that asks a question about the world.
+
+        Several agents gather on different facets, each returning claims that
+        carry a source; a separate agent then tries to knock each one down,
+        seeing only the claim and the source and never the reasoning. The
+        result is committed as a document and opened as a pull request, so the
+        evidence is reviewed the same way code is.
+
+        `about` names the subject researched — "Howard County HVAC" — because
+        the issue title says what to decide and not what to look at.
+        """
+        slot = start("research", subject)
+        note = note_to(slot)
+
+        async def work() -> None:
+            try:
+                st = store()
+                try:
+                    project, facts = issue_facts(st, load_registry(registry_path), subject)
+                    topic = about or facts.get("title") or subject
+                    result = await run_research(
+                        project.id,
+                        st,
+                        topic,
+                        COUNTY_FACETS,
+                        budget=Budget(RESEARCH_CEILING_USD),
+                        log=note,
+                    )
+                    url = deliver_research(project, st, facts, result, log=note)
+                    note(f"opened {url}" if url else "nothing stood up; no pull request opened")
+                    note(f"${result.cost_usd:.2f}")
+                    if url:
                         await refresh_pulls(project, st, note)
                 finally:
                     st.close()

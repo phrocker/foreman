@@ -1429,6 +1429,7 @@ function renderIssues() {
         esc((r.created_at || "").slice(0, 10))}${r.comments ? ` · ${r.comments} comment(s)` : ""}</div>
       ${r.buildable ? `<div class="work-act">
         <button class="primary build-it" data-subject="${esc(r.subject)}">Send an agent</button>
+        <button class="research-it" data-subject="${esc(r.subject)}">Research it</button>
         <span class="hint">One increment, on a branch, as a pull request you review. An issue that
         asks a question gets an answer and no code — a plausible decision written into a diff looks
         settled when it is not.</span>
@@ -1437,6 +1438,8 @@ function renderIssues() {
 
   list.querySelectorAll(".build-it").forEach((b) =>
     b.addEventListener("click", () => buildIssue(b.dataset.subject, b)));
+  list.querySelectorAll(".research-it").forEach((b) =>
+    b.addEventListener("click", () => researchIssue(b.dataset.subject, b)));
 }
 
 async function buildIssue(subject, button) {
@@ -1450,6 +1453,42 @@ async function buildIssue(subject, button) {
   button.disabled = true;
   const res = await fetch(`/api/issues/build?subject=${encodeURIComponent(subject)}`,
                           { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+    button.disabled = false;
+    return;
+  }
+  showTab("activity");
+  watchActivity();
+}
+
+/** Gather evidence for an issue that asks a question about the world.
+ *
+ *  Several agents gather on different facets, each claim carrying a source; a
+ *  separate agent then tries to knock each one down, seeing only the claim and
+ *  the source. The subject is asked for because an issue title says what to
+ *  decide and not what to look at. */
+async function researchIssue(subject, button) {
+  const about = prompt(
+    "What should be researched?\n\n" +
+    "The issue says what to decide; this says what to look at. " +
+    "For example: Howard County HVAC",
+  );
+  if (about === null) return;
+  if (!confirm(
+    `Research "${about || "the issue title"}"?\n\n` +
+    "Five agents gather on permits, local pricing, housing stock, who already " +
+    "ranks, and licensing — every claim needs a source. A sixth agent then " +
+    "checks each source actually says what was claimed, seeing only the claim " +
+    "and the link.\n\n" +
+    "What stands up is committed as a document and opened as a pull request. " +
+    "Rejected claims and gaps are kept in it — an agent asserting something " +
+    "its own source does not support is the most useful thing on the page."
+  )) return;
+  button.disabled = true;
+  const qs = `subject=${encodeURIComponent(subject)}&about=${encodeURIComponent(about || "")}`;
+  const res = await fetch(`/api/issues/research?${qs}`, { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     alert(body.detail || `Failed with ${res.status}`);

@@ -29,6 +29,7 @@ import asyncio
 import json
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -182,6 +183,60 @@ what you found that means it should not be done this way.
 
 `declined` is what you deliberately did not do, with the reason.
 """
+
+
+def deliver_research(
+    project: Project,
+    store: Store,
+    issue: dict[str, Any],
+    result: Any,
+    *,
+    log=lambda _: None,
+) -> str:
+    """Commit the evidence and open a pull request for it.
+
+    Evidence is reviewed the same way code is, and for the same reason: a
+    document asserting what permit costs in Howard County is going to be built
+    on, and the moment to disagree with it is before that. It lands as a file
+    rather than a comment so the next agent can read it.
+
+    Nothing is opened when nothing stood up. A pull request containing only
+    rejected claims and gaps says the research failed, which is worth knowing
+    and is not worth a branch — the log already said it.
+    """
+    from .research import as_markdown
+
+    if not result.stands:
+        return ""
+
+    number = str(issue.get("number") or "")
+    base = default_branch(project.repo)
+    branch = branch_name(f"research-{number}", int(number or 0))
+    path = Path("docs/research") / f"issue-{number}.md"
+
+    with worktree(project.repo, base) as work:
+        _git(work, "checkout", "-b", branch)
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(as_markdown(result))
+        _git(work, "add", "--", str(path))
+        summary = f"Evidence for #{number}: {result.subject}"
+        _git(work, "commit", "-m", summary)
+        _git(work, "push", "origin", f"{branch}:{branch}")
+        body = (
+            f"{len(result.stands)} claim(s) stood up to validation, "
+            f"{len(result.rejected)} were rejected by their own sources, and "
+            f"{len(result.gaps)} gap(s) were found.\n\n"
+            "Each claim was gathered by one agent and checked by another that saw only the "
+            "claim and its source, never the reasoning behind it. Rejected claims are kept in "
+            "the document rather than dropped: an agent asserting something its own source "
+            "does not support is the most useful thing on the page.\n\n"
+            f"The gaps are the recurring cost of this project stated plainly — facts that have "
+            f"to be bought or gathered by hand.\n\nRelates to #{number}."
+        )
+        url = open_pull_request(work, branch, summary, body, base)
+        log(f"{project.id}: evidence at {path}")
+        return url
 
 
 async def build_issue(
