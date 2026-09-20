@@ -155,6 +155,21 @@ elsewhere and untouched. Read what is already here first; a repository with a
 brief in it has already decided things, and contradicting them quietly is worse
 than asking.
 
+## What is already in flight
+
+{in_flight}
+
+**Your base does not contain any of it.** These branches are open pull requests
+that have not merged, so a decision made on one is invisible here unless you go
+and look — `git log origin/<branch>` and `git show origin/<branch> --stat` both
+work from this worktree.
+
+Look before you decide anything structural. A language, a schema, a directory
+layout, a name for a shared concept: if another open branch has already chosen
+one, follow it or say plainly why you are not. This exact gap has already cost
+this repository a second language — one issue was built in Go and the next in
+TypeScript, each correctly and neither able to see the other.
+
 Do what the issue asks and nothing else. An issue asking for one thing has not
 invited a refactor, and a diff carrying unrelated improvement takes longer to
 review and is likelier to be rejected whole.
@@ -239,6 +254,39 @@ def deliver_research(
         return url
 
 
+def _in_flight(store: Store, project: Project) -> str:
+    """Open pull requests on this project, for an agent about to cut a branch.
+
+    `pack.py` does this for dispatched audits and `build_issue` had nothing.
+    The cost was concrete: issue #3 was built in Go and issue #4 in TypeScript,
+    five hours apart, because the second agent's base contained only the brief —
+    #3 was still an open pull request and the language existed nowhere it could
+    see. Both agents were right on the evidence they had.
+
+    Titles and branches rather than diffs. The agent has a shell and a remote;
+    telling it where to look beats pasting a thousand lines it may not need,
+    and an agent that has been told a branch exists can decide for itself
+    whether its work overlaps.
+    """
+    from .work import open_pulls
+
+    class _One:
+        active = (project,)
+
+        def get(self, _):
+            return project
+
+    rows = [r for r in open_pulls(store, _One()) if r["project"] == project.id]
+    if not rows:
+        return "Nothing. Yours is the only open branch."
+    return "\n".join(
+        f"- **{r['slug']}#{r['number']}** — {r['title']}\n"
+        f"  branch `{r['branch']}`, opened by {r['author']}"
+        + (f", {r['threads_open']} unanswered review comment(s)" if r["threads_open"] else "")
+        for r in rows
+    )
+
+
 async def build_issue(
     project: Project,
     store: Store,
@@ -292,6 +340,7 @@ async def build_issue(
                     body=(issue.get("body") or "")[:8000],
                     branch=branch,
                     base=base,
+                    in_flight=_in_flight(store, project),
                 ),
                 schema=Fix,
                 needs=frozenset({REPO, SHELL}),

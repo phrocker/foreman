@@ -513,3 +513,67 @@ def test_a_pull_request_collected_before_threads_existed_falls_back():
 
     assert _pull_with(review_comments="3") == REVIEW
     assert _pull_with(review_comments="0") is None
+
+
+@pytest.mark.asyncio
+async def test_a_dispatched_agent_is_told_what_is_already_open(world, monkeypatch):
+    """The gap that cost this repository a second language.
+
+    Issue #3 was built in Go and issue #4 in TypeScript, five hours apart,
+    because the second agent's base contained only the brief — #3 was still an
+    open pull request and the language existed nowhere it could see. Both agents
+    were right on the evidence they had, which is the point: the evidence was
+    incomplete and nothing said so.
+    """
+    from foreman import fix as fixmod
+    from foreman.models import Observation
+
+    project, store = world
+    run = store.start_run(project.id, "pulls")
+    store.record(
+        run,
+        [
+            Observation(
+                project=project.id, collector="pulls", subject="pull:o/r#3", key=key, value=value
+            )
+            for key, value in (
+                ("url", "https://h.test/pull/3"),
+                ("title", "Property model in Go"),
+                ("branch", "foreman/issue-3-1"),
+                ("author", "phrocker"),
+            )
+        ],
+    )
+    store.finish_run(run, ok=True)
+
+    monkeypatch.setattr(fixmod, "open_pull_request", lambda *a: "u")
+    agent = _Agent(lambda work: (work / "x.ts").write_text("x\n"))
+    await fixmod.build_issue(
+        project,
+        store,
+        {"slug": "o/r", "number": "4", "title": "Lead model", "body": "build it"},
+        connectors=[agent],
+    )
+
+    prompt = agent.seen[0].instructions
+    assert "Property model in Go" in prompt
+    assert "foreman/issue-3-1" in prompt
+    assert "Your base does not contain any of it" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_first_branch_is_told_it_is_the_only_one(world, monkeypatch):
+    """Silence would read as "nothing to check". Saying so is one line and stops
+    an agent inventing a search."""
+    from foreman import fix as fixmod
+
+    project, store = world
+    monkeypatch.setattr(fixmod, "open_pull_request", lambda *a: "u")
+    agent = _Agent(lambda work: (work / "x.go").write_text("package main\n"))
+    await fixmod.build_issue(
+        project,
+        store,
+        {"slug": "o/r", "number": "1", "title": "t", "body": "b"},
+        connectors=[agent],
+    )
+    assert "the only open branch" in agent.seen[0].instructions
