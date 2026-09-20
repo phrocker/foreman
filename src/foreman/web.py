@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -153,6 +154,21 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         _abandoned = _opening.abandon_runs("abandoned: the server restarted")
     finally:
         _opening.close()
+
+    # A worktree is removed by the context manager that made it, which cannot
+    # run when the process is killed. Every restart that interrupted a dispatch
+    # therefore left a checkout in the temporary directory and a branch marked
+    # as checked out somewhere that no longer exists — enough of them that `git
+    # worktree list` stopped being readable. Pruning is git's own answer and it
+    # only forgets paths that are already gone.
+    for project in load_registry(registry_path).active:
+        if project.repo and project.repo.exists():
+            subprocess.run(
+                ["git", "-C", str(project.repo), "worktree", "prune"],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
 
     jobs: dict[str, Job] = {"sweep": Job(kind="sweep")}
     if _abandoned:

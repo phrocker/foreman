@@ -157,6 +157,51 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
+# A push is the one step whose failure destroys the run. Everything before it
+# can be redone cheaply; this one costs the whole dispatch.
+PUSH_ATTEMPTS = 3
+PUSH_TIMEOUT_S = 180
+
+
+def push(repo: Path, branch: str, log=lambda _: None) -> None:
+    """Push one branch, retrying a transient failure.
+
+    A revision of #14 timed out here after the agent had worked for eighty
+    seconds and committed. The push succeeded on a retry seconds later, so the
+    failure was transient — and without a retry a network hiccup throws away a
+    paid-for run at the last step.
+
+    The branch and the objects survive a lost push, because a worktree shares
+    the repository's object store: the ref is written before the push and stays
+    behind when the worktree goes. That is how that run was recovered by hand,
+    and it is worth knowing, but recovering by hand is not a plan.
+
+    Never forced. A retry that force-pushed would turn a slow network into an
+    overwrite of whatever arrived in between.
+    """
+    last = ""
+    for attempt in range(1, PUSH_ATTEMPTS + 1):
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "push", "origin", f"{branch}:{branch}"],
+            capture_output=True,
+            text=True,
+            timeout=PUSH_TIMEOUT_S,
+            check=False,
+        )
+        if proc.returncode == 0:
+            if attempt > 1:
+                log(f"pushed on attempt {attempt}")
+            return
+        last = (proc.stderr or proc.stdout).strip()[:300]
+        # A rejection is not transient. The remote has something this branch
+        # does not, and pushing again will be refused for the same reason —
+        # retrying would only delay saying so.
+        if "rejected" in last or "non-fast-forward" in last:
+            break
+        log(f"push attempt {attempt} failed: {last}")
+    raise DeliveryError(f"could not push {branch}: {last}")
+
+
 @contextmanager
 def worktree(repo: Path, start: str) -> Iterator[Path]:
     """A throwaway checkout at `start`, removed whatever happens.
@@ -409,7 +454,7 @@ async def address_review(
             )
             # Named explicitly, and never with --force. The remote refusing a
             # non-fast-forward is the backstop for every way this could be wrong.
-            _git(work, "push", "origin", f"{branch}:{branch}")
+            push(work, branch, log)
             # Written on success only, and written now rather than worked out later:
             # this pull request stops being observable the moment it closes, and a
             # revision that merged and left no trace is the one worth counting.

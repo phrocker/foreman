@@ -683,3 +683,64 @@ def test_the_unresolved_list_is_preferred_over_every_comment_ever_left():
     source = (Path(__file__).resolve().parents[1] / "src" / "foreman" / "revise.py").read_text()
     line = next(row for row in source.splitlines() if "open_threads" in row and "_threads(" in row)
     assert line.index("open_threads") < line.index("review_threads")
+
+
+# --- the one step whose failure destroys the run ----------------------------
+
+
+def test_a_transient_push_failure_is_retried(tmp_path, monkeypatch):
+    """A revision of #14 timed out pushing after the agent had worked for eighty
+    seconds and committed. The same push succeeded seconds later, so a network
+    hiccup was throwing away a paid-for run at its last step."""
+    from foreman import revise as rev
+
+    attempts = []
+
+    class _Proc:
+        def __init__(self, code, err=""):
+            self.returncode, self.stderr, self.stdout = code, err, ""
+
+    def flaky(cmd, **kwargs):
+        attempts.append(cmd)
+        return _Proc(0) if len(attempts) > 1 else _Proc(1, "ssh: connect timed out")
+
+    monkeypatch.setattr(rev.subprocess, "run", flaky)
+    said = []
+    rev.push(Path("/repo"), "foreman/x", said.append)
+
+    assert len(attempts) == 2
+    assert any("attempt 2" in line for line in said)
+
+
+def test_a_rejected_push_is_not_retried(tmp_path, monkeypatch):
+    """The remote has something this branch does not. Pushing again is refused
+    for the same reason, so retrying only delays saying so."""
+    from foreman import revise as rev
+    from foreman.delivery import DeliveryError
+
+    attempts = []
+
+    class _Proc:
+        returncode, stdout = 1, ""
+        stderr = "! [rejected] foreman/x -> foreman/x (non-fast-forward)"
+
+    def rejected(cmd, **kwargs):
+        attempts.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(rev.subprocess, "run", rejected)
+    with pytest.raises(DeliveryError):
+        rev.push(Path("/repo"), "foreman/x", lambda _: None)
+    assert len(attempts) == 1
+
+
+def test_a_retry_never_forces(tmp_path):
+    """A retry that force-pushed would turn a slow network into an overwrite of
+    whatever arrived in between."""
+    from pathlib import Path as _Path
+
+    source = (_Path(__file__).resolve().parents[1] / "src" / "foreman" / "revise.py").read_text()
+    body = source.split("def push(")[1].split("\n@contextmanager")[0]
+    command = body.split('"push"')[1][:120]
+    assert "--force" not in body
+    assert "-f" not in command, "the push command must carry no force flag"

@@ -41,7 +41,7 @@ from .delivery import branch_name, default_branch, open_pull_request
 from .graph import fix_edges, skill_run_edges
 from .memory import briefing
 from .progress import Progress, beating
-from .revise import Result, _git, headline, worktree
+from .revise import Result, _git, headline, push, worktree
 from .store import Store
 
 DEFAULT_TIMEOUT_S = 1800
@@ -242,7 +242,7 @@ def deliver_research(
         _git(work, "add", "--", str(path))
         summary = f"Evidence for #{number}: {result.subject}"
         _git(work, "commit", "-m", summary)
-        _git(work, "push", "origin", f"{branch}:{branch}")
+        push(work, branch, log)
         body = (
             f"{len(result.stands)} claim(s) stood up to validation, "
             f"{len(result.rejected)} were rejected by their own sources, and "
@@ -409,7 +409,7 @@ async def build_issue(
                 "-m",
                 f"{headline(built.summary)}\n\n{built.summary}\n\n{built.explanation}".strip(),
             )
-            _git(work, "push", "origin", f"{branch}:{branch}")
+            push(work, branch, log)
             url = open_pull_request(work, branch, built.summary, body, base)
             log(f"{project.id}: opened {url}")
             return Result(True, files, built, spent, url)
@@ -512,7 +512,7 @@ async def fix_findings(
                 "-m",
                 f"{headline(fix.summary)}\n\n{fix.summary}\n\n{fix.explanation}".strip(),
             )
-            _git(work, "push", "origin", f"{branch}:{branch}")
+            push(work, branch, log)
             url = open_pull_request(work, branch, fix.summary, body, base)
             # Written now because this is the only moment the findings and the
             # pull request are both in hand. Without it a finding an agent has
