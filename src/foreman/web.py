@@ -32,7 +32,7 @@ from .diff import project_drift
 from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
 from .fix import build_issue, deliver_research, fix_findings
 from .graph import ANSWERED_BY, MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
-from .memory import describe
+from .memory import briefing, describe
 from .models import Observation, utcnow
 from .plans import CONFIRM_PREFIX, plan_progress
 from .plans import _project_for as project_for
@@ -1257,6 +1257,89 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         asyncio.create_task(work())
         return slot.as_dict()
+
+    @app.get("/api/project/{project_id}")
+    def project_state(project_id: str) -> dict[str, Any]:
+        """Everything about one project, in one answer.
+
+        Knowing where ProCare Edge stood meant visiting six tabs — the plan on
+        one, its issues and pull requests on another, the action to point its
+        domain on a third, what its agents had spent on a fourth. Each view is
+        right and none of them is the question, which is "where is this".
+
+        Assembled rather than linked, for the same reason the context pack is:
+        the whole of it is small, and one answer removes every question about
+        whether two views were read at the same moment.
+        """
+        registry = load_registry(registry_path)
+        try:
+            project = registry.get(project_id)
+        except KeyError:
+            raise HTTPException(404, f"no project {project_id!r}") from None
+
+        s = store()
+        try:
+            findings = [f for f in s.open_findings(project_id) if not f["outcome"]]
+            plans = []
+            for row in s.plans():
+                if row["status"] == "superseded":
+                    continue
+                progress = plan_progress(s, int(row["id"]))
+                # A plan belongs here if this project owns any of its subjects.
+                owners = {
+                    (p.id if (p := project_for(registry, subject)) else None)
+                    for subject in progress.get("subjects", {})
+                }
+                if project_id in owners:
+                    plans.append(
+                        {
+                            "id": row["id"],
+                            "goal": row["goal"],
+                            "phases": progress.get("summary", []),
+                        }
+                    )
+            issues = open_issues(s, registry, project=project_id)
+            pulls = open_pulls(s, registry, project=project_id)
+            actions = [_decorate(s, row, registry) for row in s.pending_actions(project_id)]
+            spend = 0.0
+            runs = []
+            for kind in AGENT_RUNS:
+                for row in s.runs(s.recent_runs(project_id, kind, limit=10)):
+                    spend += float(row["cost_usd"] or 0)
+                    runs.append(
+                        {
+                            "kind": kind,
+                            "started_at": row["started_at"],
+                            "ok": bool(row["ok"]),
+                            "cost_usd": row["cost_usd"],
+                        }
+                    )
+            known = briefing(s, project_id)
+        finally:
+            s.close()
+
+        counts = {"high": 0, "medium": 0, "low": 0}
+        for row in findings:
+            counts[row["severity"]] = counts.get(row["severity"], 0) + 1
+        runs.sort(key=lambda r: str(r["started_at"] or ""), reverse=True)
+        return {
+            "id": project.id,
+            "name": project.label,
+            "surfaces": list(project.surface_names),
+            "fixable": project.fixable,
+            "deliver": project.deliver,
+            "findings": counts,
+            "plans": plans,
+            "issues": issues,
+            "pulls": pulls,
+            "actions": actions,
+            "spend_usd": round(spend, 2),
+            "runs": runs[:8],
+            # Count only: the judgements themselves are long and the dashboard
+            # has a tab for them. What belongs here is that they exist, because
+            # an agent dispatched at this project is reading them.
+            "known": len([line for line in known.splitlines() if line.startswith("- ")]),
+        }
 
     @app.get("/api/issues")
     def issues(project: str | None = Query(None)) -> list[dict[str, Any]]:

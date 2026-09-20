@@ -681,5 +681,5 @@ def test_the_unresolved_list_is_preferred_over_every_comment_ever_left():
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "src" / "foreman" / "revise.py").read_text()
-    line = next(l for l in source.splitlines() if "open_threads" in l and "_threads(" in l)
+    line = next(row for row in source.splitlines() if "open_threads" in row and "_threads(" in row)
     assert line.index("open_threads") < line.index("review_threads")

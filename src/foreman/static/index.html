@@ -343,6 +343,14 @@
   .sig-unit { color: var(--text-3); font-size: 0.9em; margin-top: 2px; }
   .phase-note { color: var(--text); font-size: 0.92em; margin: 4px 0 6px; }
   .phase-how { font-style: italic; opacity: 0.75; }
+  .pstate { border: 1px solid var(--border-firm); border-radius: var(--radius);
+            padding: 14px 16px; margin-bottom: 16px; background: var(--surface); }
+  .pstate-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+                 margin-bottom: 10px; }
+  .pstate-name { font-size: 1.15em; font-weight: 550; }
+  .pstate-spend { margin-left: auto; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .pstate-row { display: flex; gap: 12px; align-items: baseline; padding: 3px 0; }
+  .pstate-label { color: var(--text-3); min-width: 8.5em; font-size: 0.9em; }
   .act-head { font-size: 0.95em; color: var(--text-2); margin: 18px 0 8px; font-weight: 550; }
   .acts { display: flex; flex-direction: column; gap: 2px; }
   .act { display: flex; gap: 12px; align-items: baseline; padding: 5px 8px;
@@ -631,6 +639,8 @@
     <h2>Projects</h2>
     <div class="panel" id="projectRows"></div>
   </section>
+
+  <section id="projectState" hidden></section>
 
   <nav class="tabs" role="tablist">
     <button class="tab" data-tab="working"  role="tab" aria-selected="false">Working <span class="count" id="countWorking"></span></button>
@@ -924,7 +934,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
+    ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -993,6 +1003,7 @@ function renderCounts() {
 /** One filter, every panel. Re-rendering only findings is what made clicking a
  *  project look like it had done nothing on the other tabs. */
 function applyFilters() {
+  renderProjectState();
   renderFindings();
   renderWork();
   renderIssues();
@@ -1646,6 +1657,62 @@ function siblingsOf(f) {
     .filter((o) => o.id !== f.id && o.project === f.project && !o.outcome &&
                    family.includes(o.rule))
     .map((o) => o.id);
+}
+
+// --- one project, in one place ----------------------------------------------
+
+/** Where a project stands, without visiting six tabs.
+ *
+ *  The plan is on one, its issues and pull requests on another, the action to
+ *  point its domain on a third, what its agents spent on a fourth. Each of
+ *  those views is right and none of them is the question, which is "where is
+ *  this". Shown only when a project is selected, because with every project at
+ *  once the answer is the dashboard already above it. */
+async function renderProjectState() {
+  const panel = $("projectState");
+  if (!panel) return;
+  if (!state.project) { panel.hidden = true; return; }
+
+  const d = await fetchPart(`/api/project/${encodeURIComponent(state.project)}`, null);
+  if (!d) { panel.hidden = true; return; }
+
+  const phases = (d.plans[0]?.phases || []).map((ph) => {
+    const done = ph.passed && !ph.pending && !ph.blocked;
+    const tone = done ? "ok" : ph.pending ? "warn" : "";
+    const count = ph.passed + ph.pending + ph.blocked + ph.unknown;
+    return `<span class="chip ${tone}">${ph.position}. ${esc(ph.phase)}${
+      count > 1 ? ` ${ph.passed}/${count}` : ""}</span>`;
+  }).join("");
+
+  const blocked = d.pulls.filter((r) => r.blocking).length;
+  const needsAnswer = d.pulls.reduce((n, r) => n + (r.threads_open || 0), 0);
+
+  panel.hidden = false;
+  panel.innerHTML = `
+    <div class="pstate">
+      <div class="pstate-head">
+        <span class="pstate-name">${esc(d.name)}</span>
+        <span class="src">${esc(d.surfaces.join(" · ") || "no surfaces")} · delivers as
+          ${esc(d.deliver)}${d.known ? ` · ${d.known} judgement(s) every agent here inherits` : ""}</span>
+        <span class="pstate-spend">${usd(d.spend_usd)} on agents</span>
+      </div>
+      ${d.plans.length ? `<div class="pstate-row"><span class="pstate-label">Plan</span>
+        <span>${esc(d.plans[0].goal)}</span></div>
+        <div class="pstate-row"><span class="pstate-label"></span><span>${phases}</span></div>` : ""}
+      <div class="pstate-row">
+        <span class="pstate-label">Waiting on you</span>
+        <span>${[
+          d.actions.length ? `${d.actions.length} action(s) to approve` : "",
+          needsAnswer ? `${needsAnswer} review comment(s) unanswered` : "",
+          blocked ? `${blocked} pull request(s) blocked` : "",
+          d.findings.high ? `${d.findings.high} high finding(s)` : "",
+        ].filter(Boolean).join(" · ") || "nothing"}</span>
+      </div>
+      <div class="pstate-row">
+        <span class="pstate-label">In flight</span>
+        <span>${d.issues.length} open issue(s) · ${d.pulls.length} open pull request(s)</span>
+      </div>
+    </div>`;
 }
 
 // --- working: signals rather than faults ------------------------------------

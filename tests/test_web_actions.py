@@ -323,3 +323,60 @@ def test_the_page_hides_decided_findings_by_default():
     visible = page.split("function visible()")[1].split("\n}")[0]
     assert "showDecided" in visible
     assert "toggleDecided" in page, "and there has to be a way to see them again"
+
+
+def test_one_project_answers_where_it_stands_in_one_call():
+    """ "Tracking state of the work being done for procareedge is hard" — it
+    meant visiting six tabs.
+
+    The plan on one, its issues and pull requests on another, the action to
+    point its domain on a third, what its agents spent on a fourth. Each view is
+    right and none of them is the question, which is "where is this".
+    """
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from foreman.web import create_app
+
+    registry = Path(__file__).resolve().parents[1] / "foreman.yaml"
+    if not registry.exists():
+        import pytest
+
+        pytest.skip("no local registry to read")
+
+    client = TestClient(create_app(registry_path=registry))
+    body = client.get("/api/project/procareedge").json()
+
+    for field in (
+        "findings",
+        "plans",
+        "issues",
+        "pulls",
+        "actions",
+        "spend_usd",
+        "runs",
+        "known",
+        "surfaces",
+        "deliver",
+    ):
+        assert field in body, f"the project view cannot answer about {field}"
+
+
+def test_an_unknown_project_is_a_404_rather_than_an_empty_page():
+    """An empty answer reads as "nothing is happening here", which is a claim
+    about a project that does not exist."""
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from foreman.web import create_app
+
+    registry = Path(__file__).resolve().parents[1] / "foreman.yaml"
+    if not registry.exists():
+        import pytest
+
+        pytest.skip("no local registry to read")
+
+    client = TestClient(create_app(registry_path=registry))
+    assert client.get("/api/project/not-a-project").status_code == 404
