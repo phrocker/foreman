@@ -10,6 +10,7 @@ import asyncio
 import json
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -47,7 +48,7 @@ from .research import COUNTY_FACETS, subjects_for
 from .research import DEFAULT_CEILING_USD as RESEARCH_CEILING_USD
 from .research import research as run_research
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
-from .revise import _git, address_review
+from .revise import _git, address_review, offloaded
 from .runner import (
     apply_action,
     apply_eligible,
@@ -1494,7 +1495,9 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         budget=Budget(RESEARCH_CEILING_USD),
                         log=note,
                     )
-                    url = deliver_research(project, st, facts, result, log=note)
+                    # Sync, and the loop must not wait on it: a push and a
+                    # pull request are minutes of network apiece.
+                    url = await offloaded(deliver_research, project, st, facts, result, log=note)
                     note(f"opened {url}" if url else "nothing stood up; no pull request opened")
                     note(f"${result.cost_usd:.2f}")
                     if url:
@@ -1649,24 +1652,29 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         finally:
             s.close()
 
-    @app.get("/api/activity")
-    def activity() -> dict[str, Any]:
-        """What is running now, and what agent work ran recently.
+    # The history half of the activity view, cached. Eleven projects times five
+    # agent kinds is fifty-five round trips to the store, and the page polls
+    # this every two seconds while an agent works — so the endpoint took
+    # twenty-nine seconds where every other one took a tenth of a second, and
+    # the log appeared frozen exactly when somebody was watching it.
+    #
+    # The live half is in-memory job slots and costs nothing, so it stays
+    # uncached and stays instant. Only the part that changes slowly is held.
+    _runs_cache: dict[str, Any] = {"at": 0.0, "rows": []}
+    RUNS_TTL_S = 20.0
 
-        One place, because "is it doing anything" was answerable only by knowing
-        which tab's log to look at. The live half is this process's job slots;
-        the recent half is the run log, which survives a restart and is where
-        the cost actually lives.
-        """
+    def _recent_runs() -> list[dict[str, Any]]:
+        now = time.monotonic()
+        if now - float(_runs_cache["at"]) < RUNS_TTL_S and _runs_cache["rows"]:
+            return list(_runs_cache["rows"])
+
+        rows: list[dict[str, Any]] = []
         s = store()
         try:
-            registry = load_registry(registry_path)
-            recent: list[dict[str, Any]] = []
-            for target in registry.active:
+            for target in load_registry(registry_path).active:
                 for collector in AGENT_RUNS:
-                    ids = s.recent_runs(target.id, collector, limit=3)
-                    for row in s.runs(ids):
-                        recent.append(
+                    for row in s.runs(s.recent_runs(target.id, collector, limit=3)):
+                        rows.append(
                             {
                                 "project": target.id,
                                 "kind": collector,
@@ -1680,7 +1688,20 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         )
         finally:
             s.close()
-        recent.sort(key=lambda r: str(r["started_at"] or ""), reverse=True)
+        rows.sort(key=lambda r: str(r["started_at"] or ""), reverse=True)
+        _runs_cache.update(at=now, rows=rows)
+        return list(rows)
+
+    @app.get("/api/activity")
+    def activity() -> dict[str, Any]:
+        """What is running now, and what agent work ran recently.
+
+        One place, because "is it doing anything" was answerable only by knowing
+        which tab's log to look at. The live half is this process's job slots;
+        the recent half is the run log, which survives a restart and is where
+        the cost actually lives.
+        """
+        recent = _recent_runs()
         # Running first, then the most recently finished. A finished slot is
         # kept for its log; past a couple of dozen they are noise and the run
         # log below is the durable record anyway.

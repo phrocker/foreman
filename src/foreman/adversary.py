@@ -468,7 +468,9 @@ async def review_change(
         if raised and post_to:
             slug, _, number = post_to.removeprefix("pull:").partition("#")
             try:
-                url = post_objections(slug, number, raised)
+                from .revise import offloaded
+
+                url = await offloaded(post_objections, slug, number, raised)
                 where = f": {url}" if url else ""
                 log(f"posted {len(raised)} objection(s) to the pull request{where}")
             except (GitHubError, OSError) as exc:

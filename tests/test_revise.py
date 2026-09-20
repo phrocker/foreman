@@ -854,3 +854,53 @@ def test_every_branch_cut_goes_through_the_fetched_base():
     source = (_Path(__file__).resolve().parents[1] / "src" / "foreman" / "fix.py").read_text()
     assert "worktree(project.repo, base)" not in source, "a raw base is a stale base"
     assert source.count("fresh_base(project.repo, base") == 3
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_call_does_not_stop_the_event_loop():
+    """Two builds dispatched beside a review died with "the run ended without a
+    result": their streams had gone three minutes without being read, and their
+    tool events all arrived in one burst when the loop came back.
+
+    Every git and `gh` call in a dispatch is a synchronous `subprocess.run`, and
+    a dispatch is an asyncio task — so one agent's push froze the readers
+    draining every other agent's subprocess. It survived a day of single
+    dispatches because an agent blocking only itself is invisible.
+    """
+    import asyncio
+    import time
+
+    from foreman.revise import offloaded
+
+    ticks = []
+
+    async def heartbeat():
+        for _ in range(8):
+            await asyncio.sleep(0.02)
+            ticks.append(1)
+
+    beat = asyncio.create_task(heartbeat())
+    await offloaded(time.sleep, 0.1)
+    beat.cancel()
+
+    assert len(ticks) >= 3, "the loop kept running while the blocking call ran"
+
+
+def test_the_long_calls_are_offloaded():
+    """Named rather than inferred: `push` and `open_pull_request` are the two
+    that take minutes, and a regression here is silent until somebody runs two
+    agents at once."""
+    from pathlib import Path as _Path
+
+    # Only inside the `async def` dispatchers. `deliver_research` is sync by
+    # design and its async caller offloads it, which is the same guarantee
+    # reached from the other side.
+    for name in ("revise.py", "fix.py"):
+        source = (_Path(__file__).resolve().parents[1] / "src" / "foreman" / name).read_text()
+        for block in source.split("async def ")[1:]:
+            body = block.split("\ndef ")[0]
+            for line in body.splitlines():
+                stripped = line.strip()
+                if not stripped.startswith(("push(", "url = open_pull_request(")):
+                    continue
+                raise AssertionError(f"{name}: {stripped} blocks the loop")

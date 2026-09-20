@@ -203,6 +203,28 @@ def push(repo: Path, branch: str, log=lambda _: None) -> None:
     raise DeliveryError(f"could not push {branch}: {last}")
 
 
+async def offloaded(fn, *args, **kwargs):
+    """Run a blocking call without stopping every other agent.
+
+    Every git and `gh` call in a dispatch is a synchronous `subprocess.run`,
+    and a dispatch is an asyncio task. One agent's `git push` — up to three
+    minutes — therefore froze the event loop, and with it the stdout readers
+    draining every other agent's subprocess. Two builds dispatched beside a
+    review died with "the run ended without a result": their streams had gone
+    three minutes without being read, and their tool events all arrived in one
+    burst at the moment the loop came back.
+
+    It survived single dispatches for a day because one agent blocking itself
+    is invisible. It became fatal the moment concurrency was allowed.
+
+    A thread rather than `create_subprocess_exec`, because the call sites are
+    sync helpers used from both sync and async callers — `apply_action` runs
+    the same `_git` from a request thread — and making them async would split
+    each into two.
+    """
+    return await asyncio.to_thread(lambda: fn(*args, **kwargs))
+
+
 def fresh_base(repo: Path, base: str, log=lambda _: None) -> str:
     """Fetch the base and return the ref a new branch should be cut from.
 
@@ -439,7 +461,7 @@ async def address_review(
     run_id = store.start_run(project.id, "revise")
     spent = 0.0
     backend: str | None = None
-    _git(project.repo, "fetch", "origin", branch)
+    await offloaded(_git, project.repo, "fetch", "origin", branch)
     try:
         # From the fetched remote tip rather than a local branch of the same
         # name, which may be behind, ahead, or somebody's own work in progress
@@ -516,7 +538,7 @@ async def address_review(
             )
             # Named explicitly, and never with --force. The remote refusing a
             # non-fast-forward is the backstop for every way this could be wrong.
-            push(work, branch, log)
+            await offloaded(push, work, branch, log)
             # Written on success only, and written now rather than worked out later:
             # this pull request stops being observable the moment it closes, and a
             # revision that merged and left no trace is the one worth counting.
