@@ -127,32 +127,52 @@ class Job:
 # uses are not here: nobody wonders whether `tls` is still going.
 AGENT_RUNS = ("build", "research", "fix", "revise", "review")
 
+# How many dispatched agents may work at once. Enough to answer several pull
+# requests in parallel, few enough that a slipped click cannot start a dozen.
+MAX_CONCURRENT = 4
+
 STALENESS_WORKERS = 8
 
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
     db = db_path
-    # One slot per kind of work. A sweep, a revision, a fix and a review can all
-    # be in flight at once without evicting each other's log — which they did,
-    # the first time a revision's output vanished because a sweep started.
-    jobs: dict[str, Job] = {
-        "sweep": Job(kind="sweep"),
-        "revise": Job(kind="revise"),
-        "fix": Job(kind="fix"),
-        "build": Job(kind="build"),
-        "research": Job(kind="research"),
-        "review": Job(kind="review"),
-    }
+    # One slot per piece of work, not per kind of work. Two revisions on two
+    # different pull requests never collide — each gets its own throwaway
+    # worktree — and refusing the second was a rule written for a risk that only
+    # exists between two agents on the *same* branch.
+    #
+    # The sweep is still a singleton, and that one is real: two sweeps interleave
+    # writes into one snapshot and produce a diff against a half-written run.
+    jobs: dict[str, Job] = {"sweep": Job(kind="sweep")}
     job = jobs["sweep"]
-    revision = jobs["revise"]
+    revision = job  # kept for the streaming endpoints that predate the registry
 
     def start(name: str, target: str) -> Job:
-        """Claim a job slot, or refuse because that kind is already running."""
-        slot = jobs[name]
+        """Claim a slot for this piece of work, or refuse it as already running.
+
+        Keyed on kind *and* target, so dispatching the same pull request twice
+        is refused and dispatching a different one is not. A finished slot keeps
+        its log until the same work is dispatched again — that log is the only
+        place the detail of what an agent decided survives, and clearing it on
+        the next unrelated job is how "what did it say?" became unanswerable a
+        second after it mattered.
+        """
+        key = name if name == "sweep" else f"{name}:{target}"
+        slot = jobs.setdefault(key, Job(kind=name))
         with slot.lock:
             if slot.running:
-                raise HTTPException(409, f"a {name} is already in progress")
+                raise HTTPException(409, f"that {name} is already in progress")
+            running = sum(1 for j in jobs.values() if j.running)
+            if running >= MAX_CONCURRENT:
+                # A ceiling rather than a queue. Each of these spends real money
+                # and a queue would keep spending it after the operator had
+                # stopped watching; being told no is the honest answer.
+                raise HTTPException(
+                    429,
+                    f"{running} agents are already working. Wait for one to finish — "
+                    "each of these costs money and this is a ceiling, not a queue.",
+                )
             slot.running = True
             slot.target = target
             slot.started_at = utcnow()
@@ -1453,8 +1473,17 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         finally:
             s.close()
         recent.sort(key=lambda r: str(r["started_at"] or ""), reverse=True)
+        # Running first, then the most recently finished. A finished slot is
+        # kept for its log; past a couple of dozen they are noise and the run
+        # log below is the durable record anyway.
+        slots = [j.as_dict() for j in jobs.values()]
+        finished = sorted(
+            (j for j in slots if not j["running"]),
+            key=lambda j: j["finished_at"] or "",
+            reverse=True,
+        )
         return {
-            "jobs": [j.as_dict() for j in jobs.values()],
+            "jobs": [j for j in slots if j["running"]] + finished[:24],
             "recent": recent[:40],
         }
 

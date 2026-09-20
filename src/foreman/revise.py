@@ -206,6 +206,39 @@ def _render(threads: Sequence[dict]) -> str:
     return "\n\n".join(out)
 
 
+# A commit subject that a `git log --oneline` can hold. Anything longer is not
+# a subject, it is the body arriving in the wrong place.
+SUBJECT_CHARS = 72
+
+
+def headline(summary: str) -> str:
+    """The first line of a summary, fit to be a commit subject.
+
+    An 8,659-character subject line reached a real repository. The model wrote
+    its answer with the structured fields inline — `</summary>` and the whole
+    `addressed` array followed the prose straight into the `summary` field —
+    and it went into `git commit -m` unexamined, so `git log --oneline` on that
+    branch prints a screen of JSON.
+
+    Trimmed rather than validated. A summary is prose written by a model and
+    there is no shape to check it against; what can be said is that a commit
+    subject is one short line, and that anything after the first markup-looking
+    token is not part of it.
+    """
+    text = str(summary or "").strip()
+    for marker in ("</", "<parameter", '{"', "[{"):
+        cut = text.find(marker)
+        if cut > 0:
+            text = text[:cut]
+    first = text.strip().splitlines()[0].strip() if text.strip() else ""
+    if len(first) <= SUBJECT_CHARS:
+        return first or "Revision"
+    # Cut on a word so the subject reads as a sentence that stops, rather than
+    # one that was sawn through.
+    clipped = first[:SUBJECT_CHARS].rsplit(" ", 1)[0]
+    return (clipped or first[:SUBJECT_CHARS]).rstrip(" ,;:-") + "…"
+
+
 def _answer_threads(threads: Sequence[dict], revision: Revision, log) -> None:
     """Say on each thread what was done about it, and close the ones answered.
 
@@ -369,7 +402,7 @@ async def address_review(
                 work,
                 "commit",
                 "-m",
-                f"{revision.summary}\n\n"
+                f"{headline(revision.summary)}\n\n{revision.summary}\n\n"
                 "Written by an agent in answer to review comments on this pull "
                 "request, and pushed to its branch. Nothing was approved or merged: "
                 "the diff is the review.",

@@ -41,7 +41,7 @@ from .delivery import branch_name, default_branch, open_pull_request
 from .graph import fix_edges, skill_run_edges
 from .memory import briefing
 from .progress import Progress, beating
-from .revise import Result, _git, worktree
+from .revise import Result, _git, headline, worktree
 from .store import Store
 
 DEFAULT_TIMEOUT_S = 1800
@@ -403,7 +403,12 @@ async def build_issue(
                 "---\n\nWritten by an agent Foreman dispatched at that issue, on a branch "
                 "cut from the default. The diff is the review and the merge is yours."
             )
-            _git(work, "commit", "-m", f"{built.summary}\n\n{built.explanation}".strip())
+            _git(
+                work,
+                "commit",
+                "-m",
+                f"{headline(built.summary)}\n\n{built.summary}\n\n{built.explanation}".strip(),
+            )
             _git(work, "push", "origin", f"{branch}:{branch}")
             url = open_pull_request(work, branch, built.summary, body, base)
             log(f"{project.id}: opened {url}")
@@ -501,7 +506,12 @@ async def fix_findings(
                 return Result(False, (), fix, spent, "the agent changed nothing")
 
             body = _body(fix, findings)
-            _git(work, "commit", "-m", f"{fix.summary}\n\n{fix.explanation}".strip())
+            _git(
+                work,
+                "commit",
+                "-m",
+                f"{headline(fix.summary)}\n\n{fix.summary}\n\n{fix.explanation}".strip(),
+            )
             _git(work, "push", "origin", f"{branch}:{branch}")
             url = open_pull_request(work, branch, fix.summary, body, base)
             # Written now because this is the only moment the findings and the
