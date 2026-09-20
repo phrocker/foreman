@@ -39,6 +39,7 @@ from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import branch_name, default_branch, open_pull_request
 from .graph import skill_run_edges
+from .memory import briefing
 from .progress import Progress, beating
 from .revise import Result, _git, worktree
 from .store import Store
@@ -49,6 +50,8 @@ DEFAULT_TIMEOUT_S = 1800
 DEFAULT_CEILING_USD = 12.0
 
 PROMPT = """Foreman's checks found the problems below on this project. Fix them.
+
+{briefing}
 
 ## What was found
 
@@ -142,6 +145,8 @@ def _slug(findings: Sequence[Any]) -> str:
 
 
 ISSUE_PROMPT = """Do the work described in this issue.
+
+{briefing}
 
 ## {slug}#{number} — {title}
 
@@ -341,6 +346,7 @@ async def build_issue(
                     branch=branch,
                     base=base,
                     in_flight=_in_flight(store, project),
+                    briefing=briefing(store, project.id),
                 ),
                 schema=Fix,
                 needs=frozenset({REPO, SHELL}),
@@ -435,7 +441,12 @@ async def fix_findings(
             _git(work, "checkout", "-b", branch)
 
             task = Task(
-                instructions=PROMPT.format(findings=_render(findings), branch=branch, base=base),
+                instructions=PROMPT.format(
+                    findings=_render(findings),
+                    branch=branch,
+                    base=base,
+                    briefing=briefing(store, project.id),
+                ),
                 schema=Fix,
                 # It reads the checkout, edits it, and runs the project's own
                 # build. No web and no skills: everything it needs to know is

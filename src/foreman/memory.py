@@ -129,3 +129,58 @@ def about_nodes(
         + [node("rule", r) for r in rules]
         + [node("finding", int(f)) for f in findings]
     )
+
+
+# How much of what is held goes to a dispatched agent. Generous: a portfolio
+# holds tens of these, they are one sentence each, and the cost of omitting the
+# one that mattered is a second language in the repository.
+BRIEFING_LIMIT = 40
+
+
+def briefing(store: Store, project_id: str | None = None) -> str:
+    """What this team already knows, for an agent about to act.
+
+    The point of the whole apparatus, and for a long time it went nowhere. Every
+    memory was recorded, edged into the graph, shown in the dashboard, offered
+    to the chat — and not one dispatch path read any of it. Five kinds of agent
+    were sent out blind while eighteen judgements sat in the store, including
+    the one saying which language the repository is written in. One of them then
+    built the project a second time in TypeScript, correctly, on the evidence it
+    had.
+
+    Scoped but not narrowly. A memory attached to this project comes first
+    because it is most likely to bind; portfolio-wide ones follow, because "the
+    operator is the approver" and "these domains must not become a doorway farm"
+    are true everywhere and an agent that has not been told either will
+    cheerfully violate both.
+
+    Retired memories are left out. A retraction is kept as the record — that is
+    what `retire_memory` is for — but sending an agent a judgement somebody has
+    since withdrawn is worse than sending it nothing.
+    """
+    rows = [m for m in store.memories() if str(m.get("retired_at") or "None") == "None"]
+    if not rows:
+        return ""
+
+    here, elsewhere = [], []
+    for row in rows:
+        about = store.neighbors([node("memory", int(row["id"]))], [ABOUT])
+        mine = project_id is not None and node("project", project_id) in about
+        (here if mine else elsewhere).append(str(row["statement"] or "").strip())
+
+    ordered = [s for s in here + elsewhere if s][:BRIEFING_LIMIT]
+    if not ordered:
+        return ""
+    return "\n".join(
+        [
+            "## What this team already knows",
+            "",
+            "Judgements recorded against this portfolio, most specific first. They are not",
+            "instructions and they are not always right — but they were written down because",
+            "somebody had to learn them once, and contradicting one silently is how a project",
+            "ends up holding two answers to the same question.",
+            "",
+            *(f"- {statement}" for statement in ordered),
+            "",
+        ]
+    )

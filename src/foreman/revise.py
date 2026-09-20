@@ -47,6 +47,7 @@ from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import DeliveryError, default_branch
 from .graph import revision_edges, skill_run_edges
+from .memory import briefing
 from .progress import Progress, beating
 from .store import Store
 
@@ -60,6 +61,8 @@ DEFAULT_TIMEOUT_S = 1500
 DEFAULT_CEILING_USD = 8.0
 
 PROMPT = """A reviewer has left comments on an open pull request. Address them.
+
+{briefing}
 
 ## The pull request
 
@@ -241,6 +244,7 @@ async def address_review(
                     slug=slug,
                     url=facts.get("url") or "",
                     threads=_render(threads),
+                    briefing=briefing(store, project.id),
                 ),
                 schema=Revision,
                 # It reads the checkout and edits it, and it runs the project's own

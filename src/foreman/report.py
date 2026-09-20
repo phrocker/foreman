@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from .connectors import Connector, ConnectorError, Task, choose
 from .history import digest
+from .memory import briefing
 from .store import Store
 
 TIMEOUT_S = 300
@@ -35,6 +36,7 @@ MAX_ITEMS = 900
 PROMPT = """Write an account of what this project has been doing, for somebody
 who has to sign it.
 
+{briefing}
 Project: {project}
 Window: {window}
 
@@ -169,6 +171,12 @@ async def write_report(
             window=window,
             numbers=_numbers(facts),
             items=_items(events),
+            # A report on a project this team has recorded judgements about
+            # should know them. The quarterly account of a project somebody
+            # chairs is exactly where "we decided X and here is why" belongs,
+            # and writing it without them is how a report restates what
+            # everybody already had to learn once.
+            briefing=briefing(store, project_id),
         ),
         schema=Report,
         # The record is assembled and handed over, so this needs no repository,

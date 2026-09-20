@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from .budget import Budget
 from .connectors import WEB, Connector, ConnectorError, Task, choose
 from .graph import skill_run_edges
+from .memory import briefing
 from .store import Store
 
 DEFAULT_TIMEOUT_S = 1200
@@ -104,6 +105,8 @@ class Checked:
 
 
 GATHER_PROMPT = """Find out what is actually true about this, with sources.
+
+{briefing}
 
 ## The subject
 
@@ -173,10 +176,16 @@ it.
 
 
 async def _gather(
-    facet: Facet, subject: str, *, connectors: list[Connector], timeout_s: int, model: str | None
+    facet: Facet,
+    subject: str,
+    brief: str,
+    *,
+    connectors: list[Connector],
+    timeout_s: int,
+    model: str | None,
 ) -> tuple[Facet, Gathered | None, float, str | None]:
     task = Task(
-        instructions=GATHER_PROMPT.format(subject=subject, question=facet.question),
+        instructions=GATHER_PROMPT.format(subject=subject, question=facet.question, briefing=brief),
         schema=Gathered,
         # The open web and nothing else. No repository, no shell: this gathers
         # facts about the world and has no business in a checkout.
@@ -256,6 +265,11 @@ async def research(
 
         connectors = [ClaudeCodeConnector()]
 
+    # A gatherer told that the local pack is unavailable to this portfolio asks
+    # a different question than one that has not been. The validator is
+    # deliberately not given it: its job is whether the source says the thing,
+    # and context is exactly what would let it reason its way to yes.
+    brief = briefing(store, project_id)
     run_id = store.start_run(project_id, "research")
     spent = 0.0
     try:
@@ -264,7 +278,7 @@ async def research(
 
         gathered = await asyncio.gather(
             *(
-                _gather(f, subject, connectors=connectors, timeout_s=timeout_s, model=model)
+                _gather(f, subject, brief, connectors=connectors, timeout_s=timeout_s, model=model)
                 for f in facets
             )
         )

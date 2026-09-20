@@ -40,6 +40,7 @@ from .collectors.github import GitHubError
 from .config import Project
 from .connectors import REPO, Connector, ConnectorError, Task, choose
 from .graph import skill_run_edges
+from .memory import briefing
 from .models import Finding, Severity
 from .store import Store
 
@@ -123,6 +124,8 @@ class Critique(BaseModel):
 
 PROMPT = """Review this change and try to find what is wrong with it.
 
+{briefing}
+
 ## What it was supposed to achieve
 
 {goal}
@@ -180,6 +183,7 @@ async def _one(
     goal: str,
     diff: str,
     subject: str,
+    brief: str,
     *,
     connectors: list[Connector],
     timeout_s: int,
@@ -191,6 +195,7 @@ async def _one(
             goal=goal,
             question=lens.question,
             diff=diff,
+            briefing=brief,
             repo_note=(
                 "The repository is available to read. Open the files around the "
                 "change; a diff alone hides the context that decides whether it "
@@ -343,6 +348,11 @@ async def review_change(
         return []
 
     repo = bool(project.repo and project.repo.exists())
+    # The reviewers get it too. A scope reviewer that has not been told the
+    # repository is written in Go cannot notice that this diff is not — which
+    # is exactly what happened on #10, where seventeen objections were raised
+    # and the language was not one of them.
+    brief = briefing(store, project.id)
     run_id = store.start_run(project.id, "review")
     spent = 0.0
     findings: list[Finding] = []
@@ -359,6 +369,7 @@ async def review_change(
                     goal,
                     diff,
                     subject,
+                    brief,
                     connectors=connectors,
                     timeout_s=timeout_s,
                     model=model,
