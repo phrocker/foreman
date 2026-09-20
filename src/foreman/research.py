@@ -414,3 +414,103 @@ COUNTY_FACETS: tuple[Facet, ...] = (
         "problem.",
     ),
 )
+
+
+# Where each place is, because licensing and permits are state law before they
+# are county practice, and a page that cites Maryland rules on a Virginia
+# county is wrong in the way that matters most.
+PLACES: tuple[tuple[str, str, str], ...] = (
+    ("princewilliamcounty", "Prince William County", "Virginia"),
+    ("howardcounty", "Howard County", "Maryland"),
+    ("fairfaxcounty", "Fairfax County", "Virginia"),
+    ("loudouncounty", "Loudoun County", "Virginia"),
+    ("columbia", "Columbia, Howard County", "Maryland"),
+    ("woodbine", "Woodbine, Howard County", "Maryland"),
+)
+
+# The trades, longest first so `draincleaning` does not match `cleaning` and
+# leave `drain` stranded. Written out rather than split on a dictionary because
+# a wrong guess here becomes the subject line of a research run.
+TRADES: tuple[tuple[str, str], ...] = (
+    ("foundationrepair", "foundation repair"),
+    ("draincleaning", "drain cleaning"),
+    ("waterproofing", "waterproofing"),
+    ("junkremoval", "junk removal"),
+    ("moldremoval", "mold removal"),
+    ("stormdamage", "storm damage restoration"),
+    ("treeservice", "tree service"),
+    ("garagedoors", "garage doors"),
+    ("poolservice", "pool service"),
+    ("roofrepair", "roof repair"),
+    ("electrician", "electrical"),
+    ("wellpump", "well pump service"),
+    ("plumbing", "plumbing"),
+    ("plumber", "plumbing"),
+    ("chimney", "chimney service"),
+    ("septic", "septic service"),
+    ("hvac", "HVAC"),
+)
+
+
+@dataclass(frozen=True)
+class Subject:
+    """A county and a trade, read off a domain name."""
+
+    domain: str
+    place: str
+    state: str
+    trade: str
+
+    @property
+    def title(self) -> str:
+        return f"{self.trade} in {self.place}, {self.state}"
+
+
+def subject_of(domain: str) -> Subject | None:
+    """Read the county and trade out of a domain name.
+
+    These names were chosen to say exactly this — `howardcountyhvac.com` is a
+    county and a trade and nothing else — so asking the operator to type the
+    subject of a research run was asking them for something already written
+    down twenty-two times.
+
+    Returns None rather than guessing. A domain that does not parse is one this
+    was not built for, and inventing a subject for it would send five agents at
+    a question nobody asked.
+    """
+    stem = domain.rsplit(".", 1)[0].lower()
+    for prefix, place, state in PLACES:
+        if not stem.startswith(prefix):
+            continue
+        rest = stem[len(prefix) :]
+        for token, trade in TRADES:
+            if rest == token:
+                return Subject(domain, place, state, trade)
+    return None
+
+
+def subjects_for(store: Store, plan_id: int | None = None) -> list[Subject]:
+    """Every county-and-trade the lead-gen plan covers, in domain order.
+
+    Read from the plan rather than from the registrar, because the plan is where
+    the operator said which domains this project is about — the portfolio holds
+    a hundred and fifty-nine and most of them are not this.
+    """
+    plans = [p for p in store.plans() if p["status"] != "superseded"]
+    if plan_id is not None:
+        plans = [p for p in plans if int(p["id"]) == plan_id]
+
+    import json as _json
+
+    out: list[Subject] = []
+    seen: set[str] = set()
+    for plan in plans:
+        for raw in _json.loads(plan["subjects"] or "[]"):
+            domain = str(raw).removeprefix("domain:")
+            if domain in seen:
+                continue
+            seen.add(domain)
+            subject = subject_of(domain)
+            if subject is not None:
+                out.append(subject)
+    return out

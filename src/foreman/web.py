@@ -41,7 +41,7 @@ from .precision import rank, rule_scores
 from .registry_edit import RegistryError, add_project, set_enabled
 from .registry_edit import projects as registry_projects
 from .report import write_report
-from .research import COUNTY_FACETS
+from .research import COUNTY_FACETS, subjects_for
 from .research import DEFAULT_CEILING_USD as RESEARCH_CEILING_USD
 from .research import research as run_research
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
@@ -1248,6 +1248,29 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         asyncio.create_task(work())
         return slot.as_dict()
+
+    @app.get("/api/subjects")
+    def subjects() -> list[dict[str, Any]]:
+        """What there is to research, read off the domain names.
+
+        These names say exactly this — `howardcountyhvac.com` is a county and a
+        trade and nothing else — so asking the operator to type a subject was
+        asking for something already written down twenty-two times.
+        """
+        s = store()
+        try:
+            return [
+                {
+                    "domain": x.domain,
+                    "place": x.place,
+                    "state": x.state,
+                    "trade": x.trade,
+                    "title": x.title,
+                }
+                for x in subjects_for(s)
+            ]
+        finally:
+            s.close()
 
     @app.post("/api/issues/research")
     async def research_issue(subject: str = Query(...), about: str = Query("")) -> dict[str, Any]:

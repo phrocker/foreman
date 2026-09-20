@@ -167,3 +167,55 @@ def test_every_county_facet_is_a_fact_about_a_place():
     assert len({f.key for f in COUNTY_FACETS}) == len(COUNTY_FACETS)
     for facet in COUNTY_FACETS:
         assert len(facet.question) > 80, f"{facet.key} is too vague to be answerable"
+
+
+# --- what there is to look at, read off the domains -------------------------
+
+
+def test_a_domain_name_says_which_county_and_which_trade():
+    """These names were chosen to say exactly this, so asking the operator to
+    type the subject of a research run was asking for something already written
+    down twenty-two times."""
+    from foreman.research import subject_of
+
+    hvac = subject_of("howardcountyhvac.com")
+    assert hvac.place == "Howard County"
+    assert hvac.trade == "HVAC"
+    assert hvac.title == "HVAC in Howard County, Maryland"
+
+
+def test_the_state_is_carried_because_licensing_is_state_law():
+    """A page citing Maryland rules on a Virginia county is wrong in the way
+    that matters most."""
+    from foreman.research import subject_of
+
+    assert subject_of("howardcountyplumbing.com".replace("plumbing", "hvac")).state == "Maryland"
+    assert subject_of("loudouncountyhvac.com").state == "Virginia"
+    assert subject_of("princewilliamcountyhvac.com").place == "Prince William County"
+
+
+def test_a_compound_trade_is_not_split_at_the_wrong_word():
+    """`draincleaning` must not match `cleaning` and strand `drain`, which is
+    why the table is longest-first."""
+    from foreman.research import subject_of
+
+    assert subject_of("howardcountydraincleaning.com").trade == "drain cleaning"
+    assert subject_of("howardcountyfoundationrepair.com").trade == "foundation repair"
+    assert subject_of("howardcountywellpump.com").trade == "well pump service"
+
+
+def test_a_town_carries_its_county():
+    """`woodbineplumber.com` is a Howard County domain and the research has to
+    know that, or it looks for permit rules in a town that does not issue them."""
+    from foreman.research import subject_of
+
+    assert subject_of("woodbineplumber.com").place == "Woodbine, Howard County"
+
+
+def test_a_domain_that_does_not_parse_gets_no_invented_subject():
+    """Guessing would send five agents at a question nobody asked."""
+    from foreman.research import subject_of
+
+    assert subject_of("squibble.shop") is None
+    assert subject_of("howardcountyunicycles.com") is None
+    assert subject_of("myfinanceadvisor.com") is None

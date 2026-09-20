@@ -785,7 +785,7 @@ const SEV = {
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
-  pulls: [], issues: [], activity: null, signals: [],
+  pulls: [], issues: [], activity: null, signals: [], subjects: [],
   declared: [],
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
@@ -880,7 +880,8 @@ let stale = [];
 async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports, declared, pulls, activity, signals, issues] =
+         settings, plans, reports, declared, pulls, activity, signals, issues,
+         subjects] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -899,11 +900,12 @@ async function load() {
     fetchPart("/api/activity", null),
     fetchPart("/api/signals", []),
     fetchPart("/api/issues", []),
+    fetchPart("/api/subjects", []),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
     connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
-    signals, issues,
+    signals, issues, subjects,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -1470,14 +1472,28 @@ async function buildIssue(subject, button) {
  *  the source. The subject is asked for because an issue title says what to
  *  decide and not what to look at. */
 async function researchIssue(subject, button) {
-  const about = prompt(
-    "What should be researched?\n\n" +
-    "The issue says what to decide; this says what to look at. " +
-    "For example: Howard County HVAC",
+  // Offered, not asked for. The domain names already say what there is to look
+  // at — `howardcountyhvac.com` is a county and a trade and nothing else — so
+  // a free-text prompt was asking the operator for something written down
+  // twenty-two times, in a form they had no reason to have in mind.
+  const choices = state.subjects || [];
+  if (!choices.length) {
+    alert("No research subjects yet. Run a sweep so the plan's domains are known.");
+    return;
+  }
+  const numbered = choices.map((c, i) => `${i + 1}. ${c.title}`).join("\n");
+  const picked = prompt(
+    "Which one?\n\nEach is a county and a trade read off one of your domains. " +
+    "Start with one: a single county done properly is a template worth copying, " +
+    "and twenty-two at once is twenty-two thin sites.\n\n" + numbered + "\n",
+    "9",
   );
-  if (about === null) return;
+  if (picked === null) return;
+  const choice = choices[Number(picked) - 1];
+  if (!choice) { alert("Pick a number from the list."); return; }
+  const about = choice.title;
   if (!confirm(
-    `Research "${about || "the issue title"}"?\n\n` +
+    `Research "${about}"?\n\n` +
     "Five agents gather on permits, local pricing, housing stock, who already " +
     "ranks, and licensing — every claim needs a source. A sixth agent then " +
     "checks each source actually says what was claimed, seeing only the claim " +
