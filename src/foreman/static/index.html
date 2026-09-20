@@ -1544,8 +1544,11 @@ function renderWork() {
         ${r.revisable ? `<button class="primary revise" data-subject="${esc(r.subject)}">Address comments</button>` : ""}
         <button class="adv-review" data-subject="${esc(r.subject)}">Adversarial review</button>
         <span class="hint">${r.revisable
-          ? `An agent answers the review on <code>${esc(r.branch)}</code> and pushes a commit. `
-          : ""}Four agents read the diff from angles that have not seen each other's answers. Nothing merges and nothing is posted to GitHub.</span>
+          ? `<strong>Address comments</strong>: an agent answers the review on <code>${
+              esc(r.branch)}</code> and pushes a commit to it. `
+          : ""}<strong>Adversarial review</strong>: four agents read the diff from angles that
+          have not seen each other's answers, and what they find is posted to the pull request.
+          Neither merges.</span>
       </div>
     </div>`).join("");
 

@@ -549,3 +549,72 @@ def test_a_tool_start_reaches_on_step_and_not_on_text():
 
     assert steps == ["Bash"]
     assert text == []
+
+
+def test_a_stream_that_ends_without_a_result_blames_the_pipe_not_the_agent():
+    """Two failures wore one message and they need different answers.
+
+    "no structured output (result tail: None)" blamed the agent for a pipe that
+    closed. An envelope that never arrived is ours to explain; one that arrived
+    without structured output is the agent declining to fill the schema.
+    """
+    import asyncio
+
+    from pydantic import BaseModel
+
+    from foreman.connectors import ConnectorError, Task
+    from foreman.connectors.claudecode import ClaudeCodeConnector
+
+    class Answer(BaseModel):
+        reply: str = ""
+
+    conn = ClaudeCodeConnector()
+    task = Task(instructions="x", schema=Answer)
+
+    class Proc:
+        returncode = 0
+
+        class _Out:
+            lines = [b""]
+
+            async def readline(self):
+                return self.lines.pop(0) if self.lines else b""
+
+        class _Err:
+            async def read(self):
+                return b"the sandbox killed it"
+
+        stdout, stderr = _Out(), _Err()
+
+        async def wait(self):
+            return 0
+
+    async def go():
+        proc = Proc()
+        envelope, stderr = await conn._stream(proc, None, None, task, None)
+        assert envelope == {}
+        return stderr
+
+    stderr = asyncio.run(go())
+    assert b"sandbox" in stderr
+
+    # And the message names the pipe rather than the agent.
+    with pytest.raises(ConnectorError) as raised:
+        raise ConnectorError("the run ended without a result: the sandbox killed it")
+    assert "ended without a result" in str(raised.value)
+
+
+def test_stderr_is_drained_while_stdout_is_read():
+    """The pipe holds about 64KiB. A child that writes more than that to stderr
+    blocks, stops producing stdout, and the reader waits for an EOF that cannot
+    come — a chatty build is enough to do it, and the symptom is a run that goes
+    silent and then dies."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "foreman" / "connectors" / "claudecode.py"
+    ).read_text()
+    stream = source.split("async def _stream(")[1]
+    drain = stream.index("create_task(proc.stderr.read())")
+    loop = stream.index("await proc.stdout.readline()")
+    assert drain < loop, "stderr must be draining before the stdout loop blocks on it"

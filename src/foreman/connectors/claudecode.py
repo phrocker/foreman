@@ -131,8 +131,27 @@ class ClaudeCodeConnector:
 
         payload = envelope.get("structured_output")
         if payload is None:
+            # Two failures wore one message and they need different answers. An
+            # envelope that never arrived means the stream ended before the CLI
+            # said anything — a killed process, a closed pipe, a build that took
+            # the terminal — and the only evidence is on stderr. An envelope
+            # that arrived without structured output means the agent finished
+            # and declined to fill the schema, and its prose is the evidence.
+            #
+            # Worth separating because the first is ours and the second is the
+            # agent's, and "no structured output (result tail: None)" blamed the
+            # agent for a pipe that closed.
+            if not envelope:
+                detail = stderr.decode("utf-8", "replace").strip()[-400:]
+                raise ConnectorError(
+                    "the run ended without a result"
+                    + (f": {detail}" if detail else " and said nothing on stderr"),
+                    cost,
+                )
             raise ConnectorError(
-                f"no structured output (result tail: {str(envelope.get('result'))[-300:]})", cost
+                f"the agent finished without filling the schema "
+                f"(it said: {str(envelope.get('result'))[-300:]})",
+                cost,
             )
         try:
             value = task.schema.model_validate(payload)
@@ -170,6 +189,14 @@ class ClaudeCodeConnector:
 
         A partial line is dropped rather than guessed at.
         """
+        # Drained alongside stdout rather than after it. The pipe holds about
+        # 64KiB; a child that writes more than that to stderr blocks on the
+        # write, stops producing stdout, and the loop below waits for an EOF
+        # that cannot come until the timeout kills it. A chatty build is enough
+        # to do it, and the symptom — a run that goes silent and then dies — is
+        # indistinguishable from an agent that hung.
+        drain = asyncio.create_task(proc.stderr.read())
+
         envelope: dict = {}
         structured = ""
         sent = 0
@@ -222,7 +249,7 @@ class ClaudeCodeConnector:
                     on_text(grown[sent:])
                     sent = len(grown)
 
-        stderr = await proc.stderr.read()
+        stderr = await drain
         await proc.wait()
         return envelope, stderr
 
