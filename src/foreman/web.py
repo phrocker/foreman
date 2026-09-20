@@ -35,6 +35,7 @@ from .fix import build_issue, deliver_research, fix_findings
 from .graph import ANSWERED_BY, MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import briefing, describe
 from .models import Observation, utcnow
+from .next import next_steps
 from .plans import CONFIRM_PREFIX, plan_progress
 from .plans import _project_for as project_for
 from .precision import label as precision_label
@@ -1560,6 +1561,65 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         asyncio.create_task(work())
         return slot.as_dict()
+
+    @app.get("/api/next")
+    def what_next(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        """What to do now, ordered, with the reason for each.
+
+        The omission this closes: every input was here and nothing reduced them
+        to a decision, so the operator did the reducing — across six tabs, every
+        time. A board that says what is wrong and not what matters has moved the
+        work rather than done it.
+        """
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            plans = []
+            for row in s.plans():
+                if row["status"] == "superseded":
+                    continue
+                progress = plan_progress(s, int(row["id"]))
+                owners = {
+                    (p.id if (p := project_for(registry, subject)) else None)
+                    for subject in progress.get("subjects", {})
+                }
+                summary = progress.get("summary", [])
+                for phase, detail in zip(summary, progress.get("phases", []), strict=False):
+                    phase["gate"] = detail.get("gate")
+                    phase["note"] = detail.get("note")
+                plans.append(
+                    {
+                        "goal": row["goal"],
+                        "phases": summary,
+                        "project": next((o for o in owners if o), ""),
+                    }
+                )
+            answerable = {rule for op in _ops().values() for rule in getattr(op, "answers", ())}
+            steps = next_steps(
+                s,
+                open_pulls(s, registry, project=project),
+                open_issues(s, registry, project=project),
+                plans,
+                [f for f in s.open_findings(project) if not f["outcome"]],
+                read_signals(s, registry),
+                answerable,
+                project=project,
+            )
+        finally:
+            s.close()
+        return [
+            {
+                "rank": step.rank,
+                "title": step.title,
+                "why": step.why,
+                "where": step.where,
+                "action": step.action,
+                "project": step.project,
+                "cost": step.cost,
+                "blocked_by": step.blocked_by,
+            }
+            for step in steps
+        ]
 
     @app.get("/api/signals")
     def signals() -> list[dict[str, Any]]:

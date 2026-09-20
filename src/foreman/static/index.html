@@ -343,6 +343,17 @@
   .sig-unit { color: var(--text-3); font-size: 0.9em; margin-top: 2px; }
   .phase-note { color: var(--text); font-size: 0.92em; margin: 4px 0 6px; }
   .phase-how { font-style: italic; opacity: 0.75; }
+  .nextup { border: 1px solid var(--border-firm); border-left: 3px solid var(--accent);
+            border-radius: var(--radius); padding: 14px 16px; margin-bottom: 14px; }
+  .nextup-label { color: var(--text-3); font-size: 0.8em; letter-spacing: 0.08em;
+                  text-transform: uppercase; margin-bottom: 4px; }
+  .nextup-top { font-size: 1.1em; font-weight: 550; }
+  .nextup-top a { color: var(--accent); }
+  .nextup-why { color: var(--text-2); margin-top: 4px; font-size: 0.93em; }
+  .nextup-none { color: var(--text-3); }
+  .nextup-rest { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .nextup-row { color: var(--text-3); font-size: 0.9em; padding: 2px 0; }
+  .nextup-row a { color: var(--text-2); }
   .pstate { border: 1px solid var(--border-firm); border-radius: var(--radius);
             padding: 14px 16px; margin-bottom: 16px; background: var(--surface); }
   .pstate-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
@@ -640,6 +651,8 @@
     <div class="panel" id="projectRows"></div>
   </section>
 
+  <section id="nextUp"></section>
+
   <section id="projectState" hidden></section>
 
   <nav class="tabs" role="tablist">
@@ -803,7 +816,7 @@ const SEV = {
 const state = {
   findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
-  pulls: [], issues: [], activity: null, signals: [], subjects: [],
+  pulls: [], issues: [], activity: null, signals: [], subjects: [], next: [],
   declared: [],
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
@@ -899,7 +912,7 @@ async function load() {
   stale = [];
   const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
          settings, plans, reports, declared, pulls, activity, signals, issues,
-         subjects] =
+         subjects, next] =
     await Promise.all([
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
@@ -919,11 +932,12 @@ async function load() {
     fetchPart("/api/signals", []),
     fetchPart("/api/issues", []),
     fetchPart("/api/subjects", []),
+    fetchPart("/api/next", []),
   ]);
   Object.assign(state, {
     overview, findings, actions, drift, precision, history,
     connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
-    signals, issues, subjects,
+    signals, issues, subjects, next,
   });
   renderStale();
   // Each panel renders independently. One throwing used to abort the rest of
@@ -938,7 +952,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
+    ["nextUp", renderNext], ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -1007,6 +1021,7 @@ function renderCounts() {
 /** One filter, every panel. Re-rendering only findings is what made clicking a
  *  project look like it had done nothing on the other tabs. */
 function applyFilters() {
+  renderNext();
   renderProjectState();
   renderFindings();
   renderWork();
@@ -1685,6 +1700,57 @@ function siblingsOf(f) {
     .filter((o) => o.id !== f.id && o.project === f.project && !o.outcome &&
                    family.includes(o.rule))
     .map((o) => o.id);
+}
+
+// --- what to do next --------------------------------------------------------
+
+/** The ordering the operator was supplying by hand.
+ *
+ *  Every input was already here and nothing reduced them to a decision, so
+ *  "what should I do next" was answered by reading across six tabs. The reason
+ *  travels with each step so that when the ordering is wrong — and it will be —
+ *  you can see which rule was wrong rather than which symptom annoyed you. */
+function renderNext() {
+  const panel = $("nextUp");
+  const steps = (state.next || []).filter((s) => !state.project || !s.project || s.project === state.project);
+  if (!steps.length) {
+    panel.innerHTML = '<div class="nextup"><div class="nextup-none">Nothing waiting.</div></div>';
+    return;
+  }
+  const top = steps[0];
+  const rest = steps.slice(1, 6);
+  panel.innerHTML = `
+    <div class="nextup">
+      <div class="nextup-label">Next</div>
+      <div class="nextup-top">
+        ${top.where ? `<a href="${esc(top.where)}" target="_blank" rel="noopener">${esc(top.title)}</a>`
+                    : esc(top.title)}
+      </div>
+      <div class="nextup-why">${esc(top.why)}</div>
+      ${top.action ? `<div class="work-act">
+        <button class="primary do-next" data-action="${esc(top.action)}">Do it${
+          top.cost ? ` — ${esc(top.cost)}` : ""}</button></div>` : ""}
+      ${rest.length ? `<div class="nextup-rest">${rest.map((s) =>
+        `<div class="nextup-row">${s.where
+          ? `<a href="${esc(s.where)}" target="_blank" rel="noopener">${esc(s.title)}</a>`
+          : esc(s.title)}</div>`).join("")}</div>` : ""}
+    </div>`;
+
+  const button = panel.querySelector(".do-next");
+  if (button) {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const res = await fetch(button.dataset.action, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(body.detail || `Failed with ${res.status}`);
+        button.disabled = false;
+        return;
+      }
+      showTab("activity");
+      watchActivity();
+    });
+  }
 }
 
 // --- one project, in one place ----------------------------------------------
