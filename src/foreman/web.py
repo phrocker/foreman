@@ -831,9 +831,21 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 ],
             )
             s.finish_run(run_id, ok=True)
+            # Closing a gate is precisely what unblocks the next phase, so this
+            # is the moment its work becomes proposable. Leaving it to a button
+            # on another tab meant ticking "Deployed" appeared to do nothing:
+            # the action to point the domain existed only after somebody knew
+            # to press Recompute, which nothing said.
+            proposed = propose_actions(registry, s) if confirmed else 0
         finally:
             s.close()
-        return {"project": project, "subject": subject, "key": key, "confirmed": confirmed}
+        return {
+            "project": project,
+            "subject": subject,
+            "key": key,
+            "confirmed": confirmed,
+            "proposed": proposed,
+        }
 
     @app.get("/api/plans")
     def plans() -> list[dict[str, Any]]:

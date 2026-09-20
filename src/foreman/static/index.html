@@ -2109,7 +2109,19 @@ async function confirmStep(box) {
     alert(`Could not record that: ${(await res.json()).detail}`);
     return;
   }
+  // Say what closing the gate unblocked, and take them to it. Ticking a box
+  // and watching nothing happen is how somebody concludes the box did nothing.
+  const body = await res.json().catch(() => ({}));
   await load();
+  if (body.proposed) {
+    state.project = body.project || state.project;
+    applyFilters();
+    showTab("actions");
+    alert(
+      `${body.proposed} action(s) are now waiting on the Actions tab — closing that ` +
+      "gate is what made them proposable.",
+    );
+  }
 }
 
 function renderPlans() {

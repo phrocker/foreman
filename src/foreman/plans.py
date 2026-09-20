@@ -543,6 +543,21 @@ def _project_for(registry: Any, subject: str) -> Any:
     execute — said out loud rather than silently skipped.
     """
     name = subject.split(":", 1)[-1]
+
+    # A project that serves this name wins over one that merely holds the
+    # registration. Both claims are true — the registrar catch-all claims every
+    # domain on the account, and that is deliberate so nothing goes unwatched —
+    # but only one of them is where a person looks for the work.
+    #
+    # The action to point procareedge.com at the platform was filed under
+    # `domains`, and the operator, filtered to `procareedge`, was told there
+    # were no pending actions for it. An action nobody can find is an action
+    # that did not happen.
+    for project in registry.active:
+        web = getattr(project, "web", None)
+        if web is not None and getattr(web, "host", "").lower().removeprefix("www.") == name:
+            return project
+
     for project in registry.active:
         surface = getattr(project, "registrar", None)
         if surface is not None and surface.claims(name):
