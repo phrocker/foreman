@@ -41,7 +41,7 @@ from .delivery import branch_name, default_branch, open_pull_request
 from .graph import fix_edges, skill_run_edges
 from .memory import briefing
 from .progress import Progress, beating
-from .revise import Result, _git, headline, push, worktree
+from .revise import Result, _git, fresh_base, headline, push, worktree
 from .store import Store
 
 DEFAULT_TIMEOUT_S = 1800
@@ -234,7 +234,7 @@ def deliver_research(
     branch = branch_name(f"research-{number}", int(number or 0))
     path = Path("docs/research") / f"issue-{number}.md"
 
-    with worktree(project.repo, base) as work:
+    with worktree(project.repo, fresh_base(project.repo, base, log)) as work:
         _git(work, "checkout", "-b", branch)
         target = work / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -348,7 +348,7 @@ async def build_issue(
     backend: str | None = None
 
     try:
-        with worktree(project.repo, base) as work:
+        with worktree(project.repo, fresh_base(project.repo, base, log)) as work:
             _git(work, "checkout", "-b", branch)
             task = Task(
                 instructions=ISSUE_PROMPT.format(
@@ -455,7 +455,7 @@ async def fix_findings(
     backend: str | None = None
 
     try:
-        with worktree(project.repo, base) as work:
+        with worktree(project.repo, fresh_base(project.repo, base, log)) as work:
             _git(work, "checkout", "-b", branch)
 
             task = Task(

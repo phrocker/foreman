@@ -635,11 +635,11 @@ def test_a_declined_comment_gets_a_reason_and_stays_open(monkeypatch):
     assert calls[0][2] is False
 
 
-def test_a_comment_in_neither_list_is_said_out_loud(monkeypatch):
-    """Silence is how the operator discovers a skipped comment by watching the
-    next dispatch be handed it as though it were new."""
+def test_a_skipped_comment_is_said_out_loud(monkeypatch):
+    """When the agent used the numbering and left one out, silence is how the
+    operator discovers it by watching the next dispatch be handed it as new."""
     from foreman import adversary
-    from foreman.revise import Revision, _answer_threads
+    from foreman.revise import Addressed, Revision, _answer_threads
 
     calls = []
     monkeypatch.setattr(
@@ -647,10 +647,64 @@ def test_a_comment_in_neither_list_is_said_out_loud(monkeypatch):
         "answer_thread",
         lambda tid, body, resolve: calls.append((tid, body, resolve)) or True,
     )
-    _answer_threads(_threads(1), Revision(summary="s"), lambda _: None)
+    _answer_threads(
+        _threads(2),
+        Revision(summary="s", addressed=[Addressed(thread=1, path="a.go", what="done")]),
+        lambda _: None,
+    )
 
-    assert "did not say whether it acted" in calls[0][1]
-    assert calls[0][2] is False
+    assert "did not say whether it acted" in calls[1][1]
+    assert calls[1][2] is False
+
+
+def test_an_agent_that_did_not_number_does_not_paper_the_pull_request(monkeypatch):
+    """Eighteen comments saying nothing reached a real pull request.
+
+    The fallback was written for "answered three of five and skipped two" and
+    fired for "answered all five without filling in a field" — noise worse than
+    silence, on somebody else's repository.
+    """
+    from foreman import adversary
+    from foreman.revise import Addressed, Revision, _answer_threads
+
+    calls = []
+    monkeypatch.setattr(
+        adversary,
+        "answer_thread",
+        lambda tid, body, resolve: calls.append((tid, body, resolve)) or True,
+    )
+    _answer_threads(
+        _threads(3),
+        # Real answers, no thread numbers, and no file anybody's comment is on.
+        Revision(summary="s", addressed=[Addressed(path="elsewhere.go", what="done")]),
+        lambda _: None,
+    )
+    assert calls == []
+
+
+def test_an_unnumbered_answer_is_matched_on_the_file_and_left_open(monkeypatch):
+    """Weaker than a comment number and better than nothing: an agent that named
+    the file has said something about the comment anchored there. It is reported
+    as a guess and the thread stays open for a person to close."""
+    from foreman import adversary
+    from foreman.revise import Addressed, Revision, _answer_threads
+
+    calls = []
+    monkeypatch.setattr(
+        adversary,
+        "answer_thread",
+        lambda tid, body, resolve: calls.append((tid, body, resolve)) or True,
+    )
+    _answer_threads(
+        _threads(1),
+        Revision(summary="s", addressed=[Addressed(path="a.go", what="enforced it at load")]),
+        lambda _: None,
+    )
+
+    assert len(calls) == 1
+    assert "Possibly addressed" in calls[0][1]
+    assert "enforced it at load" in calls[0][1]
+    assert calls[0][2] is False, "a guess must not close a thread"
 
 
 def test_resolution_follows_the_claim_not_the_diff(monkeypatch):
@@ -744,3 +798,59 @@ def test_a_retry_never_forces(tmp_path):
     command = body.split('"push"')[1][:120]
     assert "--force" not in body
     assert "-f" not in command, "the push command must carry no force flag"
+
+
+def test_a_new_branch_is_cut_from_the_fetched_base(tmp_path, monkeypatch):
+    """Every add/add conflict of the day traces to this.
+
+    An agent found it before we did: "this worktree's branch was cut from a
+    stale main (0ae45b2, README only) while origin/main is 365240b with the
+    merged property, lead and routing code — without a rebase,
+    cmd/procareedge/main.go and internal/web/server.go become add/add merge
+    conflicts, because the merge base does not contain them."
+
+    A local `main` is only as current as the last time somebody pulled it, and
+    nothing in a dispatch pulls.
+    """
+    from foreman import revise as rev
+
+    repo = _repo(tmp_path / "r")
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"],
+        capture_output=True,
+        check=True,
+    )
+    assert rev.fresh_base(repo, "main") == "refs/remotes/origin/main"
+
+
+def test_an_unreachable_remote_falls_back_to_the_local_ref(tmp_path):
+    """Offline is a worse base, not no base. The branch still opens — with the
+    conflicts this exists to avoid, which the log says out loud."""
+    from foreman import revise as rev
+
+    # A repository with no remote at all, which `_repo` cannot be — it clones
+    # from one, so it always has the ref this is about not having.
+    repo = tmp_path / "alone"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t.test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True)
+    (repo / "x").write_text("x\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "first"], capture_output=True, check=True
+    )
+
+    said = []
+    assert rev.fresh_base(repo, "main", said.append) == "main"
+    assert any("may be behind" in line for line in said)
+
+
+def test_every_branch_cut_goes_through_the_fetched_base():
+    """`revise` always fetched the branch it was answering and `fix` did not,
+    which is the whole of the asymmetry."""
+    from pathlib import Path as _Path
+
+    source = (_Path(__file__).resolve().parents[1] / "src" / "foreman" / "fix.py").read_text()
+    assert "worktree(project.repo, base)" not in source, "a raw base is a stale base"
+    assert source.count("fresh_base(project.repo, base") == 3

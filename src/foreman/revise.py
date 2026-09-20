@@ -39,6 +39,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -202,6 +203,35 @@ def push(repo: Path, branch: str, log=lambda _: None) -> None:
     raise DeliveryError(f"could not push {branch}: {last}")
 
 
+def fresh_base(repo: Path, base: str, log=lambda _: None) -> str:
+    """Fetch the base and return the ref a new branch should be cut from.
+
+    `revise` always did this for the branch it was answering; `fix` and
+    `build_issue` cut from the local ref and nobody noticed until an agent
+    noticed for us. Its own commit message: "this worktree's branch was cut
+    from a stale main (0ae45b2, README only) while origin/main is 365240b with
+    the merged property, lead and routing code… without a rebase,
+    cmd/procareedge/main.go and internal/web/server.go become add/add merge
+    conflicts, because the merge base does not contain them."
+
+    That is every conflict of the day in one sentence. A local `main` is only
+    as current as the last time somebody pulled it, and nothing in a dispatch
+    pulls — so an agent builds against a repository that has moved, and the
+    pull request arrives conflicting with work that was merged hours earlier.
+
+    A failed fetch falls back to the local ref rather than refusing. Offline is
+    a worse base, not no base, and the branch still opens — with the conflicts
+    this exists to avoid, which the log says out loud.
+    """
+    fetched = _git(repo, "fetch", "origin", base, check=False)
+    del fetched
+    remote = f"refs/remotes/origin/{base}"
+    if _git(repo, "rev-parse", "--verify", "--quiet", remote, check=False):
+        return remote
+    log(f"could not read origin/{base}; cutting from the local ref, which may be behind")
+    return base
+
+
 @contextmanager
 def worktree(repo: Path, start: str) -> Iterator[Path]:
     """A throwaway checkout at `start`, removed whatever happens.
@@ -301,8 +331,23 @@ def _answer_threads(threads: Sequence[dict], revision: Revision, log) -> None:
 
     answered = {a.thread: a for a in revision.addressed if a.thread}
     declined = {d.thread: d for d in revision.declined if d.thread}
-    posted = closed = 0
 
+    # Whether the agent used the numbering at all. It is the difference between
+    # "answered three of five and skipped two" and "answered all five without
+    # filling in a field", and treating the second as the first posted eighteen
+    # comments on one pull request saying nothing — noise worse than silence,
+    # on somebody else's repository.
+    numbered = bool(answered or declined)
+    by_path: dict[str, Any] = {}
+    if not numbered:
+        # Fall back to the file. Weaker than a number and better than nothing:
+        # an agent that named the file it changed has said something about the
+        # comment anchored there.
+        for item in revision.addressed:
+            if item.path:
+                by_path.setdefault(item.path, item)
+
+    posted = closed = 0
     for index, thread in enumerate(threads, start=1):
         thread_id = str(thread.get("id") or "")
         if not thread_id:
@@ -311,19 +356,36 @@ def _answer_threads(threads: Sequence[dict], revision: Revision, log) -> None:
             body, resolve = f"Addressed: {item.what}", True
         elif (item := declined.get(index)) is not None:
             body, resolve = f"Not changed: {item.why}", False
-        else:
-            # Neither list mentions it. Saying so out loud beats silence: the
-            # operator can see the agent skipped one rather than discovering it
-            # when the next dispatch is handed the same comment.
+        elif (item := by_path.get(str(thread.get("path") or ""))) is not None:
+            # Matched on the file rather than the comment, so it is reported as
+            # what it is and the thread is left open for a person to close.
+            body, resolve = (
+                f"Possibly addressed — the agent changed `{item.path}`: {item.what}\n\n"
+                "Matched by file rather than by comment, so this is left open.",
+                False,
+            )
+        elif numbered:
+            # The agent used the numbering and did not mention this one. Saying
+            # so beats silence: the operator sees a skipped comment now rather
+            # than when the next dispatch is handed it as new.
             body, resolve = (
                 "Foreman's agent did not say whether it acted on this. Left open.",
                 False,
             )
+        else:
+            # It answered without numbering and touched no file this comment is
+            # on. There is nothing true to say, so nothing is said.
+            continue
         if answer_thread(thread_id, f"{body}\n\n_Foreman._", resolve=resolve):
             posted += 1
             closed += resolve
     if posted:
         log(f"replied to {posted} thread(s), resolved {closed}")
+    if not numbered and revision.addressed:
+        log(
+            "the agent did not number its answers, so nothing was resolved — "
+            "the threads are annotated where a file matched and left alone otherwise"
+        )
 
 
 async def address_review(
