@@ -128,25 +128,61 @@ async def test_one_angle_failing_does_not_lose_the_others(world):
 
 
 @pytest.mark.asyncio
-async def test_a_diff_too_large_to_read_is_said_out_loud(world):
-    """A confident opinion about the half of a diff that fit is worse than no
-    opinion."""
+async def test_a_large_diff_is_split_rather_than_refused(world):
+    """A 230,188-character pull request got no review at all under the old rule,
+    and reported it in the same words a clean review uses.
+
+    Reviewing none of a change is worse than reviewing it in two halves.
+    """
     from foreman.adversary import MAX_DIFF_CHARS
 
     project, store = world
+    big = "".join(
+        f"diff --git a/f{i}.go b/f{i}.go\n+++ b/f{i}.go\n" + ("+x\n" * 12000) for i in range(4)
+    )
+    assert len(big) > MAX_DIFF_CHARS
+
     reviewer = _Reviewer()
     said = []
-    found = await review_change(
-        project,
-        store,
-        "pull:o/r#1",
-        "goal",
-        "x" * (MAX_DIFF_CHARS + 1),
-        connectors=[reviewer],
-        log=said.append,
+    await review_change(
+        project, store, "pull:o/r#1", "goal", big, connectors=[reviewer], log=said.append
     )
-    assert found == [] and reviewer.seen == []
-    assert any("too large" in line for line in said)
+
+    assert len(reviewer.seen) > len(LENSES), "every angle should read every pass"
+    assert any("passes on file boundaries" in line for line in said)
+
+
+def test_a_file_is_never_split_down_the_middle():
+    """A reviewer shown half a file is being asked about code it cannot see the
+    end of, and objects to a function that is closed on the next page."""
+    from foreman.adversary import split_diff
+
+    one = "diff --git a/big.go b/big.go\n" + ("+x\n" * 50)
+    parts = split_diff(one + one.replace("big", "other"), limit=len(one) + 10)
+
+    assert len(parts) == 2
+    for part in parts:
+        assert part.count("diff --git") == 1
+
+
+def test_a_single_file_over_the_limit_is_still_handed_over_whole():
+    """Splitting inside a file is the thing this must not do, so an oversized
+    one gets its own pass rather than being cut."""
+    from foreman.adversary import split_diff
+
+    huge = "diff --git a/huge.go b/huge.go\n" + ("+x\n" * 1000)
+    parts = split_diff(huge, limit=100)
+
+    assert parts == [huge]
+
+
+def test_not_reviewed_does_not_read_as_nothing_found():
+    """The zero-and-unknown distinction this codebase draws everywhere else,
+    and broke here: "no objections" is a claim about a diff somebody read."""
+    from foreman.adversary import summarise
+
+    assert summarise([], reviewed=False) == "not reviewed"
+    assert summarise([], reviewed=True) == "no objections"
 
 
 def test_an_invented_severity_does_not_earn_high():

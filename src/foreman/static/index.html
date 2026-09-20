@@ -693,6 +693,10 @@
 
   <section id="panel-work" role="tabpanel" hidden>
     <div class="hint">Open pull requests across the portfolio, ordered by what is in the way. Nothing here merges: the diff is the review and the merge is yours.</div>
+    <div class="filters">
+      <button id="refreshPulls">Re-read pull requests</button>
+      <span class="hint">The board knows what the last sweep knew. A pull request opened elsewhere a minute ago is not on it yet.</span>
+    </div>
     <h3 class="act-head">Issues — work somebody wrote down</h3>
     <div id="issueList"></div>
     <h3 class="act-head">Pull requests</h3>
@@ -1545,6 +1549,25 @@ function threadState(r) {
   return parts.length ? parts.join(", ") + " of " + r.threads : `${r.threads} threads`;
 }
 
+/** Re-read one project's pull requests now, rather than at the next sweep. */
+async function refreshPulls() {
+  const button = $("refreshPulls");
+  if (!state.project) {
+    alert("Pick a project first — this re-reads one project's pull requests.");
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "Reading…";
+  try {
+    await fetch(`/api/pulls/refresh?project=${encodeURIComponent(state.project)}`,
+                { method: "POST" });
+    await load();
+  } finally {
+    button.disabled = false;
+    button.textContent = "Re-read pull requests";
+  }
+}
+
 function renderWork() {
   const rows = state.pulls.filter((r) => !state.project || r.project === state.project);
   const list = $("workList");
@@ -1587,6 +1610,11 @@ function renderWork() {
     b.addEventListener("click", () => startRevision(b.dataset.subject, b)));
   list.querySelectorAll(".adv-review").forEach((b) =>
     b.addEventListener("click", () => reviewPull(b.dataset.subject, b)));
+  const refresh = $("refreshPulls");
+  if (refresh && !refresh.dataset.wired) {
+    refresh.dataset.wired = "1";
+    refresh.addEventListener("click", refreshPulls);
+  }
 }
 
 /** Dispatch an agent at one pull request's review comments.

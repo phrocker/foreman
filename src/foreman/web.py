@@ -1157,6 +1157,27 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         finally:
             s.close()
 
+    @app.post("/api/pulls/refresh")
+    async def refresh_pull_list(project: str = Query(...)) -> dict[str, Any]:
+        """Re-read one project's pull requests, on demand.
+
+        The board only knew what the last collection knew, and a pull request
+        opened anywhere else — by a person, by `gh`, by an agent whose job was
+        killed before its refresh ran — stayed invisible until something
+        happened to sweep. Waiting for a nightly run to see a pull request
+        opened two minutes ago is the wrong answer to "where is it".
+        """
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            target = registry.get(project)
+            await collect_project(target, ["pulls"], s)
+            return {"pulls": len(open_pulls(s, registry, project=project))}
+        except KeyError:
+            raise HTTPException(404, f"no project {project!r}") from None
+        finally:
+            s.close()
+
     @app.post("/api/pulls/revise")
     async def revise(subject: str = Query(...)) -> dict[str, Any]:
         """Have an agent answer the review comments on one pull request.
@@ -1525,7 +1546,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         budget=Budget(REVIEW_CEILING_USD),
                         log=note,
                     )
-                    note(summarise(found))
+                    note(summarise(found, reviewed=bool(diff.strip())))
                     if found:
                         # The pull request now carries comments, so its own row
                         # is stale and the Address-comments button belongs on it.

@@ -177,6 +177,42 @@ def severity_of(raw: str) -> Severity:
         return Severity.LOW
 
 
+def split_diff(diff: str, limit: int = MAX_DIFF_CHARS) -> list[str]:
+    """Break a diff into passes that fit, on file boundaries.
+
+    A 230,188-character diff on one pull request was refused outright, and
+    refusing was the wrong answer: reviewing none of a change is worse than
+    reviewing it in two halves. Files are the seam because an objection names
+    one, and a reviewer shown half a file is being asked about code it cannot
+    see the end of.
+
+    A single file over the limit is still handed over whole, in its own pass.
+    Splitting inside a file is how a reviewer comes to object to a function
+    that is closed on the next page.
+    """
+    if len(diff) <= limit:
+        return [diff] if diff.strip() else []
+
+    files, current = [], ""
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git ") and current:
+            files.append(current)
+            current = ""
+        current += line
+    if current:
+        files.append(current)
+
+    passes, batch = [], ""
+    for chunk in files:
+        if batch and len(batch) + len(chunk) > limit:
+            passes.append(batch)
+            batch = ""
+        batch += chunk
+    if batch:
+        passes.append(batch)
+    return passes
+
+
 async def _one(
     lens: Lens,
     project: Project,
@@ -341,11 +377,16 @@ async def review_change(
         connectors = [ClaudeCodeConnector()]
     if not diff.strip():
         return []
-    if len(diff) > MAX_DIFF_CHARS:
-        # Said out loud rather than truncated. A confident opinion about the
-        # half of a diff that fit is worse than no opinion.
-        log(f"{subject}: diff is {len(diff)} chars; too large to review in one pass")
+    # Split rather than refused. Reviewing none of a change is worse than
+    # reviewing it in two halves, and a 230,188-character pull request got no
+    # review at all under the old rule — reported, in the same words a clean
+    # review uses, as "no objections".
+    passes = split_diff(diff)
+    if not passes:
+        log(f"{subject}: nothing to review")
         return []
+    if len(passes) > 1:
+        log(f"{subject}: {len(diff)} chars, reviewed in {len(passes)} passes on file boundaries")
 
     repo = bool(project.repo and project.repo.exists())
     # The reviewers get it too. A scope reviewer that has not been told the
@@ -367,7 +408,7 @@ async def review_change(
                     lens,
                     project,
                     goal,
-                    diff,
+                    part,
                     subject,
                     brief,
                     connectors=connectors,
@@ -375,6 +416,7 @@ async def review_change(
                     model=model,
                     repo=repo,
                 )
+                for part in passes
                 for lens in lenses
             )
         )
@@ -440,8 +482,16 @@ async def review_change(
         )
 
 
-def summarise(findings: Sequence[Finding]) -> str:
-    """One line for a log: which angles objected, and how loudly."""
+def summarise(findings: Sequence[Finding], reviewed: bool = True) -> str:
+    """One line for a log: which angles objected, and how loudly.
+
+    `reviewed` exists because a review that could not run reported the same
+    sentence as one that found nothing — the zero-and-unknown distinction this
+    codebase draws everywhere else and broke here. "No objections" is a claim
+    about a diff somebody read.
+    """
+    if not reviewed:
+        return "not reviewed"
     if not findings:
         return "no objections"
     by_lens: dict[str, int] = {}
