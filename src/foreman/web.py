@@ -187,7 +187,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         s = store()
         try:
             projects = [dict(r) for r in s.project_summary()]
-            findings = s.open_findings()
+            # Decided ones are not open. `open_findings` returns everything that
+            # has not been retired, which includes findings somebody has already
+            # closed out — so the headline read 107 whether or not you had done
+            # any work that day, and the one number a person looks at first was
+            # the one that never moved.
+            findings = [f for f in s.open_findings() if not f["outcome"]]
         finally:
             s.close()
         counts = {"high": 0, "medium": 0, "low": 0}

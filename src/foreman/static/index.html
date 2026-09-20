@@ -657,6 +657,7 @@
       <select id="projectFilter"><option value="">All projects</option></select>
       <input type="search" id="search" placeholder="Filter findings…  (press /)">
     </div>
+    <div class="hint" id="decidedNote" hidden></div>
     <div class="panel scroll">
       <table>
         <thead><tr><th>Severity</th><th>Project</th><th>Finding</th><th class="num">URLs</th></tr></thead>
@@ -793,7 +794,7 @@ const state = {
   openReports: new Set(),
   sevs: new Set(), project: "", q: "", open: new Set(),
   tab: "findings", decisiveOnly: true, kind: "", showRetired: true,
-  showSuperseded: false,
+  showSuperseded: false, showDecided: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -2475,6 +2476,11 @@ function renderProjects() {
 
 function visible() {
   return state.findings.filter((f) =>
+    // A finding you have decided is not open. It stays reachable — the
+    // decision is undoable and the record is the point — but leaving it in the
+    // list meant the board never shrank when you did the work, which is the
+    // one thing it should do.
+    (state.showDecided || !f.outcome) &&
     (state.sevs.size === 0 || state.sevs.has(f.severity)) &&
     (!state.project || f.project === state.project) &&
     (!state.q || (f.summary + " " + f.rule + " " + (f.source || "") + " " + f.subjects.join(" "))
@@ -2483,6 +2489,16 @@ function visible() {
 
 function renderFindings() {
   const rows = visible();
+  const decided = state.findings.filter((f) =>
+    f.outcome && (!state.project || f.project === state.project)).length;
+  const note = $("decidedNote");
+  if (note) {
+    note.hidden = !decided;
+    note.innerHTML = decided
+      ? `${decided} decided and out of the way. <button class="link-ish" id="toggleDecided">${
+          state.showDecided ? "Hide them" : "Show them"}</button>`
+      : "";
+  }
   if (!rows.length) {
     $("findingRows").innerHTML =
       `<tr><td colspan="4" class="empty">${state.findings.length ? "Nothing matches these filters." : "No findings yet. Run a sweep."}</td></tr>`;
@@ -2543,6 +2559,14 @@ function renderFindings() {
 
   document.querySelectorAll(".decide-acted").forEach((b) =>
     b.addEventListener("click", (e) => { e.stopPropagation(); decide(b.dataset.id, "acted"); }));
+  const toggle = $("toggleDecided");
+  if (toggle) {
+    toggle.addEventListener("click", () => {
+      state.showDecided = !state.showDecided;
+      renderFindings();
+      renderCounts();
+    });
+  }
   document.querySelectorAll(".fix-it").forEach((b) =>
     b.addEventListener("click", (e) => {
       e.stopPropagation();

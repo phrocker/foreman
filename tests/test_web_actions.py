@@ -275,3 +275,51 @@ def test_the_page_only_reads_fields_the_api_sends():
     helper = page.split("function fixable(")[1].split("\n}")[0]
     assert "project.fixable" in helper
     assert "answerable" in helper, "it must also know which rules an op already answers"
+
+
+def test_a_decided_finding_is_not_counted_as_open():
+    """ "I hit I fixed this already" — and the headline had not moved.
+
+    `open_findings` returns everything not retired, which includes findings
+    somebody has already closed out. So the one number a person looks at first
+    was the one that never changed when they did the work.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from foreman.models import Finding, Severity
+    from foreman.store import SqliteStore
+    from foreman.web import create_app
+
+    tmp = Path(tempfile.mkdtemp())
+    with SqliteStore(tmp / "t.db") as store:
+        run = store.start_run("p", "crawl")
+        store.finish_run(run, ok=True)
+        store.record_findings(
+            run,
+            [
+                Finding(project="p", rule="a", severity=Severity.HIGH, summary="still open"),
+                Finding(project="p", rule="b", severity=Severity.HIGH, summary="dealt with"),
+            ],
+        )
+        done = [f for f in store.open_findings("p") if f["summary"] == "dealt with"][0]
+        store.set_finding_outcome(int(done["id"]), "acted")
+
+    client = TestClient(create_app(db_path=tmp / "t.db"))
+    totals = client.get("/api/overview").json()["totals"]
+    assert totals["open"] == 1, "a finding somebody closed is not open"
+
+
+def test_the_page_hides_decided_findings_by_default():
+    """They stay reachable — the decision is undoable and the record is the
+    point — but leaving them in the list meant the board never shrank."""
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parents[1] / "src" / "foreman" / "static" / "index.html"
+    ).read_text()
+    visible = page.split("function visible()")[1].split("\n}")[0]
+    assert "showDecided" in visible
+    assert "toggleDecided" in page, "and there has to be a way to see them again"
