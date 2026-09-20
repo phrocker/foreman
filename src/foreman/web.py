@@ -144,7 +144,23 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     #
     # The sweep is still a singleton, and that one is real: two sweeps interleave
     # writes into one snapshot and produce a diff against a half-written run.
+    # Anything still open when this process starts cannot be running: the
+    # process that owned it is gone. Closing them here is what turns "a job slot
+    # that came back empty" — indistinguishable from never having clicked —
+    # into a run that says it was abandoned and when.
+    _opening = open_store(db_path, registry=registry_path)
+    try:
+        _abandoned = _opening.abandon_runs("abandoned: the server restarted")
+    finally:
+        _opening.close()
+
     jobs: dict[str, Job] = {"sweep": Job(kind="sweep")}
+    if _abandoned:
+        jobs["sweep"].log = [
+            f"{_abandoned} run(s) were in flight when this server last stopped and "
+            "are marked abandoned. An agent dispatched from this dashboard dies with "
+            "the process; nothing resumes it."
+        ]
     job = jobs["sweep"]
     revision = job  # kept for the streaming endpoints that predate the registry
 

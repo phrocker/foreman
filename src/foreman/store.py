@@ -91,6 +91,8 @@ class Store(Protocol):
         connector: str | None = None,
     ) -> None: ...
     def recent_runs(self, project: str, collector: str, limit: int = 2) -> list[int]: ...
+    def unfinished_runs(self) -> list[Record]: ...
+    def abandon_runs(self, reason: str) -> int: ...
     def runs(self, run_ids: Sequence[int]) -> list[Record]: ...
     def last_run_time(self, project: str, collector: str) -> str | None: ...
     def sweep_times(self, project: str, limit: int = 2) -> list[str]: ...
@@ -623,6 +625,34 @@ class SqliteStore:
             (project, collector, limit),
         ).fetchall()
         return [int(r["id"]) for r in rows]
+
+    def unfinished_runs(self) -> list[Record]:
+        """Runs that were started and never finished.
+
+        A dispatched agent runs as a task inside the server process, so
+        restarting it kills whatever was in flight — and the operator's only
+        evidence was a job slot that came back empty, which looks exactly like
+        never having clicked. A started run is a durable record that something
+        was attempted, and this is how it is found again.
+        """
+        return _many(
+            self._db.execute(
+                "SELECT * FROM runs WHERE finished_at IS NULL ORDER BY started_at DESC"
+            )
+        )
+
+    def abandon_runs(self, reason: str) -> int:
+        """Close every unfinished run as abandoned, and say why.
+
+        Called at startup. Anything still open at that moment cannot be running
+        — the process that owned it is gone — so leaving it open would make the
+        next restart report the same run again and make a genuinely-running one
+        indistinguishable from a corpse.
+        """
+        rows = self.unfinished_runs()
+        for row in rows:
+            self.finish_run(int(row["id"]), ok=False, error=reason)
+        return len(rows)
 
     def last_run_time(self, project: str, collector: str) -> str | None:
         """When this collector last finished successfully here, if it ever did.

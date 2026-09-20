@@ -433,6 +433,17 @@ class ShoalStore:
         runs.sort(key=lambda r: int(r["id"]), reverse=True)
         return [int(r["id"]) for r in runs[:limit]]
 
+    def unfinished_runs(self) -> list[Record]:
+        rows = [r for r in self._entities("ent:run|").values() if not r.get("finished_at")]
+        rows.sort(key=lambda r: str(r.get("started_at") or ""), reverse=True)
+        return rows
+
+    def abandon_runs(self, reason: str) -> int:
+        rows = self.unfinished_runs()
+        for row in rows:
+            self.finish_run(int(row["id"]), ok=False, error=reason)
+        return len(rows)
+
     def last_run_time(self, project: str, collector: str) -> str | None:
         times = [
             r["finished_at"]
