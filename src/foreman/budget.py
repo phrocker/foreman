@@ -114,3 +114,30 @@ class Budget:
             Budget(limit_usd=share, depth=self.depth + 1, max_depth=self.max_depth)
             for _ in range(n)
         ]
+
+
+def warn_unmetered(budget: Budget | None, connectors, log) -> bool:
+    """Say when a ceiling cannot bind, once, before the spending starts.
+
+    A ceiling is enforced by charging what a backend reports, so a backend
+    that reports no cost makes every charge zero and `exceeded` never true.
+    Codex bills a ChatGPT subscription and reports tokens; selecting it turns
+    every ceiling in this program into a number in a log line.
+
+    That is a reasonable thing to choose and an unreasonable thing to
+    discover. The alternative to saying it is the operator finding out from
+    a usage page, which is the same shape as the bug this ceiling was added
+    to fix — a limit that reports rather than binds.
+
+    Returns whether it warned, so a caller can decide to do more.
+    """
+    if budget is None or not connectors:
+        return False
+    first = connectors[0]
+    if getattr(first, "metered", True):
+        return False
+    log(
+        f"{getattr(first, 'name', 'this backend')} reports tokens rather than "
+        f"cost, so the ${budget.limit_usd:.2f} ceiling cannot bind on this run"
+    )
+    return True

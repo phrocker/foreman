@@ -1031,3 +1031,51 @@ def test_a_pull_request_is_attributed_to_its_project_without_a_snapshot():
     # `slug`-only comparison would have missed.
     assert project_for_pull(registry, "pull:apache/accumulo-website#9").id == "many"
     assert project_for_pull(registry, "pull:someone/else#1") is None
+
+
+def test_an_issue_and_a_pull_are_resolved_by_the_same_code():
+    """The pull path got an auto-refresh and the issue path did not, so a
+    dispatch at an issue filed a minute ago still refused with "no issue ...
+    in the latest snapshot" long after the identical defect was fixed next
+    door. Fixing one and not the other is the mistake worth a test."""
+    from foreman.config import Registry
+    from foreman.work import project_for_subject
+
+    registry = Registry(
+        projects=[Project(id="p", name="P", github=GitHubSurface(owner="o", repo="r"))]
+    )
+    assert project_for_subject(registry, "pull:o/r#1").id == "p"
+    assert project_for_subject(registry, "issue:o/r#1").id == "p"
+    assert project_for_subject(registry, "issue:someone/else#1") is None
+
+
+def test_both_dispatch_paths_read_their_subject_in():
+    """Neither entry point may go back to calling the bare lookup."""
+    import inspect
+
+    from foreman import web
+
+    src = inspect.getsource(web)
+    assert "facts_for_pull(s, subject, note)" in src or "facts_for_pull(st, subject, note)" in src
+    assert "facts_for_issue(st, subject, note)" in src
+    # The bare forms are the bug: they raise instead of reading it in.
+    assert "issue_facts(st, load_registry(registry_path), subject)" not in src
+    assert "pull_facts(st, load_registry(registry_path), subject)" not in src
+
+
+def test_the_refresh_names_a_collector_that_exists():
+    """Naming one that does not fails with a bare KeyError of the name, which
+    reads exactly like the subject being genuinely absent — so the first
+    attempt at the issue refresh looked like the bug it was fixing. Issues
+    come from the `pulls` collector: the name is older than the second thing
+    it collects."""
+    import inspect
+
+    from foreman import web
+    from foreman.collectors import pulls
+
+    src = inspect.getsource(web)
+    assert 'collect_project(project, ["issues"]' not in src
+    assert 'collect_project(project, ["pulls"]' in src
+    assert pulls.Pulls.name == "pulls"
+    assert 'f"issue:' in inspect.getsource(pulls)

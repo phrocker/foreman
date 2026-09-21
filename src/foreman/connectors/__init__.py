@@ -45,6 +45,10 @@ def _make(kind: str, model: str | None) -> Connector:
         from .claudecode import ClaudeCodeConnector
 
         return ClaudeCodeConnector()
+    if kind == "codex":
+        from .codex import CodexConnector
+
+        return CodexConnector()
     raise ValueError(f"unknown connector kind {kind!r}")
 
 

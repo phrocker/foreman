@@ -34,7 +34,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-from .budget import Budget
+from .budget import Budget, warn_unmetered
 from .connectors import WEB, Connector, ConnectorError, Task, choose
 from .graph import skill_run_edges
 from .memory import briefing
@@ -356,6 +356,8 @@ async def research(
     # a different question than one that has not been. The validator is
     # deliberately not given it: its job is whether the source says the thing,
     # and context is exactly what would let it reason its way to yes.
+    warn_unmetered(budget, connectors, log)
+
     brief = briefing(store, project_id)
     run_id = store.start_run(project_id, "research")
     spent = 0.0

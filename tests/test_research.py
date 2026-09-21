@@ -389,3 +389,36 @@ async def test_a_verdict_is_matched_by_number_and_never_by_order(store):
     # failed to answer, it did not decline them.
     assert len(out.unreachable) == 2
     assert not out.rejected
+
+
+@pytest.mark.asyncio
+async def test_a_ceiling_says_so_when_it_cannot_bind(store):
+    """The ceiling added this morning is enforced by charging what a backend
+    reports. A backend that reports tokens instead — Codex bills a
+    subscription — makes every charge 0.00, so the ceiling silently stops
+    being one. Choosing a connector must not quietly undo a budget."""
+    from foreman.budget import Budget
+
+    class Unmetered(_Agents):
+        name = "codex"
+        metered = False
+
+    said = []
+    await research(
+        "p",
+        store,
+        "s",
+        [FACET],
+        budget=Budget(limit_usd=5.0),
+        connectors=[Unmetered(_claims(3))],
+        log=said.append,
+    )
+    assert any("cannot bind" in line for line in said), said
+
+    # A metered backend says nothing, because there is nothing to warn about.
+    quiet = []
+    await research(
+        "p", store, "s", [FACET], budget=Budget(limit_usd=5.0),
+        connectors=[_Agents(_claims(3))], log=quiet.append,
+    )
+    assert not any("cannot bind" in line for line in quiet)

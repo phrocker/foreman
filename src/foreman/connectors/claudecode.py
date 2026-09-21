@@ -42,6 +42,8 @@ CAPABILITY_TOOLS = {
 class ClaudeCodeConnector:
     name = "claude-code"
     capabilities = frozenset({REPO, WEB, SHELL, SKILLS})
+    # Reports total_cost_usd on its result envelope.
+    metered = True
 
     def __init__(self, binary: str = "claude", permission_mode: str = "dontAsk") -> None:
         self.binary = binary

@@ -62,7 +62,14 @@ from .signals import read as read_signals
 from .skills import TrackRecord, merge_label, merge_rate, track_records
 from .skills import label as skill_label
 from .store import Store, open_store
-from .work import issue_facts, open_issues, open_pulls, project_for_pull, pull_facts
+from .work import (
+    issue_facts,
+    open_issues,
+    open_pulls,
+    project_for_pull,
+    project_for_subject,
+    pull_facts,
+)
 
 STATIC = Path(__file__).parent / "static"
 # Matches the CLI, and a quarter is what a report is usually asked for.
@@ -227,6 +234,22 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 slot.log.append(message)
 
         return note
+
+    def backends() -> list:
+        """The connectors this deployment configured, in preference order.
+
+        Read per dispatch rather than held, so editing foreman.yaml takes
+        effect on the next job instead of the next restart — the same reason
+        the registry itself is re-read.
+
+        This exists because the config was being honoured in one half of the
+        program. `foreman connectors` and the CLI built from the registry;
+        every dispatch from the UI let the callee fall back to its hardcoded
+        `[ClaudeCodeConnector()]`. So putting codex first changed what the
+        table said and not what ran, which is worse than not supporting it:
+        the operator is told the switch worked.
+        """
+        return build_connectors(load_registry(registry_path).connectors)
 
     def store() -> Store:
         return open_store(db, registry=registry_path)
@@ -1202,7 +1225,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 try:
                     project, facts = await facts_for_pull(s, subject, note)
                     outcome = await address_review(
-                        project, s, facts, budget=Budget(REVISE_CEILING_USD), log=note
+                        project,
+                        s,
+                        facts,
+                        budget=Budget(REVISE_CEILING_USD),
+                        connectors=backends(),
+                        log=note,
                     )
                     note(
                         f"pushed {len(outcome.files)} file(s): {', '.join(outcome.files)}"
@@ -1254,6 +1282,45 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             await refresh_pulls(project, st, note)
             return pull_facts(st, registry, subject)
 
+    async def facts_for_issue(st, subject, note):
+        """One issue's project and facts, reading it in if it is new.
+
+        The same gap `facts_for_pull` closed, on the other half of the board.
+        An issue filed a minute ago is not in the last sweep, so dispatching
+        work at it refused with "no issue ... in the latest snapshot" — a
+        true statement about Foreman's records presented as though the issue
+        did not exist, long after the identical defect had been fixed for
+        pull requests. Fixing one and not the other was the mistake; they are
+        the same code now.
+        """
+        registry = load_registry(registry_path)
+        try:
+            return issue_facts(st, registry, subject)
+        except KeyError:
+            project = project_for_subject(registry, subject)
+            if project is None:
+                raise
+            note("not in the last sweep — reading this project's issues")
+            await refresh_issues(project, st, note)
+            return issue_facts(st, registry, subject)
+
+    async def refresh_issues(project, st, note) -> None:
+        """Re-read one project's issues.
+
+        Through the `pulls` collector, which reads both — the name is older
+        than the second thing it collects. Naming a collector that does not
+        exist fails with a bare KeyError of the name, which is what the first
+        attempt at this did and is indistinguishable from the subject being
+        genuinely absent.
+
+        Failures are swallowed for the same reason refresh_pulls swallows
+        them: this is a view, not the work.
+        """
+        try:
+            await collect_project(project, ["pulls"], st, log=note)
+        except Exception as exc:  # noqa: BLE001 — a view, not the work
+            note(f"could not refresh the issue list: {exc}")
+
     async def refresh_pulls(project, st, note) -> None:
         """Re-read one project's pull requests, right after changing them.
 
@@ -1303,7 +1370,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 try:
                     project = load_registry(registry_path).get(rows[0]["project"])
                     outcome = await fix_findings(
-                        project, st, rows, budget=Budget(FIX_CEILING_USD), log=note
+                        project,
+                        st,
+                        rows,
+                        budget=Budget(FIX_CEILING_USD),
+                        connectors=backends(),
+                        log=note,
                     )
                     note(
                         f"opened {outcome.note}"
@@ -1433,9 +1505,14 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 st = store()
                 try:
-                    project, facts = issue_facts(st, load_registry(registry_path), subject)
+                    project, facts = await facts_for_issue(st, subject, note)
                     outcome = await build_issue(
-                        project, st, facts, budget=Budget(FIX_CEILING_USD), log=note
+                        project,
+                        st,
+                        facts,
+                        budget=Budget(FIX_CEILING_USD),
+                        connectors=backends(),
+                        log=note,
                     )
                     note(
                         f"opened {outcome.note}"
@@ -1498,7 +1575,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 st = store()
                 try:
-                    project, facts = issue_facts(st, load_registry(registry_path), subject)
+                    project, facts = await facts_for_issue(st, subject, note)
                     topic = about or facts.get("title") or subject
                     result = await run_research(
                         project.id,
@@ -1506,6 +1583,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         topic,
                         COUNTY_FACETS,
                         budget=Budget(RESEARCH_CEILING_USD),
+                        connectors=backends(),
                         log=note,
                     )
                     # Sync, and the loop must not wait on it: a push and a
@@ -1561,6 +1639,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         # loop, since `revise` reads exactly this endpoint.
                         post_to=subject,
                         budget=Budget(REVIEW_CEILING_USD),
+                        connectors=backends(),
                         log=note,
                     )
                     note(summarise(found, reviewed=bool(diff.strip())))
