@@ -45,6 +45,14 @@ DEFAULT_TIMEOUT_S = 1200
 # this is live search rather than reading a diff already in hand.
 DEFAULT_CEILING_USD = 15.0
 
+# How many claims are validated before the budget is consulted again.
+#
+# Small enough that a ceiling bites within a few dollars, large enough that the
+# validators still run concurrently and a run does not take an hour. The
+# failure this bounds is one gather of fifty agents launched before anything
+# could object.
+VALIDATE_BATCH = 8
+
 SUPPORTED, UNSUPPORTED, UNREACHABLE = "supported", "unsupported", "unreachable"
 
 
@@ -234,6 +242,18 @@ class Research:
     gaps: tuple[tuple[str, str], ...]
     cost_usd: float
 
+    # Claims that were gathered and never checked, because the ceiling was
+    # reached first. They are kept and reported rather than dropped, and they
+    # are deliberately not in `checked`: an unvalidated claim must never be
+    # counted among the ones that stood up, which is the only way this can do
+    # real harm rather than merely cost money.
+    unvalidated: tuple[tuple[Facet, Claim], ...] = ()
+
+    @property
+    def halted(self) -> bool:
+        """Whether the ceiling stopped this run before it finished."""
+        return len(self.unvalidated) > 0
+
     @property
     def stands(self) -> tuple[Checked, ...]:
         return tuple(c for c in self.checked if c.stands)
@@ -301,25 +321,62 @@ async def research(
             gaps += [(facet.key, g) for g in result.gaps]
             log(f"{facet.key}: {len(result.claims)} claim(s), {len(result.gaps)} gap(s)")
 
-        log(f"validating {len(pending)} claim(s) against their sources")
-        validated = await asyncio.gather(
-            *(
-                _validate(f, c, connectors=connectors, timeout_s=timeout_s, model=model)
-                for f, c in pending
-            )
-        )
-        checked = []
-        for item, cost in validated:
-            spent += cost
-            checked.append(item)
-
+        # Charged as it is incurred rather than once at the end, which is what
+        # this did — so `Budget(15)` recorded a $78 run after the fact and
+        # stopped nothing. A ceiling checked only after every agent has
+        # finished is an invoice, not a ceiling.
         if budget is not None and spent:
             budget.charge(spent)
 
-        out = Research(subject, tuple(checked), tuple(gaps), round(spent, 2))
+        checked: list[Checked] = []
+        unvalidated: list[tuple[Facet, Claim]] = []
+
+        if budget is not None and budget.exceeded:
+            # Gathering alone passed the ceiling. Validation is the expensive
+            # half — one agent per claim, and there are usually dozens — so
+            # this is the point where stopping is worth the most.
+            unvalidated = list(pending)
+            log(
+                f"ceiling reached while gathering (${spent:.2f} of "
+                f"${budget.limit_usd:.2f}); {len(pending)} claim(s) left unvalidated"
+            )
+        else:
+            log(f"validating {len(pending)} claim(s) against their sources")
+            # In batches, with the budget consulted between them. One agent per
+            # claim in a single gather is what ran away: fifty claims is fifty
+            # agents, all launched before anything could object.
+            for i in range(0, len(pending), VALIDATE_BATCH):
+                batch = pending[i : i + VALIDATE_BATCH]
+                validated = await asyncio.gather(
+                    *(
+                        _validate(f, c, connectors=connectors, timeout_s=timeout_s, model=model)
+                        for f, c in batch
+                    )
+                )
+                for item, cost in validated:
+                    spent += cost
+                    checked.append(item)
+                    if budget is not None:
+                        budget.charge(cost)
+
+                rest = pending[i + VALIDATE_BATCH :]
+                if rest and budget is not None and budget.exceeded:
+                    unvalidated = list(rest)
+                    log(
+                        f"ceiling reached after {len(checked)} claim(s) "
+                        f"(${spent:.2f} of ${budget.limit_usd:.2f}); "
+                        f"{len(rest)} left unvalidated"
+                    )
+                    break
+
+        out = Research(
+            subject, tuple(checked), tuple(gaps), round(spent, 2), tuple(unvalidated)
+        )
         log(
             f"{len(out.stands)} stood up, {len(out.rejected)} rejected, "
-            f"{len(out.unreachable)} unreachable, {len(gaps)} gap(s) — ${spent:.2f}"
+            f"{len(out.unreachable)} unreachable, {len(gaps)} gap(s)"
+            + (f", {len(unvalidated)} unvalidated" if unvalidated else "")
+            + f" — ${spent:.2f}"
         )
         return out
     finally:
@@ -339,8 +396,14 @@ def as_markdown(result: Research) -> str:
     lines = [f"# Research: {result.subject}", ""]
     lines += [
         f"{len(result.stands)} claim(s) stood up to validation, "
-        f"{len(result.rejected)} were rejected, {len(result.unreachable)} could not be checked. "
-        f"${result.cost_usd:.2f}.",
+        f"{len(result.rejected)} were rejected, {len(result.unreachable)} could not be checked"
+        + (
+            f", and {len(result.unvalidated)} were never checked because the spend "
+            "ceiling was reached first"
+            if result.unvalidated
+            else ""
+        )
+        + f". ${result.cost_usd:.2f}.",
         "",
         "Each claim was gathered by one agent and checked by another that saw only the "
         "claim and its source, never the reasoning behind it.",
@@ -357,6 +420,32 @@ def as_markdown(result: Research) -> str:
             source = item.claim.source_title or item.claim.source_url
             lines.append(f"- {item.claim.statement}{when} — [{source}]({item.claim.source_url})")
         lines.append("")
+
+    if result.unvalidated:
+        lines += [
+            "## Not checked",
+            "",
+            "The spend ceiling was reached before these could be put to a validator. "
+            "They are recorded because throwing away paid-for gathering is waste, and "
+            "kept apart from everything above because **nothing here has been checked "
+            "against its own source** — which is the whole of what the claims above "
+            "have and these do not. Raise the ceiling and run it again, or treat each "
+            "of these as a lead rather than a fact.",
+            "",
+        ]
+        # Grouped by facet, the same as the checked claims above, so the two
+        # halves of the document read alike and the difference between them is
+        # the heading rather than the shape.
+        waiting: dict[str, list[Claim]] = {}
+        for facet, claim in result.unvalidated:
+            waiting.setdefault(facet.summary, []).append(claim)
+        for facet_summary, claims in waiting.items():
+            lines += [f"### {facet_summary}", ""]
+            for claim in claims:
+                when = f" _(as of {claim.as_of})_" if claim.as_of else ""
+                source = claim.source_title or claim.source_url
+                lines.append(f"- {claim.statement}{when} — [{source}]({claim.source_url})")
+            lines.append("")
 
     if result.rejected:
         lines += ["## Rejected", "", "Claimed, then not supported by its own source.", ""]

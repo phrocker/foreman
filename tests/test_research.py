@@ -219,3 +219,100 @@ def test_a_domain_that_does_not_parse_gets_no_invented_subject():
     assert subject_of("squibble.shop") is None
     assert subject_of("howardcountyunicycles.com") is None
     assert subject_of("myfinanceadvisor.com") is None
+
+
+def _claims(n: int) -> Gathered:
+    return Gathered(
+        claims=[
+            Claim(statement=f"claim {i}", source_url=f"https://example.test/{i}")
+            for i in range(n)
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_ceiling_stops_the_work_rather_than_recording_it(store):
+    """`Budget(15)` recorded a $78 run and stopped nothing.
+
+    The charge happened once, after every agent had finished — five gatherers
+    and one validator per claim, all launched before anything could object. A
+    ceiling consulted only at the end is an invoice.
+    """
+    from foreman.budget import Budget
+
+    agents = _Agents(_claims(40))
+    budget = Budget(limit_usd=1.0)
+    said = []
+    out = await research(
+        "p",
+        store,
+        "Howard County HVAC",
+        [FACET],
+        budget=budget,
+        connectors=[agents],
+        log=said.append,
+    )
+
+    # 1 gather at $0.50, then validators at $0.10 — the ceiling is reached
+    # part way through and the rest are never launched.
+    assert out.unvalidated, "the ceiling did not stop anything"
+    assert len(out.checked) < 40
+    assert len(out.checked) + len(out.unvalidated) == 40
+    assert out.cost_usd <= 2.0, f"spent ${out.cost_usd} against a $1.00 ceiling"
+    assert any("ceiling reached" in line for line in said)
+
+
+@pytest.mark.asyncio
+async def test_a_claim_that_was_never_checked_does_not_stand(store):
+    """The only way this does harm rather than merely costing money: an
+    unvalidated claim counted among the ones that stood up."""
+    from foreman.budget import Budget
+
+    agents = _Agents(_claims(40))
+    out = await research(
+        "p", store, "s", [FACET], budget=Budget(limit_usd=1.0), connectors=[agents]
+    )
+
+    assert out.unvalidated
+    for _, claim in out.unvalidated:
+        assert all(c.claim.statement != claim.statement for c in out.stands)
+
+    # And the document says so, in its own section and in its summary.
+    doc = as_markdown(out)
+    assert "## Not checked" in doc
+    assert "never checked because the spend ceiling" in doc
+    assert "nothing here has been checked" in doc
+
+
+@pytest.mark.asyncio
+async def test_gathering_past_the_ceiling_skips_validation_entirely(store):
+    """Validation is one agent per claim and is the expensive half, so the
+    gather boundary is where stopping is worth the most."""
+    from foreman.budget import Budget
+
+    agents = _Agents(_claims(10))
+    out = await research(
+        "p", store, "s", [FACET], budget=Budget(limit_usd=0.25), connectors=[agents]
+    )
+
+    assert out.checked == ()
+    assert len(out.unvalidated) == 10
+    # One gather and nothing else.
+    assert len(agents.seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_run_inside_its_ceiling_is_unchanged(store):
+    """The ordinary case has to keep working: everything validated, nothing
+    left over, no mention of a ceiling anywhere."""
+    from foreman.budget import Budget
+
+    agents = _Agents(_claims(5))
+    out = await research(
+        "p", store, "s", [FACET], budget=Budget(limit_usd=100.0), connectors=[agents]
+    )
+
+    assert len(out.checked) == 5
+    assert out.unvalidated == ()
+    assert not out.halted
+    assert "## Not checked" not in as_markdown(out)
