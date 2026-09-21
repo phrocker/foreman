@@ -1003,3 +1003,31 @@ async def test_a_run_that_changed_nothing_still_answers_the_threads(world, monke
     assert said, "a run that changed nothing said nothing on the review"
     # The reply says where the change is, rather than implying this run made it.
     assert any("Already on this branch" in body for _, body, _ in said)
+
+
+def test_a_pull_request_is_attributed_to_its_project_without_a_snapshot():
+    """A pull request opened a minute ago is not in the last sweep, and every
+    dispatch that acts on one refused with "no pull request ... in the latest
+    snapshot" — a true statement about Foreman's records, presented as though
+    the pull request did not exist. Resolving the project needs only the slug,
+    which is what lets a dispatch read the missing rows instead of refusing.
+    """
+    from foreman.config import Registry
+    from foreman.work import project_for_pull
+
+    registry = Registry(
+        projects=[
+            Project(id="p", name="P", github=GitHubSurface(owner="o", repo="r")),
+            Project(
+                id="many",
+                name="Many",
+                github=GitHubSurface(owner="apache", repo="accumulo", also=["accumulo-website"]),
+            ),
+        ]
+    )
+
+    assert project_for_pull(registry, "pull:o/r#25").id == "p"
+    # A secondary repository is still that project's, which is the case a
+    # `slug`-only comparison would have missed.
+    assert project_for_pull(registry, "pull:apache/accumulo-website#9").id == "many"
+    assert project_for_pull(registry, "pull:someone/else#1") is None

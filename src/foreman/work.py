@@ -215,3 +215,19 @@ def pull_facts(store: Store, registry: Any, subject: str) -> tuple[Any, dict[str
         if facts is not None:
             return target, {**facts, "slug": slug, "number": number}
     raise KeyError(f"no pull request {subject!r} in the latest snapshot")
+
+
+def project_for_pull(registry: Any, subject: str) -> Any | None:
+    """The project whose GitHub surface covers a pull request's repository.
+
+    Resolved from the subject rather than from the snapshot, so that a pull
+    request the snapshot has never seen can still be attributed to the project
+    that has to be read to find it. `pull_facts` needs a row; this needs only
+    a slug, which is the difference that lets a dispatch fetch what is missing
+    instead of refusing.
+    """
+    slug = subject.removeprefix("pull:").partition("#")[0]
+    for target in registry.active:
+        if target.github is not None and slug in target.github.slugs:
+            return target
+    return None

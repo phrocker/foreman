@@ -62,7 +62,7 @@ from .signals import read as read_signals
 from .skills import TrackRecord, merge_label, merge_rate, track_records
 from .skills import label as skill_label
 from .store import Store, open_store
-from .work import issue_facts, open_issues, open_pulls, pull_facts
+from .work import issue_facts, open_issues, open_pulls, project_for_pull, pull_facts
 
 STATIC = Path(__file__).parent / "static"
 # Matches the CLI, and a quarter is what a report is usually asked for.
@@ -1200,7 +1200,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 s = store()
                 try:
-                    project, facts = pull_facts(s, load_registry(registry_path), subject)
+                    project, facts = await facts_for_pull(s, subject, note)
                     outcome = await address_review(
                         project, s, facts, budget=Budget(REVISE_CEILING_USD), log=note
                     )
@@ -1227,6 +1227,32 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         asyncio.create_task(work())
         return slot.as_dict()
+
+    async def facts_for_pull(st, subject, note):
+        """One pull request's project and facts, reading it in if it is new.
+
+        The snapshot is written by a sweep, so a pull request opened a minute
+        ago is not in it, and every dispatch that acts on one refused with
+        `no pull request ... in the latest snapshot` — a true statement about
+        Foreman's records presented as though the pull request did not exist.
+        The operator's recourse was to know that `/api/pulls/refresh` had to be
+        called first, which is a sweep's schedule leaking into the one moment
+        somebody is trying to act on a change they just made.
+
+        The second lookup is allowed to raise. If the project's pull requests
+        have just been read and the subject is still missing, it really is not
+        there.
+        """
+        registry = load_registry(registry_path)
+        try:
+            return pull_facts(st, registry, subject)
+        except KeyError:
+            project = project_for_pull(registry, subject)
+            if project is None:
+                raise
+            note("not in the last sweep — reading this project's pull requests")
+            await refresh_pulls(project, st, note)
+            return pull_facts(st, registry, subject)
 
     async def refresh_pulls(project, st, note) -> None:
         """Re-read one project's pull requests, right after changing them.
@@ -1515,7 +1541,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 st = store()
                 try:
-                    project, facts = pull_facts(st, load_registry(registry_path), subject)
+                    project, facts = await facts_for_pull(st, subject, note)
                     if project.repo is None or not project.repo.exists():
                         note("no local checkout, so there is no diff to read")
                         return
