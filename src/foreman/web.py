@@ -235,6 +235,22 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         return note
 
+    def backends() -> list:
+        """The connectors this deployment configured, in preference order.
+
+        Read per dispatch rather than held, so editing foreman.yaml takes
+        effect on the next job instead of the next restart — the same reason
+        the registry itself is re-read.
+
+        This exists because the config was being honoured in one half of the
+        program. `foreman connectors` and the CLI built from the registry;
+        every dispatch from the UI let the callee fall back to its hardcoded
+        `[ClaudeCodeConnector()]`. So putting codex first changed what the
+        table said and not what ran, which is worse than not supporting it:
+        the operator is told the switch worked.
+        """
+        return build_connectors(load_registry(registry_path).connectors)
+
     def store() -> Store:
         return open_store(db, registry=registry_path)
 
@@ -1209,7 +1225,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 try:
                     project, facts = await facts_for_pull(s, subject, note)
                     outcome = await address_review(
-                        project, s, facts, budget=Budget(REVISE_CEILING_USD), log=note
+                        project,
+                        s,
+                        facts,
+                        budget=Budget(REVISE_CEILING_USD),
+                        connectors=backends(),
+                        log=note,
                     )
                     note(
                         f"pushed {len(outcome.files)} file(s): {', '.join(outcome.files)}"
@@ -1340,7 +1361,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 try:
                     project = load_registry(registry_path).get(rows[0]["project"])
                     outcome = await fix_findings(
-                        project, st, rows, budget=Budget(FIX_CEILING_USD), log=note
+                        project,
+                        st,
+                        rows,
+                        budget=Budget(FIX_CEILING_USD),
+                        connectors=backends(),
+                        log=note,
                     )
                     note(
                         f"opened {outcome.note}"
@@ -1472,7 +1498,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 try:
                     project, facts = await facts_for_issue(st, subject, note)
                     outcome = await build_issue(
-                        project, st, facts, budget=Budget(FIX_CEILING_USD), log=note
+                        project,
+                        st,
+                        facts,
+                        budget=Budget(FIX_CEILING_USD),
+                        connectors=backends(),
+                        log=note,
                     )
                     note(
                         f"opened {outcome.note}"
@@ -1543,6 +1574,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         topic,
                         COUNTY_FACETS,
                         budget=Budget(RESEARCH_CEILING_USD),
+                        connectors=backends(),
                         log=note,
                     )
                     # Sync, and the loop must not wait on it: a push and a
@@ -1598,6 +1630,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         # loop, since `revise` reads exactly this endpoint.
                         post_to=subject,
                         budget=Budget(REVIEW_CEILING_USD),
+                        connectors=backends(),
                         log=note,
                     )
                     note(summarise(found, reviewed=bool(diff.strip())))

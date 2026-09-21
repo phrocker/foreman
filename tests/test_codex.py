@@ -269,3 +269,45 @@ def test_a_metered_backend_is_not_warned_about():
 
     # No budget, nothing to warn about.
     assert not warn_unmetered(None, [CodexConnector(binary="/bin/true")], said.append)
+
+
+def test_the_ui_dispatches_use_the_configured_backends():
+    """The config was honoured in one half of the program.
+
+    `foreman connectors` and the CLI built from the registry; every dispatch
+    from the UI let the callee fall back to its hardcoded
+    `[ClaudeCodeConnector()]`. So putting codex first changed what the table
+    said and not what ran — which is worse than not supporting codex at all,
+    because the operator is told the switch worked. It was found by
+    dispatching a real build and reading $4.86 off a backend that cannot
+    report cost.
+    """
+    import inspect
+
+    from foreman import web
+
+    src = inspect.getsource(web)
+    for call in (
+        "await address_review(",
+        "await fix_findings(",
+        "await build_issue(",
+        "await run_research(",
+        "await review_change(",
+    ):
+        i = src.index(call)
+        # The call's own argument list, to the first line that closes it.
+        window = src[i : i + 700]
+        assert "connectors=backends()" in window, f"{call} does not pass the configured backends"
+
+
+def test_the_backends_are_read_per_dispatch():
+    """Held once, editing foreman.yaml would need a restart to take effect —
+    and the symptom would be a config that looks applied and is not, which is
+    the bug this whole thread was."""
+    import inspect
+
+    from foreman import web
+
+    src = inspect.getsource(web)
+    i = src.index("def backends()")
+    assert "load_registry(registry_path)" in src[i : i + 900]

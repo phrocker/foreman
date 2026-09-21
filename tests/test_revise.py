@@ -1061,3 +1061,21 @@ def test_both_dispatch_paths_read_their_subject_in():
     # The bare forms are the bug: they raise instead of reading it in.
     assert "issue_facts(st, load_registry(registry_path), subject)" not in src
     assert "pull_facts(st, load_registry(registry_path), subject)" not in src
+
+
+def test_the_refresh_names_a_collector_that_exists():
+    """Naming one that does not fails with a bare KeyError of the name, which
+    reads exactly like the subject being genuinely absent — so the first
+    attempt at the issue refresh looked like the bug it was fixing. Issues
+    come from the `pulls` collector: the name is older than the second thing
+    it collects."""
+    import inspect
+
+    from foreman import web
+    from foreman.collectors import pulls
+
+    src = inspect.getsource(web)
+    assert 'collect_project(project, ["issues"]' not in src
+    assert 'collect_project(project, ["pulls"]' in src
+    assert pulls.Pulls.name == "pulls"
+    assert 'f"issue:' in inspect.getsource(pulls)
