@@ -43,7 +43,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .budget import Budget
+from .budget import Budget, warn_unmetered
 from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import DeliveryError, default_branch
@@ -444,6 +444,8 @@ async def address_review(
         from .connectors.claudecode import ClaudeCodeConnector
 
         connectors = [ClaudeCodeConnector()]
+
+    warn_unmetered(budget, connectors, log)
     # Before anything, including the checkout test. A stewarded project could
     # one day have a local clone — that is a convenience for reading it, never
     # permission to push to it.

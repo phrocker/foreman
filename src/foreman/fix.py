@@ -34,7 +34,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .budget import Budget
+from .budget import Budget, warn_unmetered
 from .config import Project
 from .connectors import REPO, SHELL, Connector, ConnectorError, Task, choose
 from .delivery import branch_name, default_branch, open_pull_request
@@ -334,6 +334,8 @@ async def build_issue(
         from .connectors.claudecode import ClaudeCodeConnector
 
         connectors = [ClaudeCodeConnector()]
+
+    warn_unmetered(budget, connectors, log)
     if not project.writable:
         note = f"{project.id} is stewarded; Foreman never writes to it"
         return Result(False, (), None, 0.0, note)

@@ -35,7 +35,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .budget import Budget
+from .budget import Budget, warn_unmetered
 from .collectors.github import GitHubError
 from .config import Project
 from .connectors import REPO, Connector, ConnectorError, Task, choose
@@ -375,6 +375,8 @@ async def review_change(
         from .connectors.claudecode import ClaudeCodeConnector
 
         connectors = [ClaudeCodeConnector()]
+
+    warn_unmetered(budget, connectors, log)
     if not diff.strip():
         return []
     # Split rather than refused. Reviewing none of a change is worse than

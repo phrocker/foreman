@@ -234,3 +234,38 @@ def test_the_schema_is_rewritten_the_way_the_api_will_accept_it():
     nested = out["$defs"]["Nested"]
     assert nested["additionalProperties"] is False
     assert nested["required"] == ["note"]
+
+
+@pytest.mark.parametrize("module", ["research", "adversary", "revise", "fix"])
+def test_every_budgeted_path_says_when_its_ceiling_cannot_bind(module):
+    """Five entry points hold a Budget and only research warned.
+
+    Moving work to Codex turns all of them into numbers in a log line at
+    once, so the one that happens to say so is not enough — the operator
+    would learn it from research and assume it of nothing else.
+    """
+    import importlib
+    import inspect
+
+    src = inspect.getsource(importlib.import_module(f"foreman.{module}"))
+    assert "warn_unmetered(budget, connectors, log)" in src, (
+        f"{module} takes a budget and never says when it cannot bind"
+    )
+
+
+def test_a_metered_backend_is_not_warned_about():
+    """The warning has to be about the backend, not about having a budget at
+    all, or it becomes noise that gets filtered out."""
+    from foreman.budget import Budget, warn_unmetered
+
+    said = []
+    metered = CodexConnector(binary="/bin/true")
+    object.__setattr__(metered, "metered", True)
+    assert not warn_unmetered(Budget(limit_usd=5), [metered], said.append)
+    assert said == []
+
+    assert warn_unmetered(Budget(limit_usd=5), [CodexConnector(binary="/bin/true")], said.append)
+    assert "cannot bind" in said[0]
+
+    # No budget, nothing to warn about.
+    assert not warn_unmetered(None, [CodexConnector(binary="/bin/true")], said.append)
