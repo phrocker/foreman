@@ -121,6 +121,21 @@ class Connector(Protocol):
     name: str
     capabilities: frozenset[str]
 
+    # Whether this backend reports what a run cost in money.
+    #
+    # Not every one can. Codex bills a ChatGPT subscription and reports
+    # tokens, so its `cost_usd` is always 0.0 — which is true in the sense
+    # that no per-token charge was incurred and false in every sense a
+    # ceiling cares about. A caller holding a Budget needs to tell "this cost
+    # nothing" from "this cost is not measured", because the second one means
+    # the ceiling cannot bind and saying nothing would be the invoice bug
+    # wearing a different hat.
+    #
+    # Defaulted True in the two implementations that report cost; a connector
+    # that omits it is assumed to meter, which is the safe reading for
+    # anything already written against this protocol.
+    metered: bool
+
     def available(self) -> bool:
         """Whether this could run right now — binary installed, key present."""
         ...

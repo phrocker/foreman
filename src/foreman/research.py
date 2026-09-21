@@ -356,6 +356,16 @@ async def research(
     # a different question than one that has not been. The validator is
     # deliberately not given it: its job is whether the source says the thing,
     # and context is exactly what would let it reason its way to yes.
+    # A ceiling cannot bind through a backend that does not report cost, and
+    # research is where that matters most: five gatherers and a validator per
+    # document, which is the fan-out the ceiling was added for this morning.
+    # Said once, plainly, rather than left to be discovered from usage.
+    if budget is not None and not getattr(connectors[0], "metered", True):
+        log(
+            f"{connectors[0].name} reports tokens rather than cost, so the "
+            f"${budget.limit_usd:.2f} ceiling cannot bind on this run"
+        )
+
     brief = briefing(store, project_id)
     run_id = store.start_run(project_id, "research")
     spent = 0.0
