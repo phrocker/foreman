@@ -217,6 +217,22 @@ def pull_facts(store: Store, registry: Any, subject: str) -> tuple[Any, dict[str
     raise KeyError(f"no pull request {subject!r} in the latest snapshot")
 
 
+def project_for_subject(registry: Any, subject: str) -> Any | None:
+    """The project whose GitHub surface covers a pull request or an issue.
+
+    One function for both, because they differ only in a prefix and having
+    two was how the issue path came to be missing the fix the pull path got:
+    a dispatch at an issue filed a minute ago refused with "no issue ... in
+    the latest snapshot" long after the same defect had been fixed next door.
+    """
+    _, _, rest = subject.partition(":")
+    slug = rest.partition("#")[0]
+    for target in registry.active:
+        if target.github is not None and slug in target.github.slugs:
+            return target
+    return None
+
+
 def project_for_pull(registry: Any, subject: str) -> Any | None:
     """The project whose GitHub surface covers a pull request's repository.
 
@@ -226,8 +242,4 @@ def project_for_pull(registry: Any, subject: str) -> Any | None:
     a slug, which is the difference that lets a dispatch fetch what is missing
     instead of refusing.
     """
-    slug = subject.removeprefix("pull:").partition("#")[0]
-    for target in registry.active:
-        if target.github is not None and slug in target.github.slugs:
-            return target
-    return None
+    return project_for_subject(registry, subject)

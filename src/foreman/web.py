@@ -62,7 +62,14 @@ from .signals import read as read_signals
 from .skills import TrackRecord, merge_label, merge_rate, track_records
 from .skills import label as skill_label
 from .store import Store, open_store
-from .work import issue_facts, open_issues, open_pulls, project_for_pull, pull_facts
+from .work import (
+    issue_facts,
+    open_issues,
+    open_pulls,
+    project_for_pull,
+    project_for_subject,
+    pull_facts,
+)
 
 STATIC = Path(__file__).parent / "static"
 # Matches the CLI, and a quarter is what a report is usually asked for.
@@ -1254,6 +1261,36 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             await refresh_pulls(project, st, note)
             return pull_facts(st, registry, subject)
 
+    async def facts_for_issue(st, subject, note):
+        """One issue's project and facts, reading it in if it is new.
+
+        The same gap `facts_for_pull` closed, on the other half of the board.
+        An issue filed a minute ago is not in the last sweep, so dispatching
+        work at it refused with "no issue ... in the latest snapshot" — a
+        true statement about Foreman's records presented as though the issue
+        did not exist, long after the identical defect had been fixed for
+        pull requests. Fixing one and not the other was the mistake; they are
+        the same code now.
+        """
+        registry = load_registry(registry_path)
+        try:
+            return issue_facts(st, registry, subject)
+        except KeyError:
+            project = project_for_subject(registry, subject)
+            if project is None:
+                raise
+            note("not in the last sweep — reading this project's issues")
+            await refresh_issues(project, st, note)
+            return issue_facts(st, registry, subject)
+
+    async def refresh_issues(project, st, note) -> None:
+        """Re-read one project's issues. Failures are swallowed for the same
+        reason refresh_pulls swallows them: this is a view, not the work."""
+        try:
+            await collect_project(project, ["issues"], st, log=note)
+        except Exception as exc:  # noqa: BLE001 — a view, not the work
+            note(f"could not refresh the issue list: {exc}")
+
     async def refresh_pulls(project, st, note) -> None:
         """Re-read one project's pull requests, right after changing them.
 
@@ -1433,7 +1470,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 st = store()
                 try:
-                    project, facts = issue_facts(st, load_registry(registry_path), subject)
+                    project, facts = await facts_for_issue(st, subject, note)
                     outcome = await build_issue(
                         project, st, facts, budget=Budget(FIX_CEILING_USD), log=note
                     )
@@ -1498,7 +1535,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 st = store()
                 try:
-                    project, facts = issue_facts(st, load_registry(registry_path), subject)
+                    project, facts = await facts_for_issue(st, subject, note)
                     topic = about or facts.get("title") or subject
                     result = await run_research(
                         project.id,
