@@ -1305,10 +1305,19 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             return issue_facts(st, registry, subject)
 
     async def refresh_issues(project, st, note) -> None:
-        """Re-read one project's issues. Failures are swallowed for the same
-        reason refresh_pulls swallows them: this is a view, not the work."""
+        """Re-read one project's issues.
+
+        Through the `pulls` collector, which reads both — the name is older
+        than the second thing it collects. Naming a collector that does not
+        exist fails with a bare KeyError of the name, which is what the first
+        attempt at this did and is indistinguishable from the subject being
+        genuinely absent.
+
+        Failures are swallowed for the same reason refresh_pulls swallows
+        them: this is a view, not the work.
+        """
         try:
-            await collect_project(project, ["issues"], st, log=note)
+            await collect_project(project, ["pulls"], st, log=note)
         except Exception as exc:  # noqa: BLE001 — a view, not the work
             note(f"could not refresh the issue list: {exc}")
 
