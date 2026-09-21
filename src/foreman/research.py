@@ -45,12 +45,14 @@ DEFAULT_TIMEOUT_S = 1200
 # this is live search rather than reading a diff already in hand.
 DEFAULT_CEILING_USD = 15.0
 
-# How many claims are validated before the budget is consulted again.
+# How many source documents are validated before the budget is consulted
+# again.
 #
-# Small enough that a ceiling bites within a few dollars, large enough that the
-# validators still run concurrently and a run does not take an hour. The
-# failure this bounds is one gather of fifty agents launched before anything
-# could object.
+# Documents rather than claims, because one validator now reads one document
+# and answers for every claim against it. Small enough that a ceiling bites
+# within a few dollars, large enough that the validators still run
+# concurrently. The failure this bounds is one gather of fifty agents launched
+# before anything could object.
 VALIDATE_BATCH = 8
 
 SUPPORTED, UNSUPPORTED, UNREACHABLE = "supported", "unsupported", "unreachable"
@@ -92,6 +94,11 @@ class Gathered(BaseModel):
 
 
 class Verdict(BaseModel):
+    # Which claim this answers, by its position in the list the validator was
+    # given. Explicit because a model asked for eight verdicts will sometimes
+    # return seven, and silently pairing them off by order is how claim three
+    # gets claim four's verdict.
+    claim: int = 0
     verdict: str = UNSUPPORTED
     # Why, in the validator's words. A bare verdict cannot be argued with.
     reason: str = ""
@@ -99,6 +106,26 @@ class Verdict(BaseModel):
     # most useful field on this object: a claim that is nearly right is more
     # dangerous than one that is wrong.
     actually: str = ""
+
+
+class Verdicts(BaseModel):
+    """One verdict per claim, for a whole document read once.
+
+    The validator used to be one agent per claim, each fetching the source
+    itself — so a Howard County fee schedule cited by thirty-two claims was
+    fetched, read and paid for thirty-two times. Across three counties the
+    corpus was 224 citations over 115 distinct documents: half the work was
+    re-reading pages already read in the same run.
+
+    Grouping by document is the whole optimisation. The adversarial property
+    is untouched — the validator still fetches the source itself and still
+    never sees the gatherer's reasoning — and a validator holding every claim
+    made against one document can also catch the case a per-claim validator
+    structurally cannot: two claims that are each defensible and together
+    contradict each other.
+    """
+
+    verdicts: list[Verdict] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -153,19 +180,21 @@ it was true.
 `gaps` — what you looked for and could not source, in plain terms.
 """
 
-VALIDATE_PROMPT = """Check whether this source actually says this.
-
-## The claim
-
-{statement}
+VALIDATE_PROMPT = """Check whether this source actually says these things.
 
 ## The source
 
 {url}
 
+## The claims
+
+{claims}
+
 ## What to do
 
-Read the source. Decide whether it supports the claim as written.
+Read the source once. Decide, for each claim, whether it supports that claim
+as written. Answer with one verdict per claim, each naming the claim's number.
+Every claim must get a verdict, including ones you are confident about.
 
 Answer `supported` only if somebody following that link would find the claim
 there. Answer `unsupported` if the source does not say it, says something
@@ -176,6 +205,10 @@ claim's fault and must not be recorded as one.
 **A claim that is nearly right is more dangerous than one that is wrong**,
 because it survives review. If the source says something close but not the
 same, say `unsupported` and put what it actually says in `actually`.
+
+You are seeing every claim made against this one document, which a validator
+reading them one at a time could not. If two of them contradict each other,
+at least one is wrong even where each looks defensible alone — say so.
 
 You have not been shown the reasoning behind the claim, deliberately. The
 question is not whether the claim is plausible. It is whether the source says
@@ -209,16 +242,25 @@ async def _gather(
 
 
 async def _validate(
-    facet: Facet,
-    claim: Claim,
+    url: str,
+    items: Sequence[tuple[Facet, Claim]],
     *,
     connectors: list[Connector],
     timeout_s: int,
     model: str | None,
-) -> tuple[Checked, float]:
+) -> tuple[list[Checked], float]:
+    """Check every claim made against one document, reading it once.
+
+    One agent per claim was the shape before, and it meant a document cited
+    thirty-two times was fetched thirty-two times in the same run. The
+    validator still reads the source itself — that is what makes this a check
+    rather than a second opinion — but it now reads it once and answers for
+    all of them.
+    """
+    numbered = "\n".join(f"{i + 1}. {claim.statement}" for i, (_, claim) in enumerate(items))
     task = Task(
-        instructions=VALIDATE_PROMPT.format(statement=claim.statement, url=claim.source_url),
-        schema=Verdict,
+        instructions=VALIDATE_PROMPT.format(url=url, claims=numbered),
+        schema=Verdicts,
         needs=frozenset({WEB}),
         timeout_s=timeout_s,
         model=model,
@@ -227,12 +269,37 @@ async def _validate(
         result = await choose(connectors, task).run(task)
     except ConnectorError as exc:
         # An unreachable validator is not a failed claim. Recording it as one
-        # would let a flaky network quietly delete good evidence.
+        # would let a flaky network quietly delete good evidence — and now it
+        # would delete every claim against this document at once, which makes
+        # getting it right more important rather than less.
         return (
-            Checked(facet, claim, Verdict(verdict=UNREACHABLE, reason=str(exc))),
+            [
+                Checked(facet, claim, Verdict(verdict=UNREACHABLE, reason=str(exc)))
+                for facet, claim in items
+            ],
             exc.cost_usd,
         )
-    return (Checked(facet, claim, result.value), result.cost_usd)
+
+    # Paired by the number the validator was asked to give, never by order. A
+    # model asked for eight verdicts sometimes returns seven, and zipping them
+    # would hand claim three the verdict for claim four — the failure mode
+    # that is worse than no answer, because it is a wrong answer that looks
+    # like a right one.
+    by_number = {v.claim: v for v in result.value.verdicts if 1 <= v.claim <= len(items)}
+    checked = []
+    for i, (facet, claim) in enumerate(items, start=1):
+        verdict = by_number.get(i)
+        if verdict is None:
+            # Unreachable rather than unsupported: the validator did not
+            # decline this claim, it failed to answer about it, and the two
+            # must not be recorded as the same thing.
+            verdict = Verdict(
+                verdict=UNREACHABLE,
+                reason="the validator returned no verdict for this claim",
+            )
+        checked.append(Checked(facet, claim, verdict))
+    return (checked, result.cost_usd)
+
 
 
 @dataclass(frozen=True)
@@ -341,31 +408,45 @@ async def research(
                 f"${budget.limit_usd:.2f}); {len(pending)} claim(s) left unvalidated"
             )
         else:
-            log(f"validating {len(pending)} claim(s) against their sources")
-            # In batches, with the budget consulted between them. One agent per
-            # claim in a single gather is what ran away: fifty claims is fifty
-            # agents, all launched before anything could object.
-            for i in range(0, len(pending), VALIDATE_BATCH):
-                batch = pending[i : i + VALIDATE_BATCH]
+            # Grouped by document, because that is what the validator reads.
+            # Measured across three counties: 224 claims citing 115 distinct
+            # documents, one of them cited thirty-two times — so half the
+            # validation was re-reading pages already read in the same run.
+            documents: dict[str, list[tuple[Facet, Claim]]] = {}
+            for item in pending:
+                documents.setdefault(item[1].source_url, []).append(item)
+
+            groups = list(documents.items())
+            log(
+                f"validating {len(pending)} claim(s) against "
+                f"{len(groups)} distinct source(s)"
+            )
+
+            done = 0
+            for i in range(0, len(groups), VALIDATE_BATCH):
+                batch = groups[i : i + VALIDATE_BATCH]
                 validated = await asyncio.gather(
                     *(
-                        _validate(f, c, connectors=connectors, timeout_s=timeout_s, model=model)
-                        for f, c in batch
+                        _validate(
+                            url, items, connectors=connectors, timeout_s=timeout_s, model=model
+                        )
+                        for url, items in batch
                     )
                 )
-                for item, cost in validated:
+                for items, cost in validated:
                     spent += cost
-                    checked.append(item)
+                    checked.extend(items)
+                    done += len(items)
                     if budget is not None:
                         budget.charge(cost)
 
-                rest = pending[i + VALIDATE_BATCH :]
+                rest = groups[i + VALIDATE_BATCH :]
                 if rest and budget is not None and budget.exceeded:
-                    unvalidated = list(rest)
+                    unvalidated = [item for _, items in rest for item in items]
                     log(
-                        f"ceiling reached after {len(checked)} claim(s) "
+                        f"ceiling reached after {done} claim(s) "
                         f"(${spent:.2f} of ${budget.limit_usd:.2f}); "
-                        f"{len(rest)} left unvalidated"
+                        f"{len(unvalidated)} left unvalidated"
                     )
                     break
 

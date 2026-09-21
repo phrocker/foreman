@@ -7,6 +7,8 @@ avoid. So the properties under test are all about what gets *rejected*.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from foreman.connectors import Result
@@ -16,10 +18,13 @@ from foreman.research import (
     Facet,
     Gathered,
     Verdict,
+    Verdicts,
     as_markdown,
     research,
 )
 from foreman.store import SqliteStore
+
+_numbered = re.compile(r"^\d+\. ")
 
 FACET = Facet("permits", "Permits", "what permits are required")
 
@@ -41,8 +46,15 @@ class _Agents:
         self.seen.append(task)
         if task.schema is Gathered:
             return Result(value=self.gathered, cost_usd=0.5, connector=self.name)
-        verdict = self.verdicts.pop(0) if self.verdicts else Verdict(verdict="supported")
-        return Result(value=verdict, cost_usd=0.1, connector=self.name)
+        # One validator now reads one document and answers for every claim
+        # against it, so the fake answers the same way: a verdict per numbered
+        # claim in the prompt it was given.
+        n = sum(1 for line in task.instructions.splitlines() if _numbered.match(line))
+        out = []
+        for i in range(1, n + 1):
+            verdict = self.verdicts.pop(0) if self.verdicts else Verdict(verdict="supported")
+            out.append(verdict.model_copy(update={"claim": i}))
+        return Result(value=Verdicts(verdicts=out), cost_usd=0.1, connector=self.name)
 
 
 @pytest.fixture
@@ -316,3 +328,64 @@ async def test_a_run_inside_its_ceiling_is_unchanged(store):
     assert out.unvalidated == ()
     assert not out.halted
     assert "## Not checked" not in as_markdown(out)
+
+
+@pytest.mark.asyncio
+async def test_one_document_is_read_once_however_often_it_is_cited(store):
+    """Measured across three counties: 224 claims citing 115 distinct
+    documents, one of them cited thirty-two times. One agent per claim meant
+    that document was fetched, read and paid for thirty-two times in a single
+    run — and the big documents are the ones cited most."""
+    fee = "https://www.howardcountymd.gov/health/resource/fee-schedule"
+    agents = _Agents(
+        Gathered(
+            claims=[Claim(statement=f"fee {i} is $50", source_url=fee) for i in range(12)]
+            + [Claim(statement="a well permit is $160", source_url="https://mde.maryland.gov/x")]
+        )
+    )
+    out = await research("p", store, "s", [FACET], connectors=[agents])
+
+    assert len(out.checked) == 13
+    # One gather, then one validator per distinct document — not per claim.
+    validations = [t for t in agents.seen if t.schema is Verdicts]
+    assert len(validations) == 2, f"{len(validations)} validators for 2 documents"
+
+    # And the one that was cited twelve times saw all twelve at once.
+    busiest = max(validations, key=lambda t: t.instructions.count("\n1. "))
+    assert busiest.instructions.count("fee ") >= 12
+    assert busiest.instructions.count(fee) == 1, "the document is named once, not per claim"
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_is_matched_by_number_and_never_by_order(store):
+    """A model asked for eight verdicts sometimes returns seven. Zipping them
+    would hand claim three the verdict for claim four — a wrong answer that
+    looks like a right one, which is worse than no answer."""
+    url = "https://example.test/doc"
+
+    class Partial(_Agents):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
+            self.seen.append(task)
+            if task.schema is Gathered:
+                return Result(value=self.gathered, cost_usd=0.5, connector=self.name)
+            # Answers about the third claim only, and says so.
+            return Result(
+                value=Verdicts(verdicts=[Verdict(claim=3, verdict="supported")]),
+                cost_usd=0.1,
+                connector=self.name,
+            )
+
+    agents = Partial(
+        Gathered(
+            claims=[Claim(statement=f"claim {i}", source_url=url) for i in range(1, 4)]
+        )
+    )
+    out = await research("p", store, "s", [FACET], connectors=[agents])
+
+    assert len(out.checked) == 3
+    stood = [c.claim.statement for c in out.stands]
+    assert stood == ["claim 3"], f"the verdict landed on {stood}"
+    # The two it did not answer about are unreachable, not unsupported: it
+    # failed to answer, it did not decline them.
+    assert len(out.unreachable) == 2
+    assert not out.rejected
