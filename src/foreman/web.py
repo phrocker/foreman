@@ -180,7 +180,6 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "the process; nothing resumes it."
         ]
     job = jobs["sweep"]
-    revision = job  # kept for the streaming endpoints that predate the registry
 
     def start(name: str, target: str) -> Job:
         """Claim a slot for this piece of work, or refuse it as already running.
@@ -1189,18 +1188,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         nightly sweep writes to, because a run that acts on a remote should not
         be something that happens quietly while a spinner turns.
         """
-        with revision.lock:
-            if revision.running:
-                raise HTTPException(409, "a revision is already in progress")
-            revision.running = True
-            revision.started_at = utcnow()
-            revision.finished_at = None
-            revision.error = None
-            revision.log = []
-
-        def note(message: str) -> None:
-            with revision.lock:
-                revision.log.append(message)
+        # Through the registry like every other dispatch. This one was left on
+        # the old single slot when the others were converted — and that slot is
+        # the sweep's, so a revision collided with a nightly run as well as with
+        # every other revision. Four reviews came back at once and only one
+        # could be answered.
+        slot = start("revise", subject)
+        note = note_to(slot)
 
         async def work() -> None:
             try:
@@ -1226,20 +1220,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         await refresh_pulls(project, s, note)
                 finally:
                     s.close()
-            except Exception as exc:  # noqa: BLE001 — surfaced in the UI, not swallowed
-                with revision.lock:
-                    revision.error = f"{type(exc).__name__}: {exc}"
-            finally:
-                with revision.lock:
-                    revision.running = False
-                    revision.finished_at = utcnow()
+            except Exception as exc:  # noqa: BLE001 — surfaced in the UI
+                finish(slot, f"{type(exc).__name__}: {exc}")
+            else:
+                finish(slot)
 
         asyncio.create_task(work())
-        return revision.as_dict()
-
-    @app.get("/api/pulls/revise")
-    def revise_status() -> dict[str, Any]:
-        return revision.as_dict()
+        return slot.as_dict()
 
     async def refresh_pulls(project, st, note) -> None:
         """Re-read one project's pull requests, right after changing them.

@@ -714,7 +714,6 @@
     <div id="issueList"></div>
     <h3 class="act-head">Pull requests</h3>
     <div id="workList"></div>
-    <div id="reviseLog" class="log" hidden></div>
   </section>
 
   <section id="panel-activity" role="tabpanel" hidden>
@@ -1652,26 +1651,10 @@ async function startRevision(subject, button) {
     button.disabled = false;
     return;
   }
-  pollRevision();
+  showTab("activity");
+  watchActivity();
 }
 
-async function pollRevision() {
-  const box = $("reviseLog");
-  const job = await fetchPart("/api/pulls/revise", null);
-  if (!job) return;
-  box.hidden = !job.log.length && !job.error;
-  box.innerHTML = job.log.map(esc).join("\n") +
-    (job.error ? `\n<span class="err">${esc(job.error)}</span>` : "");
-  box.scrollTop = box.scrollHeight;
-  if (job.running) {
-    setTimeout(pollRevision, 2000);
-  } else {
-    // The pull request's own state moved — its comments may be answered and
-    // its checks will be running again — so the row is re-read rather than
-    // left showing what was true before the agent ran.
-    load();
-  }
-}
 
 /** Whether an agent could be sent at this finding.
  *
