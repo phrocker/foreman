@@ -948,3 +948,58 @@ async def test_a_run_that_could_not_push_is_not_recorded_as_a_success(world, mon
     # claim from the side the board reads it from.
     assert store.recent_runs(project.id, "revise", limit=1) == []
     assert store.runs([run_id])[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_changed_nothing_still_answers_the_threads(world, monkeypatch):
+    """#23's eight objections had been answered by a commit that reached the
+    branch out of band. The agent read the branch, said so, and changed
+    nothing — and because the threads were only answered on the push path, all
+    eight stayed open with no reply on any of them, ready to be handed to the
+    next dispatch as new work. The claim is worth posting whether or not this
+    run is the one that produced the diff."""
+    project, store = world
+    said: list[tuple[str, str, bool]] = []
+
+    def answered(thread_id, body, resolve=False):
+        said.append((thread_id, body, resolve))
+        return True
+
+    monkeypatch.setattr("foreman.adversary.answer_thread", answered)
+
+    class _AlreadyDone(_Agent):
+        async def run(self, task, on_text=None, on_item=None, on_step=None):
+            self.seen.append(task)
+            return Result(
+                value=task.schema(
+                    summary="Every comment was already answered by a commit on this branch.",
+                    addressed=[
+                        {
+                            "thread": 1,
+                            "path": "footer.tsx",
+                            "what": "already routed through the shared constant",
+                        }
+                    ],
+                ),
+                cost_usd=0.0,
+                connector=self.name,
+            )
+
+    facts = _facts()
+    facts["review_threads"] = json.dumps(
+        [
+            {
+                "id": "PRRT_1",
+                "author": "a-reviewer",
+                "path": "footer.tsx",
+                "line": 1,
+                "body": "footer.tsx hard-codes the address too; route it through here.",
+            }
+        ]
+    )
+    result = await address_review(project, store, facts, connectors=[_AlreadyDone()])
+
+    assert not result.pushed and "changed nothing" in result.note
+    assert said, "a run that changed nothing said nothing on the review"
+    # The reply says where the change is, rather than implying this run made it.
+    assert any("Already on this branch" in body for _, body, _ in said)

@@ -336,7 +336,9 @@ def headline(summary: str) -> str:
     return (clipped or first[:SUBJECT_CHARS]).rstrip(" ,;:-") + "…"
 
 
-def _answer_threads(threads: Sequence[dict], revision: Revision, log) -> None:
+def _answer_threads(
+    threads: Sequence[dict], revision: Revision, log, *, changed: bool = True
+) -> None:
     """Say on each thread what was done about it, and close the ones answered.
 
     The mechanism whose absence cost a run. A revision pushed a commit and said
@@ -348,6 +350,15 @@ def _answer_threads(threads: Sequence[dict], revision: Revision, log) -> None:
     Resolution follows what the agent claimed, never what the diff implies. A
     declined comment gets a reply and stays open, because a thread considered
     and rejected is more useful with a reason on it than silent.
+
+    `changed` says whether this run produced a commit. It is False for the run
+    that found its work already done: #23's eight objections had been answered
+    by a commit that reached the branch out of band, the agent read the branch,
+    said so, and changed nothing — and because this only ran on the push path,
+    eight answered threads stayed open with no reply on any of them, waiting to
+    be handed to the next dispatch as new. The claim is the same claim either
+    way; what differs is that no diff in this run backs it, so the reply says
+    where the change actually is rather than implying this run made it.
     """
     from .adversary import answer_thread
 
@@ -375,7 +386,8 @@ def _answer_threads(threads: Sequence[dict], revision: Revision, log) -> None:
         if not thread_id:
             continue
         if (item := answered.get(index)) is not None:
-            body, resolve = f"Addressed: {item.what}", True
+            lead = "Addressed" if changed else "Already on this branch"
+            body, resolve = f"{lead}: {item.what}", True
         elif (item := declined.get(index)) is not None:
             body, resolve = f"Not changed: {item.why}", False
         elif (item := by_path.get(str(thread.get("path") or ""))) is not None:
@@ -525,7 +537,12 @@ async def address_review(
             if not files:
                 # A real answer, and the commonest one when every comment was
                 # declined. Committing nothing would be an empty push and a
-                # notification for no change.
+                # notification for no change — but saying nothing on the
+                # threads is not the same thing, and was how eight answered
+                # objections on #23 stayed open: the agent read the branch,
+                # found the work already on it, and reported that to a log
+                # nobody was reading rather than to the review it came from.
+                _answer_threads(threads, revision, log, changed=False)
                 return Result(False, (), revision, spent, "the agent changed nothing")
 
             _git(
