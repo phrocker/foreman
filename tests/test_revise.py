@@ -904,3 +904,47 @@ def test_the_long_calls_are_offloaded():
                 if not stripped.startswith(("push(", "url = open_pull_request(")):
                     continue
                 raise AssertionError(f"{name}: {stripped} blocks the loop")
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_could_not_push_is_not_recorded_as_a_success(world, monkeypatch):
+    """github.com stopped answering on port 22 mid-session. Four revisions were
+    in flight; one exhausted all three push attempts, and it closed as a
+    success — no error on the run, the pull request shown as answered, and the
+    only copy of the work on a local branch nobody was looking at. The run is
+    the only thing that can say the work is sitting somewhere waiting to be
+    recovered, so it has to record what happened rather than that it finished.
+    """
+    from foreman import revise as rev
+    from foreman.delivery import DeliveryError
+
+    project, store = world
+
+    def edit(work):
+        (work / "footer.tsx").write_text("import { email } from './legal';\n")
+
+    def unreachable(repo, branch, log=lambda _: None):
+        raise DeliveryError("could not push: ssh: connect to host github.com port 22")
+
+    monkeypatch.setattr(rev, "push", unreachable)
+
+    closed: list[tuple[int, bool, str | None]] = []
+    finish = store.finish_run
+
+    def watched(run_id, ok=True, error=None, **kwargs):
+        closed.append((run_id, ok, error))
+        finish(run_id, ok=ok, error=error, **kwargs)
+
+    monkeypatch.setattr(store, "finish_run", watched)
+
+    with pytest.raises(DeliveryError):
+        await address_review(project, store, _facts(), connectors=[_Agent(edit)])
+
+    assert closed, "the revision closed no run at all"
+    run_id, ok, error = closed[-1]
+    assert not ok, "a revision that never landed closed as a success"
+    assert "port 22" in (error or "")
+    # `recent_runs` answers with successful runs only, so this is the same
+    # claim from the side the board reads it from.
+    assert store.recent_runs(project.id, "revise", limit=1) == []
+    assert store.runs([run_id])[0]["error"]

@@ -461,6 +461,7 @@ async def address_review(
     run_id = store.start_run(project.id, "revise")
     spent = 0.0
     backend: str | None = None
+    failure = ""
     await offloaded(_git, project.repo, "fetch", "origin", branch)
     try:
         # From the fetched remote tip rather than a local branch of the same
@@ -546,7 +547,19 @@ async def address_review(
             _answer_threads(threads, revision, log)
             log(f"{project.id}: pushed {len(files)} file(s) to {branch}")
             return Result(True, files, revision, spent)
+    # Recorded from what actually happened rather than from reaching the end.
+    # This was `finally: finish_run(ok=True)`, so a revision whose push failed
+    # three times against a github.com that had stopped answering on port 22
+    # closed as a success: the run showed no error, the board showed the pull
+    # request as answered, and the commit sat on a local branch nobody was
+    # looking at. A paid-for run that did not land has to say so — it is the
+    # only signal that the work is sitting somewhere waiting to be recovered.
+    except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised
+        failure = f"{type(exc).__name__}: {exc}"[:400]
+        raise
     finally:
         # The worktree is `worktree`'s business now, and it removes it whatever
         # happened. This only has to close the run.
-        store.finish_run(run_id, ok=True, cost_usd=spent, connector=backend)
+        store.finish_run(
+            run_id, ok=not failure, error=failure or None, cost_usd=spent, connector=backend
+        )
