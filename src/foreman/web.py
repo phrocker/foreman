@@ -1202,6 +1202,37 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         finally:
             s.close()
 
+    @app.post("/api/issues/refresh")
+    async def refresh_issue_list(project: str = Query(...)) -> dict[str, Any]:
+        """Re-read one project's issues, on demand.
+
+        The same endpoint as refresh_pull_list above, for the other half of
+        what the `pulls` collector reads.
+
+        Its absence is the third time this asymmetry has been found. The board
+        knew only what the last sweep knew, so an issue filed anywhere else —
+        by a person, by `gh`, by an agent — stayed invisible on the Work tab
+        until something happened to collect. `build` already handles this for
+        itself: it refreshes lazily when a subject is not in the snapshot, so
+        dispatching at a brand new issue works. Listing them did not, which
+        meant the one view an operator uses to decide what to dispatch was the
+        one place that could not see the thing they had just filed.
+
+        The comment on issue_facts above says of the previous instance:
+        "Fixing one and not the other was the mistake; they are the same code
+        now." They are the same code here too.
+        """
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            target = registry.get(project)
+            await collect_project(target, ["pulls"], s)
+            return {"issues": len(open_issues(s, registry, project=project))}
+        except KeyError:
+            raise HTTPException(404, f"no project {project!r}") from None
+        finally:
+            s.close()
+
     @app.post("/api/pulls/revise")
     async def revise(subject: str = Query(...)) -> dict[str, Any]:
         """Have an agent answer the review comments on one pull request.
