@@ -311,3 +311,194 @@ def test_the_backends_are_read_per_dispatch():
     src = inspect.getsource(web)
     i = src.index("def backends()")
     assert "load_registry(registry_path)" in src[i : i + 900]
+
+
+# --- progress reaches the operator while the run is still going -------------
+#
+# Found by watching a real build sit at "still working (0 step(s) so far)" for
+# minutes. `--json` had been passed since this connector was written and the
+# comment where it is added says it is "what makes progress reportable" — but
+# the output went through proc.communicate(), which buffers until exit, so
+# every step arrived in one burst after the run had already finished. A job
+# that reports nothing is indistinguishable from a hung one.
+
+
+def test_one_event_is_read_on_its_own() -> None:
+    """_events used to be the only reader, so nothing could report a step
+    before the process ended. The per-line reader is what streaming needs."""
+    from foreman.connectors.codex import _event
+
+    steps: list[str] = []
+    cost, tokens = _event(
+        '{"type":"item.command","command":"go test ./..."}', steps.append, None
+    )
+    assert steps == ["go test ./..."]
+    assert (cost, tokens) == (0.0, 0)
+
+
+def test_a_tool_use_event_needs_no_on_step_to_be_safe() -> None:
+    """The guard was written `on_step and A or B`, which parses as
+    `(on_step and A) or B` — so a tool_use event entered the branch with
+    on_step still None and was saved only by a second check inside it."""
+    from foreman.connectors.codex import _event
+
+    # No callback at all. The old precedence made this enter the branch.
+    assert _event('{"type":"item.tool_use","name":"shell"}', None, None) == (0.0, 0)
+
+    steps: list[str] = []
+    _event('{"type":"item.tool_use","name":"shell"}', steps.append, None)
+    assert steps == ["shell"]
+
+
+def test_junk_between_events_is_skipped_not_fatal() -> None:
+    """The vocabulary is an alpha CLI's and will move."""
+    from foreman.connectors.codex import _event
+
+    for line in ("", "   ", "not json at all", "{broken", '{"type":"unknown.thing"}'):
+        assert _event(line, lambda s: None, None) == (0.0, 0)
+
+
+def test_steps_arrive_while_the_process_is_still_running() -> None:
+    """The regression this exists to catch: a connector that collects the
+    whole stream first passes every other test in this file and still shows an
+    operator nothing until the run is over."""
+    import asyncio
+
+    from foreman.connectors.codex import _run
+
+    class FakeStream:
+        def __init__(self, lines: list[bytes]) -> None:
+            self.lines = list(lines)
+
+        async def readline(self) -> bytes:
+            await asyncio.sleep(0)
+            return self.lines.pop(0) if self.lines else b""
+
+        async def read(self, _n: int) -> bytes:
+            await asyncio.sleep(0)
+            return b""
+
+    class FakeStdin:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def write(self, _b: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = FakeStream(
+                [
+                    b'{"type":"item.command","command":"first"}\n',
+                    b'{"type":"item.command","command":"second"}\n',
+                ]
+            )
+            self.stderr = FakeStream([])
+            self.stdin = FakeStdin()
+            self.waited = False
+
+        async def wait(self) -> None:
+            # By the time the process is reaped, both steps must already have
+            # been reported. If they had been buffered they would arrive after.
+            assert seen == ["first", "second"], seen
+            self.waited = True
+
+    seen: list[str] = []
+    errors: list[bytes] = []
+    proc = FakeProc()
+
+    def consume(line: str) -> None:
+        from foreman.connectors.codex import _event
+
+        _event(line, seen.append, None)
+
+    asyncio.run(_run(proc, b"prompt", consume, errors))
+
+    assert seen == ["first", "second"]
+    assert proc.waited
+    assert proc.stdin.closed, "the prompt's stream must be closed or codex waits for more"
+
+
+# --- the vocabulary the CLI actually emits ---------------------------------
+#
+# Found by running `codex exec --json` and reading the stream, after a build
+# reported "0 step(s) so far" for three minutes and then finished. The matcher
+# was testing for event types ending in "command" or "tool_use"; the CLI emits
+# item.started / item.completed wrapping an item whose own type says what
+# happened. It matched nothing, ever, on any run.
+
+REAL = [
+    '{"type": "thread.started"}',
+    '{"type": "turn.started"}',
+    '{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message",'
+    ' "text": "I\\u2019ll run ls and count the entries."}}',
+    '{"type": "item.started", "item": {"id": "item_1", "type": "command_execution",'
+    ' "command": "/bin/bash -lc \'ls -1; ls -1 | wc -l\'", "status": "in_progress"}}',
+    '{"type": "item.completed", "item": {"id": "item_1", "type": "command_execution",'
+    ' "command": "/bin/bash -lc \'ls -1\'", "exit_code": 0}}',
+    '{"type": "turn.completed", "usage": {"input_tokens": 32079,'
+    ' "cached_input_tokens": 22016, "output_tokens": 98, "reasoning_output_tokens": 0}}',
+]
+
+
+def test_a_real_stream_reports_its_commands() -> None:
+    from foreman.connectors.codex import _events
+
+    steps: list[str] = []
+    text: list[str] = []
+    cost, tokens = _events("\n".join(REAL), steps.append, text.append)
+
+    # One step: the command as it started. The completion of the same command
+    # is not a second step — that would double every entry in the log.
+    assert steps == ["ls -1; ls -1 | wc -l"], steps
+    # The shell wrapper is stripped: eighty characters of `/bin/bash -lc '...'`
+    # is sixteen characters of prefix and a truncated command.
+    assert not any("/bin/bash" in s for s in steps)
+    assert any("count the entries" in t for t in text)
+    assert tokens == 32079 + 22016 + 98
+    assert cost == 0.0  # this backend reports no money
+
+
+def test_the_old_vocabulary_still_reports() -> None:
+    """An alpha CLI's events will move again, and a matcher that only knows
+    today's is how this silently stopped working the first time."""
+    from foreman.connectors.codex import _event
+
+    steps: list[str] = []
+    _event('{"type":"item.command","command":"go build ./..."}', steps.append, None)
+    _event('{"type":"item.tool_use","name":"shell"}', steps.append, None)
+    assert steps == ["go build ./...", "shell"]
+
+
+def test_events_that_are_not_steps_report_nothing() -> None:
+    from foreman.connectors.codex import _event
+
+    steps: list[str] = []
+    for line in (
+        '{"type":"thread.started"}',
+        '{"type":"turn.started"}',
+        '{"type":"turn.completed","usage":{"output_tokens":1}}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}',
+    ):
+        _event(line, steps.append, None)
+    assert steps == []
+
+
+def test_a_web_search_is_a_step() -> None:
+    """Research runs are mostly these, and a run reporting no steps for
+    twenty minutes of searching is the thing this whole fix is about."""
+    from foreman.connectors.codex import _event
+
+    steps: list[str] = []
+    _event(
+        '{"type":"item.started","item":{"type":"web_search","query":"howard county septic fee"}}',
+        steps.append,
+        None,
+    )
+    assert steps == ["web search: howard county septic fee"]

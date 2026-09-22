@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -143,12 +144,30 @@ class CodexConnector:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                # A single event carrying a tool's output can be long, and
+                # StreamReader.readline raises once a line passes its limit.
+                # The default 64KiB is small enough to hit on ordinary work,
+                # and losing a run to one long line would be a worse failure
+                # than the buffering this replaces.
+                limit=1 << 20,
             )
 
             cost = 0.0
+            tokens = 0
+
+            def consume(line: str) -> None:
+                nonlocal cost, tokens
+                c, t = _event(line, on_step, on_text)
+                # Assigned rather than summed: these are running totals, and
+                # adding them counts the same money once per event.
+                cost = max(cost, c)
+                tokens = max(tokens, t)
+
+            errors: list[bytes] = []
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(task.instructions.encode()), timeout=task.timeout_s
+                await asyncio.wait_for(
+                    _run(proc, task.instructions.encode(), consume, errors),
+                    timeout=task.timeout_s,
                 )
             except TimeoutError:
                 proc.kill()
@@ -161,7 +180,7 @@ class CodexConnector:
                     "whatever it spent before that is not reported"
                 ) from None
 
-            cost, tokens = _events(stdout.decode(errors="replace"), on_step, on_text)
+            stderr = b"".join(errors)
             # The only measure this backend gives. Reported through on_step so
             # it reaches the job log an operator actually reads, since
             # cost_usd cannot carry it.
@@ -225,47 +244,145 @@ def strict(schema: dict) -> dict:
     return out
 
 
-def _events(stdout: str, on_step, on_text) -> tuple[float, int]:
-    """Read the JSONL stream for cost and progress.
+async def _run(proc, stdin: bytes, consume, errors: list[bytes]) -> None:
+    """Feed the prompt in and read both streams until the process ends.
+
+    Line by line as they arrive, which is the whole point.
+
+    `--json` has been passed since this connector was written, and the comment
+    where it is added says it is "what makes progress reportable". It was not:
+    the output went through proc.communicate(), which buffers until exit, so
+    every step was reported in one burst after the run had already finished.
+    An operator watching a build saw "still working (0 step(s) so far)" for
+    however long the run took, which is indistinguishable from a hung agent —
+    and the only honest thing to do about a job that might be hung is kill it.
+
+    stderr is drained concurrently rather than after, because a process whose
+    error pipe fills stops writing to stdout and deadlocks, and the deadlock
+    would look exactly like the silence this is fixing.
+    """
+    async def pump() -> None:
+        while True:
+            try:
+                line = await proc.stdout.readline()
+            except ValueError:
+                # A line past the reader's limit. Skipped rather than fatal:
+                # losing one event's progress is not worth losing the run.
+                continue
+            if not line:
+                return
+            consume(line.decode(errors="replace"))
+
+    async def drain() -> None:
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                return
+            errors.append(chunk)
+
+    proc.stdin.write(stdin)
+    await proc.stdin.drain()
+    proc.stdin.close()
+
+    await asyncio.gather(pump(), drain())
+    await proc.wait()
+
+
+def _event(line: str, on_step, on_text) -> tuple[float, int]:
+    """Read one JSONL line for cost and progress.
 
     Tolerant on purpose. The event vocabulary is an alpha CLI's and will move;
     a connector that raised on an unrecognised line would turn a cosmetic
     change upstream into every task failing. What it must not lose is the
     cost, so every shape that has ever carried one is looked for.
     """
-    cost = 0.0
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        return 0.0, 0
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return 0.0, 0
+
+    cost = _cost_of(event) or 0.0
+
     tokens = 0
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        if found := _cost_of(event):
-            # Assigned rather than summed: these are running totals, and
-            # adding them counts the same money once per event.
-            cost = max(cost, found)
-
-        if isinstance(usage := event.get("usage"), dict):
-            # turn.completed carries the run's totals. Assigned rather than
-            # summed for the same reason the cost is.
-            counted = sum(
+    if isinstance(usage := event.get("usage"), dict):
+        # turn.completed carries the run's totals.
+        tokens = int(
+            sum(
                 v
                 for k, v in usage.items()
                 if isinstance(v, (int, float)) and k.endswith("tokens")
             )
-            tokens = max(tokens, int(counted))
+        )
 
-        kind = str(event.get("type") or event.get("event") or "")
-        if on_step and kind.endswith("command") or kind.endswith("tool_use"):
-            if on_step:
-                on_step(str(event.get("name") or event.get("command") or kind)[:80])
-        if on_text and (delta := event.get("delta") or event.get("text")):
-            if isinstance(delta, str):
-                on_text(delta)
+    kind = str(event.get("type") or event.get("event") or "")
+    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+    itype = str(item.get("type") or "")
+
+    if on_step and (label := _step_label(kind, itype, item, event)):
+        on_step(label[:80])
+
+    if on_text:
+        # An agent_message carries the model's prose on the item; older shapes
+        # carried it on the event.
+        delta = item.get("text") if itype == "agent_message" else None
+        if delta is None:
+            delta = event.get("delta") or event.get("text")
+        if isinstance(delta, str):
+            on_text(delta)
+    return cost, tokens
+
+
+# The shell wrapper codex runs everything through. Stripped from a step label
+# so the operator reads the command rather than how it was invoked: eighty
+# characters of `/bin/bash -lc '...'` is sixteen characters of prefix and a
+# truncated command.
+_SHELL = re.compile(r"""^/bin/(?:ba)?sh\s+-[a-z]*c\s+(['"])(.*)\1$""", re.S)
+
+
+def _step_label(kind: str, itype: str, item: dict, event: dict) -> str:
+    """What to show an operator for one event, or "" for events that are not
+    steps.
+
+    The vocabulary this actually had to match was found by running the CLI and
+    reading what came out, after a build reported "0 step(s)" for three
+    minutes and then finished. It emits `item.started` and `item.completed`
+    wrapping an `item` whose own `type` says what happened —
+    `command_execution`, `agent_message` — and nothing whose event type ends
+    in "command" or "tool_use", which is what the matcher had been testing
+    for. So it matched nothing, ever, on any run.
+
+    The older shapes are still accepted. This is an alpha CLI and the
+    vocabulary will move again; a matcher that only knows today's is how this
+    silently stopped working the first time.
+    """
+    if kind.endswith(".started"):
+        if itype == "command_execution":
+            command = str(item.get("command") or "")
+            if m := _SHELL.match(command.strip()):
+                command = m.group(2)
+            return " ".join(command.split())
+        if itype in ("file_change", "patch", "apply_patch"):
+            return itype.replace("_", " ")
+        if itype == "web_search":
+            return "web search: " + str(item.get("query") or "")
+    # Shapes this connector was written against, kept so an upstream change
+    # back does not silently stop reporting again.
+    if kind.endswith("command") or kind.endswith("tool_use"):
+        return str(event.get("name") or event.get("command") or kind)
+    return ""
+
+
+def _events(stdout: str, on_step, on_text) -> tuple[float, int]:
+    """Every line of a complete stream. Kept for callers holding one string."""
+    cost = 0.0
+    tokens = 0
+    for line in stdout.splitlines():
+        c, t = _event(line, on_step, on_text)
+        cost = max(cost, c)
+        tokens = max(tokens, t)
     return cost, tokens
 
 
