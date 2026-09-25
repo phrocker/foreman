@@ -458,52 +458,64 @@ class CrawlCollector:
         return obs
 
     def _coalesce_root(self, project: Project, site: str, prior: Facts) -> list[Observation]:
-        """Retire a home page row stored under the bare URL.
+        """Move a home page row stored under the bare URL to the slashed one.
 
-        The root has one spelling here now, and a store written before that
-        may hold the other one. Both rows carry the same title, so the metadata
-        rules — correctly, on what they can see — report one home page as a
-        duplicate title for ever.
+        The root has one spelling here now, and a store written before that may
+        hold the other. Both rows carry the same title, so the metadata rules —
+        correctly, on what they can see — report one home page as a duplicate
+        title for ever.
 
-        Not a deletion: this collector samples rather than enumerates, so the
-        runner does not retract its subjects, and nothing else can. Writing the
-        judged fields empty is what takes the row out of the comparison, which
-        is the whole of the problem.
+        The whole row moves, not just its provenance. Clearing the old facts
+        and writing only new ones meant a sweep whose home-page fetch failed
+        left the page with no title and no robots meta at all, and a standing
+        sitemapped-but-noindex finding disappeared on a connection error — the
+        move being read as evidence of recovery. Migrated values are recorded
+        before this sweep's own, so a successful fetch overwrites them and a
+        failed one leaves them standing, which is what "until fresh
+        measurements replace them" means.
+
+        Not a deletion of the old row: this collector samples rather than
+        enumerates, so the runner does not retract its subjects and nothing
+        else can. Writing the judged fields empty is what takes it out of the
+        comparison, which is the whole of the problem.
         """
         cells = prior.get(site)
         if not cells:
             return []
+
+        moved = prior.get(f"{site}/") or {}
+        fields = (
+            "title",
+            "meta_description",
+            "meta_robots",
+            "x_robots_tag",
+            "canonical",
+            "status",
+            "redirect_to",
+            "served_text_chars",
+            "discovered_via",
+        )
         out: list[Observation] = []
-        # Carry its provenance across rather than dropping it. Clearing the old
-        # row and leaving the new one with no cell means the rules read the
-        # absence as "came from a sitemap" — right for a row that predates
-        # provenance, wrong for one that said "home" or "unlisted" out loud. A
-        # measurement this sweep makes later wins, because it is recorded after
-        # this.
-        if via := cells.get("discovered_via"):
+        for key in fields:
+            value = cells.get(key)
+            if value is None or moved.get(key) is not None:
+                # Nothing to move, or the new row already knows better.
+                continue
             out.append(
                 Observation(
                     project=project.id,
                     collector=self.name,
                     subject=f"{site}/",
-                    key="discovered_via",
-                    value=via,
+                    key=key,
+                    value=value,
                 )
             )
-        return out + [
+        out.extend(
             Observation(project=project.id, collector=self.name, subject=site, key=key, value=None)
-            for key in (
-                "title",
-                "meta_description",
-                "meta_robots",
-                "canonical",
-                "status",
-                "redirect_to",
-                "served_text_chars",
-                "discovered_via",
-            )
+            for key in fields
             if key in cells
-        ]
+        )
+        return out
 
     def _reconcile(
         self,

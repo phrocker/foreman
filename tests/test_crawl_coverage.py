@@ -1653,3 +1653,52 @@ def test_an_explicit_provenance_moves_with_the_root(serve):
     home = [o.value for o in obs if o.subject == f"{base}/" and o.key == "discovered_via"]
 
     assert home and home[-1] == "home"
+
+
+def test_a_failed_fetch_during_root_migration_keeps_the_old_facts(serve):
+    """Clearing the old facts and writing only new ones meant a sweep whose
+    home-page fetch failed left the page with no title and no robots meta at
+    all — a standing sitemapped-but-noindex finding disappearing on a
+    connection error, the move being read as evidence of recovery."""
+    import socket
+
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    with socket.socket() as probe:  # nothing is listening here
+        probe.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{probe.getsockname()[1]}"
+
+    project = Project(id="p", web={"url": primary, "also": [dead], "deep_sample": 0})
+    prior = {
+        dead: {
+            "title": "Home",
+            "meta_robots": "noindex",
+            "status": "200",
+            "discovered_via": "sitemap",
+        }
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    moved = {}
+    for o in obs:
+        if o.subject == f"{dead}/":
+            moved.setdefault(o.key, o.value)
+
+    assert moved.get("meta_robots") == "noindex", "the standing finding lost its evidence"
+    assert moved.get("title") == "Home"
+    assert moved.get("discovered_via") == "sitemap"
+    # And the old row is emptied, so one page is not two.
+    stale = {o.key: o.value for o in obs if o.subject == dead}
+    assert stale.get("title") is None and "title" in stale
+
+
+def test_a_successful_fetch_wins_over_the_migrated_values(serve):
+    """Migrated values are recorded before this sweep's own, so a fresh
+    measurement replaces them."""
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Renamed")})
+    project = Project(id="solo", web={"url": base})
+    prior = {base: {"title": "Old name", "status": "200"}}
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    titles = [o.value for o in obs if o.subject == f"{base}/" and o.key == "title"]
+
+    assert titles[-1] == "Renamed", f"the migrated value outlived the measurement: {titles}"
