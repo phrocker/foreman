@@ -1827,8 +1827,14 @@ function coverageRow(cov) {
     // A host that answered 404 for robots.txt or its sitemap is the finding;
     // one nobody has ever crawled is the coverage gap; one crawled shallowly
     // is fine and simply not current on every page.
-    const broken = h.robots === "404" || h.sitemap === "404" || (h.status && h.status !== "200");
-    const cls = !h.seen ? "cold" : broken ? "bad" : h.deep_crawl_at ? "" : "shallow";
+    // Red is for a host that lost control of its own crawling — no robots.txt,
+    // or a home page that does not answer. A missing sitemap is amber: it is a
+    // recommendation, and a one-page host that deliberately has none would
+    // otherwise sit red forever, which teaches people to read past red.
+    const broken = h.robots === "404" || (h.status && h.status !== "200");
+    const cls = !h.seen ? "cold"
+      : broken ? "bad"
+      : h.sitemap === "404" || !h.deep_crawl_at ? "shallow" : "";
     const when = h.deep_crawl_at ? `full crawl ${h.deep_crawl_at.slice(0, 10)}` : "shallow only";
     const detail = h.seen
       ? `robots ${h.robots || "?"} · sitemap ${h.sitemap || "?"}${
