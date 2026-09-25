@@ -72,8 +72,21 @@ class Change:
         return self.key in DECISIVE_KEYS
 
 
+# Cells that record when a collector ran rather than what it found.
+#
+# They change on every sweep by construction, so a drift view that compared
+# them would report every host of every surface as having drifted, every night,
+# for ever — and a list where everything has changed is a list nobody reads.
+# Drift is about the site; these are about the visit.
+COLLECTION_TIMESTAMPS = frozenset({"deep_crawl_at", "deep_attempt_at"})
+
+
 def _facts(rows: Sequence[Any]) -> dict[tuple[str, str], str | None]:
-    return {(row["subject"], row["key"]): row["value"] for row in rows}
+    return {
+        (row["subject"], row["key"]): row["value"]
+        for row in rows
+        if row["key"] not in COLLECTION_TIMESTAMPS
+    }
 
 
 def _moved_enough(key: str, before: str | None, after: str | None) -> bool:

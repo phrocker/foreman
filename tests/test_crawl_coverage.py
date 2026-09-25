@@ -644,3 +644,63 @@ def test_an_unreachable_host_takes_its_turn_and_then_yields_it(serve):
         "the unreachable host kept the only deep slot, so the healthy one "
         "would never be read in full"
     )
+
+
+def test_an_index_with_an_unreadable_child_is_not_a_full_crawl(serve):
+    """A sitemap that 404s used to return an empty list and look exactly like a
+    sitemap with nothing in it, so a host whose second child was missing read
+    as fully discovered. The pages in that child were never looked at."""
+    index = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<sitemap><loc>{base}/one.xml</loc></sitemap>"
+        "<sitemap><loc>{base}/missing.xml</loc></sitemap></sitemapindex>"
+    )
+    base = serve(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n",
+            "/sitemap.xml": index,
+            "/one.xml": sitemap(["/"]),  # /missing.xml is not served
+            "/": page("Home"),
+        }
+    )
+    project = Project(id="solo", web={"url": base})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["deep_pages_read"] == "1"
+    assert host["deep_pages_failed"] == "0", "every page it did find answered"
+    assert "deep_attempt_at" in host
+    assert "deep_crawl_at" not in host, (
+        "a host with a child sitemap nobody could read was called read in full"
+    )
+
+
+def test_a_truncated_discovery_does_not_claim_a_page_is_unlisted(serve):
+    """`urls` is cut off at max_urls, so absence from it is not evidence of
+    absence from the sitemap. Marking such a page "home" would suppress real
+    sitemap findings about it; writing nothing leaves the last sweep's answer.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    many = serve(
+        {
+            "/robots.txt": ROBOTS,
+            # The home page is listed last, after the cutoff.
+            "/sitemap.xml": sitemap(["/a", "/b", "/"]),
+            "/": page("Home"),
+            "/a": page("A", "/a"),
+            "/b": page("B", "/b"),
+        }
+    )
+    project = Project(id="p", web={"url": primary, "also": [many], "deep_sample": 0, "max_urls": 2})
+
+    home = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{many}/"
+    }
+
+    assert home["status"] == "200", "the home page is still read"
+    assert "discovered_via" not in home, (
+        "a truncated list was treated as proof that no sitemap lists this page"
+    )

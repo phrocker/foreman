@@ -28,6 +28,11 @@ class Discovery:
 
     urls: list[str]
     from_sitemap: bool
+    # Whether this is all of them. False when the crawl limit cut the list
+    # short, or when a sitemap an index named could not be read: both leave
+    # pages nobody has looked at, and a caller that calls the host "read in
+    # full" on that basis is claiming coverage it did not get.
+    complete: bool = True
 
 
 async def discover_urls(
@@ -66,34 +71,47 @@ async def discover(
 
     urls: list[str] = []
     seen: set[str] = set()
+    complete = len(sitemaps) <= 5
     for sm in sitemaps[:5]:
-        for url in await _read_sitemap(client, sm, depth=0):
+        found, whole = await _read_sitemap(client, sm, depth=0)
+        complete = complete and whole
+        for url in found:
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
             if len(urls) >= project.web.max_urls:
-                return Discovery(urls, from_sitemap=True)
+                return Discovery(urls, from_sitemap=True, complete=False)
     if urls:
-        return Discovery(urls, from_sitemap=True)
-    return Discovery([base + "/"], from_sitemap=False)
+        return Discovery(urls, from_sitemap=True, complete=complete)
+    return Discovery([base + "/"], from_sitemap=False, complete=complete)
 
 
-async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> list[str]:
+async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tuple[list[str], bool]:
+    """The URLs in one sitemap, and whether it was read whole.
+
+    The second half is the honest part. A sitemap that 404s, or one an index
+    names and which cannot be parsed, used to return an empty list and look
+    exactly like a sitemap with nothing in it — so a host whose second child
+    sitemap was missing read as fully discovered.
+    """
     if depth > 1:  # one level of <sitemapindex> nesting is enough
-        return []
+        return [], False
     try:
         r = await client.get(url)
         if r.status_code != 200:
-            return []
+            return [], False
         root = ET.fromstring(r.content)
     except (httpx.HTTPError, ET.ParseError):
-        return []
+        return [], False
 
     ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
     if root.tag == f"{ns}sitemapindex":
         nested: list[str] = []
+        whole = True
         for loc in root.iterfind(f".//{ns}sitemap/{ns}loc"):
             if loc.text:
-                nested.extend(await _read_sitemap(client, loc.text.strip(), depth + 1))
-        return nested
-    return [loc.text.strip() for loc in root.iterfind(f".//{ns}url/{ns}loc") if loc.text]
+                found, child = await _read_sitemap(client, loc.text.strip(), depth + 1)
+                nested.extend(found)
+                whole = whole and child
+        return nested, whole
+    return [loc.text.strip() for loc in root.iterfind(f".//{ns}url/{ns}loc") if loc.text], True

@@ -79,28 +79,30 @@ def _canonical(head: str, base: str) -> str | None:
     return urljoin(base, href.group(1)) if href else None
 
 
-def _via(found: Discovery, url: str) -> str:
+def _via(found: Discovery, url: str) -> str | None:
     """Whether a sitemap listed `url`, as discovery itself reads sitemaps.
 
-    Measured every sweep rather than remembered, which is the point: the first
+    Measured every sweep rather than remembered, which is the point. The first
     version decided provenance by which code path fetched the page, so a host
     read deeply on Monday and shallowly on Tuesday had its home page rewritten
-    from "sitemap" to "home" — and the rules read the latest cell, so a real
-    finding vanished on Tuesday and returned on Thursday with nothing about the
-    site having changed.
+    from "sitemap" to "home" — and because the rules read the latest cell, a
+    real finding vanished on Tuesday and came back on Thursday with nothing
+    about the site having changed. The second matched `<loc>url</loc>` in the
+    raw bytes, which is not how a sitemap is read: whitespace inside the
+    element, or a namespace prefix, is valid and would have been missed.
 
-    The second version matched `<loc>url</loc>` in the raw bytes, which is not
-    how a sitemap is read: whitespace inside the element, or a namespace
-    prefix, is valid and would have been missed, giving the same flapping in a
-    rarer form. So the sitemap is parsed by the function that parses sitemaps,
-    which also follows an index to the sitemaps it names instead of giving up
-    on it.
+    `from_sitemap` because discovery falls back to the home page when there is
+    no sitemap, and that URL is in the list without any sitemap having named
+    it.
+
+    None when discovery was cut short and this URL is not in what it did read:
+    the list is then not evidence of absence, and the caller writes no
+    provenance rather than a wrong one. A cell nobody overwrites keeps its
+    value, which is the right behaviour for "this sweep cannot say".
     """
-    # from_sitemap because discovery falls back to the home page when there is
-    # no sitemap, and that URL is in the list without any sitemap having named
-    # it: filing it as sitemapped hands the sitemap rules a page to report a
-    # sitemap for, about a file that does not exist.
-    return "sitemap" if found.from_sitemap and url in found.urls else "home"
+    if url in found.urls:
+        return "sitemap" if found.from_sitemap else "home"
+    return "home" if found.complete else None
 
 
 def _declared_sitemaps(obs: list[Observation]) -> list[str]:
@@ -310,8 +312,12 @@ class CrawlCollector:
             # A homepage that answered while the sitemap fetch failed, or while
             # an interior page timed out, is not a host read in full — and
             # stamping it as one both overstates the coverage and advances the
-            # date the panel shows. Every discovered page has to have answered.
-            if found.from_sitemap and read and not failed:
+            # date the panel shows. Every discovered page has to have answered,
+            # and discovery has to have found all of them: a sitemap index with
+            # one unreadable child, or a list cut off at max_urls, leaves pages
+            # nobody has looked at, and fetching the rest successfully says
+            # nothing about those.
+            if found.from_sitemap and found.complete and read and not failed:
                 obs.append(ob("deep_crawl_at", datetime.now(UTC).isoformat(timespec="seconds")))
         return obs
 
@@ -470,7 +476,7 @@ class CrawlCollector:
         project: Project,
         url: str,
         sem: asyncio.Semaphore,
-        via: str = "sitemap",
+        via: str | None = "sitemap",
     ) -> list[Observation]:
         """One page. `via` says how it was found, and the rules need to know.
 
@@ -480,10 +486,10 @@ class CrawlCollector:
         secondary that redirects, or an app homepage that is deliberately
         noindex, would be reported as a sitemap listing a page it never listed.
 
-        Every page gets a provenance cell, because every host now runs
-        discovery and so every sweep can answer the question. An omitted cell
-        would mean "unknown", and the rules would have to guess what to do with
-        it — which they did, wrongly, for one revision of this change.
+        `via=None` writes no provenance, which leaves whatever the last sweep
+        established in place. That is what a truncated discovery means about a
+        URL it never reached: not "no sitemap lists this" but "this sweep
+        cannot say".
         """
 
         def ob(key: str, value: str | None) -> Observation:
@@ -495,9 +501,12 @@ class CrawlCollector:
             try:
                 r = await client.get(url)
             except httpx.HTTPError as exc:
-                return [ob("discovered_via", via), ob("fetch_error", str(exc))]
+                out = [ob("fetch_error", str(exc))]
+                return [ob("discovered_via", via), *out] if via else out
 
-            out = [ob("discovered_via", via), ob("status", str(r.status_code))]
+            out = [ob("status", str(r.status_code))]
+            if via:
+                out.insert(0, ob("discovered_via", via))
             # Redirects are not followed on purpose: a sitemap URL that answers
             # 301 is itself the finding, and following it would hide that.
             if 300 <= r.status_code < 400:
