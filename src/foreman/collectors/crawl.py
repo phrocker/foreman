@@ -195,12 +195,25 @@ class CrawlCollector:
         deep = self._deep_targets(project, prior)
         obs: list[Observation] = []
         async with httpx.AsyncClient(
-            timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=False
+            timeout=TIMEOUT,
+            headers={"User-Agent": UA},
+            follow_redirects=False,
+            # The cap that actually holds for every request.
+            #
+            # The semaphore below is acquired by _page alone, so robots.txt,
+            # the sitemap, discovery and the 404 probes all bypassed it — and
+            # every host starts at once. A twenty-two host portfolio therefore
+            # opened twenty-two simultaneous connections to one Cloud Run
+            # service before a single page was fetched, which is a load spike
+            # this collector inflicts on the thing it is measuring. A pool
+            # limit binds them all, because every request goes through it.
+            limits=httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=CONCURRENCY),
         ) as client:
-            # Hosts concurrently, and pages within a host concurrently, both
-            # under one semaphore: the deep pass on a large site is the only
-            # thing here that is many requests, and it must not become many
-            # requests times many hosts.
+            # Hosts concurrently, and pages within a host concurrently. The
+            # pool limit above bounds the sockets; this bounds how many page
+            # bodies are in memory at once, which is a different question —
+            # text_length reads the whole document, and some of them are
+            # megabytes.
             sem = asyncio.Semaphore(CONCURRENCY)
             results = await asyncio.gather(
                 *(

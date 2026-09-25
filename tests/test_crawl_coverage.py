@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -1526,3 +1527,66 @@ def test_correcting_provenance_does_not_clear_a_standing_fetch_error(serve):
             ]
 
     assert _cleared_errors(FakeStore(), "p", "crawl", obs) == []
+
+
+def test_a_portfolio_sweep_does_not_open_a_connection_per_host(serve):
+    """Every host starts at once, and the semaphore is acquired by `_page`
+    alone — so robots.txt, the sitemap, discovery and the probes all bypassed
+    it. A twenty-two host portfolio opened twenty-two simultaneous connections
+    to one service before a single page was fetched, which is a load spike this
+    collector inflicts on the thing it is measuring.
+    """
+    from foreman.collectors.crawl import CONCURRENCY
+
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class Counting(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal live, peak
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            time.sleep(0.05)
+            base = f"http://{self.headers['Host']}"
+            path = self.path.split("?")[0]
+            body = (
+                (
+                    ROBOTS
+                    if path == "/robots.txt"
+                    else sitemap(["/"])
+                    if path.endswith(".xml")
+                    else page("Home")
+                )
+                .replace("{base}", base)
+                .encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            with lock:
+                live -= 1
+
+        def log_message(self, *args):
+            pass
+
+    servers = []
+    for _ in range(12):
+        s = ThreadingHTTPServer(("127.0.0.1", 0), Counting)
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+        servers.append(s)
+    hosts = [f"http://127.0.0.1:{s.server_port}" for s in servers]
+    try:
+        project = Project(
+            id="portfolio", web={"url": hosts[0], "also": hosts[1:], "deep_sample": 0}
+        )
+        asyncio.run(CrawlCollector().collect(project))
+    finally:
+        for s in servers:
+            s.shutdown()
+            s.server_close()
+
+    assert peak <= CONCURRENCY, f"{peak} requests in flight against a cap of {CONCURRENCY}"
