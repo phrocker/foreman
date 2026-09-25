@@ -503,6 +503,14 @@ class CrawlCollector:
             "redirect_to",
             "served_text_chars",
             "discovered_via",
+            # Including the failure, or a legacy row whose only content is a
+            # fetch error is never retired: nothing else about it changes, so
+            # it goes on producing sitemap_url_broken long after the home page
+            # started answering under its new name. Safe to carry across
+            # because the home page is fetched on every sweep, so this sweep's
+            # own result — an error, or an explicit empty — replaces it
+            # immediately.
+            "fetch_error",
         )
         out: list[Observation] = []
         for key in fields:

@@ -1818,3 +1818,24 @@ def test_a_sitemap_declared_past_the_robots_excerpt_is_still_measured(serve):
     assert host["sitemap_status"] == "200"
     assert host["sitemap_declared"] == "true"
     assert host["urls_discovered"] == "1"
+
+
+def test_a_legacy_root_holding_only_a_failure_is_retired(serve):
+    """Nothing else about such a row ever changes, so it went on producing
+    sitemap_url_broken long after the home page started answering under its new
+    name — and a sitemap over max_urls skips reconciliation, so nothing else
+    would have caught it either."""
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+    prior = {base: {"fetch_error": "ConnectTimeout"}}
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+
+    stale = {o.key: o.value for o in obs if o.subject == base}
+    assert "fetch_error" in stale and stale["fetch_error"] is None, (
+        "the old row kept its failure and goes on being reported"
+    )
+    # And the live row is healthy, because the page answers.
+    live = [o.value for o in obs if o.subject == f"{base}/" and o.key == "fetch_error"]
+    assert live and live[-1] is None
+    assert [o.value for o in obs if o.subject == f"{base}/" and o.key == "status"] == ["200"]
