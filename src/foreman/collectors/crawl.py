@@ -109,6 +109,22 @@ def _via(found: Discovery, url: str, no_sitemap: bool) -> str | None:
     return None
 
 
+def _robots_known(obs: list[Observation]) -> bool:
+    """Whether this sweep learned what robots.txt says, including that there
+    is none.
+
+    A 2xx is the file. A 404 or 410 is the host saying there is no file, which
+    is equally an answer. A 503, a timeout or a 429 is neither, and a caller
+    reasoning from an empty declaration list in that case is reasoning from a
+    failed request.
+    """
+    for o in obs:
+        if o.key == "robots_txt_status" and o.value:
+            code = int(o.value)
+            return 200 <= code < 300 or code in (404, 410)
+    return False
+
+
 def _declared_sitemaps(obs: list[Observation]) -> list[str]:
     """Sitemap locations named by the robots.txt just read.
 
@@ -279,7 +295,13 @@ class CrawlCollector:
         # the second unreadable — a 404 says nothing about the host: the page
         # may well be listed in the one nobody could read. More than one
         # declaration, and discovery's own verdict is the only honest answer.
-        no_sitemap = len(declared) <= 1 and sitemap_status in (404, 410)
+        #
+        # And only when robots.txt itself was read. An unreadable robots.txt
+        # leaves `declared` empty, which is indistinguishable from a robots.txt
+        # that declares nothing — so a 404 at the conventional path would prove
+        # absence for a host that normally announces /sitemap_index.xml and was
+        # merely having a bad night.
+        no_sitemap = _robots_known(obs) and len(declared) <= 1 and sitemap_status in (404, 410)
 
         # Discovery on every host, deep or not.
         #

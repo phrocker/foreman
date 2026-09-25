@@ -1835,7 +1835,12 @@ function coverageRow(cov) {
     // or a home page that does not answer. A missing sitemap is amber: it is a
     // recommendation, and a one-page host that deliberately has none would
     // otherwise sit red forever, which teaches people to read past red.
-    const broken = !!h.error || h.robots === "404" || (h.status && h.status !== "200");
+    // Any robots.txt that did not answer, not only a 404. A 403, 429 or 503
+    // left the host green while its home page and conventional sitemap loaded
+    // fine — the panel holding the status and not reading it.
+    const broken = !!h.error
+      || (h.robots && h.robots !== "200")
+      || (h.status && h.status !== "200");
     // Tried since it last succeeded, and did not finish. A host read
     // completely once and failing ever since stayed green for good, which is
     // the panel reporting a coverage gap it had already been told about.
@@ -1856,7 +1861,9 @@ function coverageRow(cov) {
     // has to say which file is missing rather than only that one is.
     const flag = !h.seen ? ""
       : h.error ? "unreachable"
-      : h.robots === "404" ? "no robots"
+      : h.robots === "404" || h.robots === "410" ? "no robots"
+      : h.robots && h.robots !== "200" ? `robots ${h.robots}`
+      : h.sitemap === "404" || h.sitemap === "410" ? "no sitemap"
       : h.discovery_complete === "false" ? "sitemap gap"
       : stale ? "partial"
       : h.sitemap === "404" ? "no sitemap"

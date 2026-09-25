@@ -82,9 +82,11 @@ async def discover(
     cap = project.web.max_urls
     read = False
     for i, sm in enumerate(sitemaps[:5]):
-        found, whole = await _read_sitemap(client, sm, depth=0)
-        complete = complete and whole
-        read = read or whole
+        found, state = await _read_sitemap(client, sm, depth=0)
+        # Absent is an answer; unreadable is not. A host with no sitemap has
+        # not been incompletely discovered — there was nothing to discover.
+        complete = complete and state != UNREADABLE
+        read = read or state == READ
         for url in found:
             if url not in seen:
                 seen.add(url)
@@ -104,8 +106,15 @@ async def discover(
     return Discovery([base + "/"], from_sitemap=False, complete=complete, sitemap_read=read)
 
 
-async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tuple[list[str], bool]:
-    """The URLs in one sitemap, and whether it was read whole.
+# What became of one sitemap request. "absent" is a host saying there is no
+# such file, which is an answer; "unreadable" is a request that failed, which
+# is not. Collapsing the two made a host with no sitemap look like a host whose
+# sitemap nobody could read, and the panel called that a coverage gap.
+READ, ABSENT, UNREADABLE = "read", "absent", "unreadable"
+
+
+async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tuple[list[str], str]:
+    """The URLs in one sitemap, and what became of the request.
 
     The second half is the honest part. A sitemap that 404s, one an index names
     and which cannot be parsed, and a document that is not a sitemap at all
@@ -115,14 +124,16 @@ async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tupl
     it has no pages.
     """
     if depth > 1:  # one level of <sitemapindex> nesting is enough
-        return [], False
+        return [], UNREADABLE
     try:
         r = await client.get(url)
+        if r.status_code in (404, 410):
+            return [], ABSENT
         if r.status_code != 200:
-            return [], False
+            return [], UNREADABLE
         root = ET.fromstring(r.content)
     except (httpx.HTTPError, ET.ParseError):
-        return [], False
+        return [], UNREADABLE
 
     ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
     # A sitemap is a urlset or a sitemapindex, and nothing else is either.
@@ -133,14 +144,19 @@ async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tupl
     # caller reads that as a host stating it lists nothing, and overwrites
     # provenance it should have left alone.
     if root.tag not in (f"{ns}urlset", f"{ns}sitemapindex"):
-        return [], False
+        return [], UNREADABLE
     if root.tag == f"{ns}sitemapindex":
         nested: list[str] = []
-        whole = True
+        state = READ
         for loc in root.iterfind(f".//{ns}sitemap/{ns}loc"):
             if loc.text:
                 found, child = await _read_sitemap(client, loc.text.strip(), depth + 1)
                 nested.extend(found)
-                whole = whole and child
-        return nested, whole
-    return [loc.text.strip() for loc in root.iterfind(f".//{ns}url/{ns}loc") if loc.text], True
+                # A child an index names and which cannot be read is a gap in
+                # this sitemap; one that is simply gone is the same gap, because
+                # the index says it should be there.
+                if child != READ:
+                    state = UNREADABLE
+        return nested, state
+    locs = [loc.text.strip() for loc in root.iterfind(f".//{ns}url/{ns}loc") if loc.text]
+    return locs, READ

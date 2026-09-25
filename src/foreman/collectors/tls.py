@@ -56,7 +56,9 @@ class TlsCollector:
         #
         # Concurrently, because twenty-one hosts checked in series is a sweep
         # nobody runs often enough to catch a certificate before it expires.
-        results = await asyncio.gather(*(self._one(project, url) for url in project.web.urls))
+        results = await asyncio.gather(
+            *(self._one(project, url) for url in project.web.urls)
+        )
         return [o for group in results for o in group]
 
     async def _one(self, project: Project, url: str) -> list[Observation]:

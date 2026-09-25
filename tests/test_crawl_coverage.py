@@ -937,3 +937,82 @@ def test_one_declared_sitemap_missing_does_not_speak_for_the_others(serve):
     }
 
     assert "discovered_via" not in home, "one missing sitemap was taken as proof the host has none"
+
+
+def test_an_unreadable_robots_does_not_prove_there_is_no_sitemap(serve):
+    """An unreadable robots.txt leaves the declaration list empty, which is
+    indistinguishable from a robots.txt that declares nothing — so a 404 at the
+    conventional path would prove absence for a host that normally announces
+    /sitemap_index.xml and was merely having a bad night."""
+
+    class NoRobots(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path in ("/robots.txt", "/sitemap.xml"):
+                self.send_error(503 if path == "/robots.txt" else 404)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = page("Home").replace("{base}", base).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), NoRobots)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    flaky = f"http://127.0.0.1:{server.server_port}"
+    try:
+        project = Project(id="p", web={"url": primary, "also": [flaky], "deep_sample": 0})
+        home = {
+            o.key: o.value
+            for o in asyncio.run(CrawlCollector().collect(project))
+            if o.subject == f"{flaky}/"
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert "discovered_via" not in home, (
+        "a sweep that could not read robots.txt concluded the host has no sitemap"
+    )
+
+
+def test_a_host_with_no_robots_at_all_is_still_a_definite_answer(serve):
+    """404 on both is a host saying it has neither, which is an answer."""
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    bare = serve({"/": page("Home")})
+    project = Project(id="p", web={"url": primary, "also": [bare], "deep_sample": 0})
+
+    home = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{bare}/"
+    }
+
+    assert home["discovered_via"] == "home"
+
+
+def test_a_host_with_no_sitemap_is_not_an_incomplete_crawl(serve):
+    """Absent is an answer; unreadable is not.
+
+    The operator site on ProCare Edge has one noindex page and no sitemap on
+    purpose, and collapsing the two states made it read as a host whose sitemap
+    nobody could read — a permanent amber "sitemap gap" on the panel for a
+    decision that was deliberate.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    # robots.txt that declares no sitemap, and none at the conventional path.
+    bare = serve({"/robots.txt": "User-agent: *\nAllow: /\n", "/": page("Home")})
+    project = Project(id="p", web={"url": primary, "also": [bare], "deep_sample": 0})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(bare)]
+
+    assert host["sitemap_status"] == "404"
+    assert host["discovery_complete"] == "true", (
+        "a host with no sitemap was reported as incompletely discovered"
+    )
