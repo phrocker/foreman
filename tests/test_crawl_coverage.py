@@ -1590,3 +1590,66 @@ def test_a_portfolio_sweep_does_not_open_a_connection_per_host(serve):
             s.server_close()
 
     assert peak <= CONCURRENCY, f"{peak} requests in flight against a cap of {CONCURRENCY}"
+
+
+def test_a_legacy_root_keeps_its_standing_finding_through_a_blind_sweep(serve):
+    """Three fixes meeting badly.
+
+    A store written before the root had one spelling holds the bare form. On a
+    sweep that cannot read the sitemap, the slashed form looked like a page
+    never seen before and was marked unknown — while the old row was being
+    retired at the same moment. A standing sitemapped-but-noindex finding
+    vanished with no evidence that anything about the site had changed.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+
+    class Down(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/sitemap.xml":
+                self.send_error(503)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = (
+                (ROBOTS if path == "/robots.txt" else page("Home")).replace("{base}", base).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Down)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    legacy = f"http://127.0.0.1:{server.server_port}"
+    try:
+        project = Project(id="p", web={"url": primary, "also": [legacy], "deep_sample": 0})
+        # The root, recorded under the bare form with no provenance cell.
+        prior = {legacy: {"status": "200", "title": "Home", "meta_robots": "noindex"}}
+        obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    home = {o.key: o.value for o in obs if o.subject == f"{legacy}/"}
+    assert "discovered_via" not in home, (
+        "the root was called a page never seen before, so its standing finding "
+        "was dropped on a night the sitemap happened to fail"
+    )
+
+
+def test_an_explicit_provenance_moves_with_the_root(serve):
+    """Clearing the old row and leaving the new one with no cell means the
+    rules read the absence as "came from a sitemap" — right for a row that
+    predates provenance, wrong for one that said "home" out loud."""
+    base = serve({"/robots.txt": "User-agent: *\nAllow: /\n", "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+    prior = {base: {"status": "200", "title": "Home", "discovered_via": "home"}}
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    home = [o.value for o in obs if o.subject == f"{base}/" and o.key == "discovered_via"]
+
+    assert home and home[-1] == "home"

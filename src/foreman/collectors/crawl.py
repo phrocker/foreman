@@ -372,7 +372,17 @@ class CrawlCollector:
         if home not in urls:
             pages.append(
                 self._page(
-                    client, project, home, sem, via=_via(found, home, no_sitemap, home in prior)
+                    client,
+                    project,
+                    home,
+                    sem,
+                    # Either spelling counts as knowing this page: a store
+                    # written before the root had one spelling holds the bare
+                    # form, and calling the slashed form "never seen" made a
+                    # blind sweep mark it unknown — which, with the old row
+                    # being retired at the same time, took a standing finding
+                    # off the board with nothing having changed.
+                    via=_via(found, home, no_sitemap, home in prior or site in prior),
                 )
             )
 
@@ -463,7 +473,24 @@ class CrawlCollector:
         cells = prior.get(site)
         if not cells:
             return []
-        return [
+        out: list[Observation] = []
+        # Carry its provenance across rather than dropping it. Clearing the old
+        # row and leaving the new one with no cell means the rules read the
+        # absence as "came from a sitemap" — right for a row that predates
+        # provenance, wrong for one that said "home" or "unlisted" out loud. A
+        # measurement this sweep makes later wins, because it is recorded after
+        # this.
+        if via := cells.get("discovered_via"):
+            out.append(
+                Observation(
+                    project=project.id,
+                    collector=self.name,
+                    subject=f"{site}/",
+                    key="discovered_via",
+                    value=via,
+                )
+            )
+        return out + [
             Observation(project=project.id, collector=self.name, subject=site, key=key, value=None)
             for key in (
                 "title",
