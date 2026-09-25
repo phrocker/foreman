@@ -1846,8 +1846,12 @@ function coverageRow(cov) {
     // the panel reporting a coverage gap it had already been told about.
     // Known to be missing something right now, or tried since it last
     // succeeded and did not finish. Either way the green is out of date.
-    const stale = h.discovery_complete === "false"
-      || (h.deep_attempt_at && h.deep_attempt_at > (h.deep_crawl_at || ""));
+    // A host with no sitemap can never earn a full-crawl stamp, so it would
+    // read "partial" for ever for a state its own chip already names.
+    const noSitemap = h.sitemap === "404" || h.sitemap === "410";
+    const stale = !noSitemap
+      && (h.discovery_complete === "false"
+        || (h.deep_attempt_at && h.deep_attempt_at > (h.deep_crawl_at || "")));
     const cls = !h.seen ? "cold"
       : broken ? "bad"
       : stale || h.sitemap === "404" || !h.deep_crawl_at ? "shallow" : "";

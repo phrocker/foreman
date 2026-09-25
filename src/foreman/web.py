@@ -1605,10 +1605,19 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         "degraded": sum(
                             1
                             for h in hosts
-                            if h["discovery_complete"] == "false"
-                            or (
-                                h["deep_attempt_at"]
-                                and (h["deep_attempt_at"] or "") > (h["deep_crawl_at"] or "")
+                            # A host with no sitemap can never earn a
+                            # full-crawl stamp — that stamp means "everything a
+                            # sitemap listed answered" — so counting it
+                            # degraded would leave it flagged for ever for a
+                            # state its chip already names. It reads "no
+                            # sitemap", which is the more useful thing to say.
+                            if h["sitemap"] not in ("404", "410")
+                            and (
+                                h["discovery_complete"] == "false"
+                                or (
+                                    h["deep_attempt_at"]
+                                    and (h["deep_attempt_at"] or "") > (h["deep_crawl_at"] or "")
+                                )
                             )
                         ),
                         "deep_sample": target.web.deep_sample,

@@ -1016,3 +1016,25 @@ def test_a_host_with_no_sitemap_is_not_an_incomplete_crawl(serve):
     assert host["discovery_complete"] == "true", (
         "a host with no sitemap was reported as incompletely discovered"
     )
+
+
+def test_a_host_with_no_sitemap_is_not_permanently_degraded(tmp_path):
+    """ "Read in full" means everything a sitemap listed answered, so a host
+    with no sitemap can never earn it. Counting that as degraded would flag the
+    host for ever for a state its own chip already names."""
+    client = coverage_app(
+        tmp_path,
+        ["https://primary.test", "https://bare.test"],
+        [
+            ("primary.test", "robots_txt_status", "200"),
+            ("primary.test", "sitemap_status", "200"),
+            ("primary.test", "deep_crawl_at", "2026-09-25T02:00:00+00:00"),
+            ("primary.test", "deep_attempt_at", "2026-09-25T02:00:00+00:00"),
+            # One page, no sitemap, deliberately — the operator site's shape.
+            ("bare.test", "robots_txt_status", "200"),
+            ("bare.test", "sitemap_status", "404"),
+            ("bare.test", "deep_attempt_at", "2026-09-25T02:00:00+00:00"),
+        ],
+    )
+
+    assert client.get("/api/coverage").json()[0]["degraded"] == 0
