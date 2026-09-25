@@ -1839,7 +1839,10 @@ function coverageRow(cov) {
     // Tried since it last succeeded, and did not finish. A host read
     // completely once and failing ever since stayed green for good, which is
     // the panel reporting a coverage gap it had already been told about.
-    const stale = h.deep_attempt_at && h.deep_attempt_at > (h.deep_crawl_at || "");
+    // Known to be missing something right now, or tried since it last
+    // succeeded and did not finish. Either way the green is out of date.
+    const stale = h.discovery_complete === "false"
+      || (h.deep_attempt_at && h.deep_attempt_at > (h.deep_crawl_at || ""));
     const cls = !h.seen ? "cold"
       : broken ? "bad"
       : stale || h.sitemap === "404" || !h.deep_crawl_at ? "shallow" : "";
@@ -1854,6 +1857,7 @@ function coverageRow(cov) {
     const flag = !h.seen ? ""
       : h.error ? "unreachable"
       : h.robots === "404" ? "no robots"
+      : h.discovery_complete === "false" ? "sitemap gap"
       : stale ? "partial"
       : h.sitemap === "404" ? "no sitemap"
       : h.status && h.status !== "200" ? h.status : "";

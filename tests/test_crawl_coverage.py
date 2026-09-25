@@ -866,3 +866,74 @@ def test_a_rate_limited_sweep_does_not_erase_what_is_known(serve):
         server.server_close()
 
     assert "discovered_via" not in home, "a 429 was read as proof the host has no sitemap"
+
+
+def test_a_shallow_sweep_notices_a_child_sitemap_that_started_failing(serve):
+    """robots, the index and the home page all answer 200, so nothing else on
+    the panel changes — and the host stayed green on the strength of a deep
+    crawl from before the gap appeared. The shallow sweep reads the sitemaps
+    and knew all along."""
+    index = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<sitemap><loc>{base}/one.xml</loc></sitemap>"
+        "<sitemap><loc>{base}/gone.xml</loc></sitemap></sitemapindex>"
+    )
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    gappy = serve(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n",
+            "/sitemap.xml": index,
+            "/one.xml": sitemap(["/"]),
+            "/": page("Home"),
+        }
+    )
+    project = Project(id="p", web={"url": primary, "also": [gappy], "deep_sample": 0})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(gappy)]
+
+    assert host["robots_txt_status"] == "200"
+    assert host["sitemap_status"] == "200", "nothing else about this host looks wrong"
+    assert host["discovery_complete"] == "false"
+
+
+def test_an_error_page_served_with_a_200_is_not_an_empty_sitemap(serve):
+    """Any well-formed XML counted as a sitemap read whole, so an XHTML error
+    page with no <loc> in it looked exactly like a host announcing it lists
+    nothing — and overwrote provenance it should have left alone."""
+    not_a_sitemap = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<html xmlns="http://www.w3.org/1999/xhtml">'
+        "<body><h1>Down for maintenance</h1></body></html>"
+    )
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    lying = serve({"/robots.txt": ROBOTS, "/sitemap.xml": not_a_sitemap, "/": page("Home")})
+    project = Project(id="p", web={"url": primary, "also": [lying], "deep_sample": 0})
+
+    home = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{lying}/"
+    }
+
+    assert "discovered_via" not in home, "an error page was read as a sitemap listing nothing"
+
+
+def test_one_declared_sitemap_missing_does_not_speak_for_the_others(serve):
+    """_sitemap measures the first declared location. With two declarations,
+    the first 404 and the second unreadable, a 404 says nothing about the host:
+    the page may well be listed in the one nobody could read."""
+    robots = (
+        "User-agent: *\nAllow: /\nSitemap: {base}/missing.xml\nSitemap: {base}/also-missing.xml\n"
+    )
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    two = serve({"/robots.txt": robots, "/": page("Home")})
+    project = Project(id="p", web={"url": primary, "also": [two], "deep_sample": 0})
+
+    home = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{two}/"
+    }
+
+    assert "discovered_via" not in home, "one missing sitemap was taken as proof the host has none"

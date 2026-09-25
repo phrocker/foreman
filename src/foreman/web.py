@@ -1571,6 +1571,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                             # coverage gap it had already been told about.
                             "deep_attempt_at": cells.get("deep_attempt_at"),
                             "deep_pages_failed": cells.get("deep_pages_failed"),
+                            # Whether the most recent sweep — shallow or deep —
+                            # could read every sitemap this host names. A
+                            # child sitemap that started failing leaves robots,
+                            # the index and the home page all answering 200, so
+                            # this is the only cell that changes.
+                            "discovery_complete": cells.get("discovery_complete"),
                             "status": home.get("status"),
                             "title": home.get("title"),
                             "canonical": home.get("canonical"),
@@ -1599,8 +1605,11 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         "degraded": sum(
                             1
                             for h in hosts
-                            if h["deep_attempt_at"]
-                            and (h["deep_attempt_at"] or "") > (h["deep_crawl_at"] or "")
+                            if h["discovery_complete"] == "false"
+                            or (
+                                h["deep_attempt_at"]
+                                and (h["deep_attempt_at"] or "") > (h["deep_crawl_at"] or "")
+                            )
                         ),
                         "deep_sample": target.web.deep_sample,
                         "hosts": hosts,

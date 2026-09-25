@@ -107,10 +107,12 @@ async def discover(
 async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tuple[list[str], bool]:
     """The URLs in one sitemap, and whether it was read whole.
 
-    The second half is the honest part. A sitemap that 404s, or one an index
-    names and which cannot be parsed, used to return an empty list and look
-    exactly like a sitemap with nothing in it — so a host whose second child
-    sitemap was missing read as fully discovered.
+    The second half is the honest part. A sitemap that 404s, one an index names
+    and which cannot be parsed, and a document that is not a sitemap at all
+    used to return an empty list and look exactly like a sitemap with nothing
+    in it — so a host whose second child sitemap was missing read as fully
+    discovered, and an error page served with a 200 read as a host announcing
+    it has no pages.
     """
     if depth > 1:  # one level of <sitemapindex> nesting is enough
         return [], False
@@ -123,6 +125,15 @@ async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tupl
         return [], False
 
     ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+    # A sitemap is a urlset or a sitemapindex, and nothing else is either.
+    #
+    # Without this, any well-formed XML counted as a sitemap read whole — an
+    # XHTML error page served with a 200, most obviously — and a document with
+    # no <loc> in it looked exactly like a sitemap that lists nothing. The
+    # caller reads that as a host stating it lists nothing, and overwrites
+    # provenance it should have left alone.
+    if root.tag not in (f"{ns}urlset", f"{ns}sitemapindex"):
+        return [], False
     if root.tag == f"{ns}sitemapindex":
         nested: list[str] = []
         whole = True

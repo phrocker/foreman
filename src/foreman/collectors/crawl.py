@@ -265,16 +265,21 @@ class CrawlCollector:
             )
 
         obs = await self._robots(client, project, site)
-        sitemap_obs, sitemap_status = await self._sitemap(
-            client, project, site, _declared_sitemaps(obs)
-        )
+        declared = _declared_sitemaps(obs)
+        sitemap_obs, sitemap_status = await self._sitemap(client, project, site, declared)
         obs.extend(sitemap_obs)
         # Gone means gone. 404 and 410 are a host saying it has no sitemap,
         # which is a fact about the host. 429 and 403 are a host declining to
         # answer this sweep, and treating those as proof of absence would let a
         # rate-limited night overwrite provenance that a good crawl
         # established.
-        no_sitemap = sitemap_status in (404, 410)
+        #
+        # And only when there is one place it could be. _sitemap measures the
+        # first declared location, so with two declarations — the first 404 and
+        # the second unreadable — a 404 says nothing about the host: the page
+        # may well be listed in the one nobody could read. More than one
+        # declaration, and discovery's own verdict is the only honest answer.
+        no_sitemap = len(declared) <= 1 and sitemap_status in (404, 410)
 
         # Discovery on every host, deep or not.
         #
@@ -286,6 +291,14 @@ class CrawlCollector:
         # names, which reading the index's own bytes cannot do.
         found = await discover(client, project, site)
         obs.append(ob("urls_discovered", str(len(found.urls))))
+        # Recorded every sweep, shallow included.
+        #
+        # A shallow sweep reads the sitemaps and so knows perfectly well when
+        # one of an index's children has started failing — and it was throwing
+        # that away. robots, the index and the home page all answer 200, so
+        # nothing else on the panel changed, and the host stayed green on the
+        # strength of a deep crawl from before the gap appeared.
+        obs.append(ob("discovery_complete", "true" if found.complete else "false"))
 
         urls = found.urls if deep else []
         # The home page on every host, every run, whether or not a sitemap
