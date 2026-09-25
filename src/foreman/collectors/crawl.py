@@ -395,6 +395,22 @@ class CrawlCollector:
                     value=str(r.status_code),
                 )
             )
+            # Clear any error from a previous sweep.
+            #
+            # The store keeps the latest value of every cell, and a success
+            # that writes nothing leaves the failure standing: a host that
+            # timed out once and has been fine ever since read "unreachable"
+            # for good — the mirror of the green-for-ever bug, and just as
+            # useless. An answered request says so explicitly.
+            out.append(
+                Observation(
+                    project=project.id,
+                    collector=self.name,
+                    subject=host,
+                    key="robots_txt_error",
+                    value=None,
+                )
+            )
             if r.status_code == 200:
                 out.append(
                     Observation(
@@ -462,7 +478,11 @@ class CrawlCollector:
         except httpx.HTTPError as exc:
             return [ob("sitemap_url", where), ob("sitemap_error", str(exc))], None
 
-        out = [ob("sitemap_url", where), ob("sitemap_status", str(r.status_code))]
+        out = [
+            ob("sitemap_url", where),
+            ob("sitemap_status", str(r.status_code)),
+            ob("sitemap_error", None),
+        ]
         if r.status_code != 200:
             return out, r.status_code
         # Counted from the bytes rather than by parsing: a sitemap that is
@@ -555,7 +575,7 @@ class CrawlCollector:
                 out = [ob("fetch_error", str(exc))]
                 return [ob("discovered_via", via), *out] if via else out
 
-            out = [ob("status", str(r.status_code))]
+            out = [ob("status", str(r.status_code)), ob("fetch_error", None)]
             if via:
                 out.insert(0, ob("discovered_via", via))
             # Redirects are not followed on purpose: a sitemap URL that answers

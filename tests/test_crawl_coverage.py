@@ -1054,3 +1054,64 @@ def test_a_declared_sitemap_that_is_gone_is_a_gap(serve):
     assert "deep_crawl_at" not in host, (
         "full coverage was claimed while a sitemap robots.txt names is missing"
     )
+
+
+def test_a_recovered_host_stops_being_reported_as_unreachable(serve):
+    """The store keeps the latest value of every cell, so a success that writes
+    nothing leaves the failure standing: a host that timed out once and has
+    been fine ever since read "unreachable" for good — the mirror of the
+    green-for-ever bug, and just as useless."""
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+
+    obs = asyncio.run(CrawlCollector().collect(project))
+    host = by_host(obs)[host_of(base)]
+
+    # Written explicitly as empty, not merely absent: absent would leave an
+    # older failure as the latest known value.
+    assert "robots_txt_error" in host and host["robots_txt_error"] is None
+    assert "sitemap_error" in host and host["sitemap_error"] is None
+    home = {o.key: o.value for o in obs if o.subject == f"{base}/"}
+    assert "fetch_error" in home and home["fetch_error"] is None
+
+
+def test_discovery_is_not_complete_when_robots_could_not_be_read(serve):
+    """A readable /sitemap.xml is not completeness when the file that would
+    have named the others could not be read: it may well declare two more."""
+
+    class NoRobots(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/robots.txt":
+                self.send_error(503)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = (
+                (sitemap(["/"]) if path == "/sitemap.xml" else page("Home"))
+                .replace("{base}", base)
+                .encode()
+            )
+            kind = "application/xml" if path.endswith(".xml") else "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", f"{kind}; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), NoRobots)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        host = by_host(
+            asyncio.run(CrawlCollector().collect(Project(id="solo", web={"url": base})))
+        )[host_of(base)]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert host["sitemap_status"] == "200"
+    assert host["discovery_complete"] == "false"
+    assert "deep_crawl_at" not in host

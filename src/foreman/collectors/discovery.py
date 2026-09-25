@@ -63,8 +63,14 @@ async def discover(
     assert project.web is not None, "caller must check for a web surface"
     base = (site or project.web.url).rstrip("/")
     sitemaps: list[str] = []
+    # Whether this run learned what robots.txt declares, including learning
+    # that there is no robots.txt. A readable /sitemap.xml is not completeness
+    # when the file that would have named the others could not be read: it may
+    # well declare two more.
+    robots_known = False
     try:
         r = await client.get(f"{base}/robots.txt")
+        robots_known = 200 <= r.status_code < 300 or r.status_code in (404, 410)
         if r.status_code == 200:
             sitemaps = [
                 line.split(":", 1)[1].strip()
@@ -84,7 +90,7 @@ async def discover(
 
     urls: list[str] = []
     seen: set[str] = set()
-    complete = len(sitemaps) <= 5
+    complete = robots_known and len(sitemaps) <= 5
     cap = project.web.max_urls
     read = False
     for i, sm in enumerate(sitemaps[:5]):
