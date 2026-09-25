@@ -69,6 +69,13 @@ class AnchorAssetDisallow:
     def propose(self, project: Project, finding: dict) -> list[dict]:
         if finding.get("rule") not in self.answers or not project.fixable:
             return []
+        # The primary host only, for the reason AddSitemapReference gives: this
+        # edits the first robots.txt in the checkout, and a surface can now
+        # raise this finding about any of its hosts. An app and a marketing
+        # site with separate robots files would get the wrong one changed while
+        # the host that was actually blocking its own assets stayed blocked.
+        if project.web is not None and any(sub != project.web.host for sub in _subjects(finding)):
+            return []
         assert project.repo is not None
         path = _locate(project.repo)
         if path is None:

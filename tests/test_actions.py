@@ -195,3 +195,30 @@ def test_the_sitemap_action_declines_a_finding_about_a_secondary_host(tmp_path):
     # reads as a safety rail while disabling the action.
     assert action.propose(project, {**secondary, "subjects": '["county.test"]'}) == []
     assert action.propose(project, {**primary, "subjects": '["primary.test"]'})
+
+
+def test_the_asset_disallow_action_declines_a_finding_about_a_secondary_host(tmp_path):
+    """The same host-blindness as its sibling, in the action beside it.
+
+    An app and a marketing site with separate robots files would have had the
+    wrong one edited while the host actually blocking its own assets stayed
+    blocked.
+    """
+    from foreman.actions.robots import AnchorAssetDisallow
+    from foreman.config import Project
+
+    repo = tmp_path / "repo"
+    (repo / "public").mkdir(parents=True)
+    (repo / "public" / "robots.txt").write_text("User-agent: *\nDisallow: /assets\n")
+    project = Project(
+        id="portfolio",
+        repo=repo,
+        web={"url": "https://primary.test", "also": ["https://app.test"]},
+    )
+
+    action = AnchorAssetDisallow()
+    assert action.propose(project, {"rule": "robots_blocks_assets", "subjects": ["primary.test"]})
+    assert action.propose(project, {"rule": "robots_blocks_assets", "subjects": ["app.test"]}) == []
+    assert (
+        action.propose(project, {"rule": "robots_blocks_assets", "subjects": '["app.test"]'}) == []
+    )

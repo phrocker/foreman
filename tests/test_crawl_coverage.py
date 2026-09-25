@@ -533,16 +533,19 @@ def test_a_home_page_no_sitemap_lists_is_not_called_sitemapped(serve):
     assert home["discovered_via"] == "home"
 
 
-def test_an_unreadable_sitemap_index_leaves_provenance_alone(serve):
-    """An index names other sitemaps, so its body cannot say whether a page is
-    listed. No provenance is written, and the last sweep's answer survives —
-    which is the right behaviour for "this fetch cannot say"."""
+def test_a_sitemap_index_is_followed_rather_than_guessed_at(serve):
+    """An index names other sitemaps, and its own bytes say nothing about any
+    page. The first version matched `<loc>url</loc>` in the raw text and called
+    such a host's home page "not sitemapped"; discovery parses the index and
+    reads the sitemaps it names, so the answer is exact on a shallow sweep too.
+    """
     index = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
         "<sitemap><loc>{base}/pages.xml</loc></sitemap></sitemapindex>"
     )
-    base = serve(
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    wp = serve(
         {
             "/robots.txt": "User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n",
             "/sitemap.xml": index,
@@ -550,21 +553,70 @@ def test_an_unreadable_sitemap_index_leaves_provenance_alone(serve):
             "/": page("Home"),
         }
     )
-    shallow = Project(id="wp", web={"url": base, "also": [], "deep_sample": 0})
+    # deep_sample 0, so this host is read by the shallow pass.
+    project = Project(id="wp", web={"url": primary, "also": [wp], "deep_sample": 0})
 
-    obs = asyncio.run(CrawlCollector().collect(shallow))
-    home = [o for o in obs if o.subject == f"{base}/"]
-
-    # The primary is always deep, so read the shallow path through a secondary.
-    assert [o.key for o in home if o.key == "status"], "the home page was not read"
-    other = serve({"/": page("Elsewhere")})
-    pair = Project(id="wp", web={"url": base, "also": [other], "deep_sample": 0})
-    second = {
+    home = {
         o.key: o.value
-        for o in asyncio.run(CrawlCollector().collect(pair))
-        if o.subject == f"{base}/"
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{wp}/"
     }
-    assert second["discovered_via"] == "sitemap"
+
+    assert home["discovered_via"] == "sitemap"
+
+
+def test_a_loc_with_whitespace_is_still_a_sitemapped_page(serve):
+    """Whitespace inside <loc> is valid, and matching the raw bytes missed it —
+    which is the same flapping finding in a rarer form."""
+    spaced = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<url><loc>\n  {base}/\n</loc></url></urlset>"
+    )
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    other = serve({"/robots.txt": ROBOTS, "/sitemap.xml": spaced, "/": page("Home")})
+    project = Project(id="p", web={"url": primary, "also": [other], "deep_sample": 0})
+
+    home = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{other}/"
+    }
+
+    assert home["discovered_via"] == "sitemap"
+
+
+def test_a_host_whose_interior_page_timed_out_is_not_read_in_full(serve):
+    """ "Read in full" has to mean read in full.
+
+    A homepage that answered while an interior page did not is not a host read
+    in full, and stamping it as one both overstates the coverage and advances
+    the date the panel shows.
+    """
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+
+    # A sitemap listing a page on a port nobody is listening on.
+    broken = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<url><loc>{base}/</loc></url>"
+        f"<url><loc>http://127.0.0.1:{dead_port}/gone</loc></url></urlset>"
+    )
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": broken, "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["deep_pages_read"] == "1"
+    assert host["deep_pages_failed"] == "1"
+    assert "deep_attempt_at" in host, "the attempt happened and is recorded"
+    assert "deep_crawl_at" not in host, (
+        "a host with a page that never answered was reported as read in full"
+    )
 
 
 def test_an_unreachable_host_takes_its_turn_and_then_yields_it(serve):

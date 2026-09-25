@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import html as htmllib
 import re
-from collections.abc import Callable
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlparse
 
@@ -17,7 +16,7 @@ import httpx
 from ..config import Project
 from ..models import Observation
 from .base import Facts
-from .discovery import discover
+from .discovery import Discovery, discover
 
 # Only <head> is needed, and some pages are megabytes. Cap the read.
 HEAD_BYTES = 65_536
@@ -80,29 +79,28 @@ def _canonical(head: str, base: str) -> str | None:
     return urljoin(base, href.group(1)) if href else None
 
 
-def _with_via(via: str | None, ob: Callable[[str, str | None], Observation]) -> list[Observation]:
-    """The provenance cell, or none at all when this sweep cannot say."""
-    return [ob("discovered_via", via)] if via else []
+def _via(found: Discovery, url: str) -> str:
+    """Whether a sitemap listed `url`, as discovery itself reads sitemaps.
 
+    Measured every sweep rather than remembered, which is the point: the first
+    version decided provenance by which code path fetched the page, so a host
+    read deeply on Monday and shallowly on Tuesday had its home page rewritten
+    from "sitemap" to "home" — and the rules read the latest cell, so a real
+    finding vanished on Tuesday and returned on Thursday with nothing about the
+    site having changed.
 
-def _via(listing: str | None, url: str) -> str | None:
-    """Whether a sitemap listed `url`, decided from the sitemap just read.
-
-    Measured this sweep rather than remembered, which is the whole point. The
-    first version wrote "home" for every shallow homepage, so a host read
-    deeply on Monday and shallowly on Tuesday had its homepage's provenance
-    overwritten — and because the rules read the latest cell, a real
-    sitemapped-but-noindex finding vanished on Tuesday and came back on
-    Thursday with nothing about the site having changed.
-
-    None means the sitemap is an index and this body cannot say. The caller
-    writes no provenance at all then, so whatever the last deep sweep
-    established survives — a cell nobody overwrites keeps its value, which is
-    exactly the right behaviour for "I do not know".
+    The second version matched `<loc>url</loc>` in the raw bytes, which is not
+    how a sitemap is read: whitespace inside the element, or a namespace
+    prefix, is valid and would have been missed, giving the same flapping in a
+    rarer form. So the sitemap is parsed by the function that parses sitemaps,
+    which also follows an index to the sitemaps it names instead of giving up
+    on it.
     """
-    if listing is None:
-        return None
-    return "sitemap" if f"<loc>{url}</loc>" in listing else "home"
+    # from_sitemap because discovery falls back to the home page when there is
+    # no sitemap, and that URL is in the list without any sitemap having named
+    # it: filing it as sitemapped hands the sitemap rules a page to report a
+    # sitemap for, about a file that does not exist.
+    return "sitemap" if found.from_sitemap and url in found.urls else "home"
 
 
 def _declared_sitemaps(obs: list[Observation]) -> list[str]:
@@ -261,51 +259,60 @@ class CrawlCollector:
             )
 
         obs = await self._robots(client, project, site)
-        sitemap_obs, listing = await self._sitemap(client, project, site, _declared_sitemaps(obs))
-        obs.extend(sitemap_obs)
+        obs.extend(await self._sitemap(client, project, site, _declared_sitemaps(obs)))
 
-        urls: list[str] = []
-        from_sitemap = False
-        if deep:
-            obs.extend(await self._probe(client, project, site))
-            found = await discover(client, project, site)
-            urls, from_sitemap = found.urls, found.from_sitemap
-            obs.append(ob("urls_discovered", str(len(urls))))
-
-        # The home page on every host, every run, whether or not a sitemap
-        # mentions it.
+        # Discovery on every host, deep or not.
         #
-        # It was the shallow pass's job alone, and a sitemap is not obliged to
-        # list the page it belongs to: a deep host whose sitemap omits "/"
-        # recorded no status and no canonical for it at all, and the primary is
-        # always deep, so the one host that was never shallow was the one that
-        # could lose its homepage facts permanently.
-        pages = [
-            self._page(client, project, url, sem, via="sitemap" if from_sitemap else "home")
-            for url in urls
-        ]
-        if home not in urls:
-            pages.append(self._page(client, project, home, sem, via=_via(listing, home)))
+        # It is two or three XML fetches — the expense of a deep crawl is the
+        # pages, not finding out what they are — and it buys the shallow pass
+        # an exact answer to "does this host's sitemap list its home page",
+        # which is what keeps a shallow sweep from overwriting what a deep one
+        # established. It also follows a sitemap index to the sitemaps it
+        # names, which reading the index's own bytes cannot do.
+        found = await discover(client, project, site)
+        obs.append(ob("urls_discovered", str(len(found.urls))))
 
-        answered = False
+        urls = found.urls if deep else []
+        # The home page on every host, every run, whether or not a sitemap
+        # mentions it. A sitemap is not obliged to list the page it belongs to,
+        # and the primary is always deep — so the one host that never gets the
+        # shallow pass was the one that could lose its homepage facts entirely.
+        pages = [self._page(client, project, url, sem, via=_via(found, url)) for url in urls]
+        if home not in urls:
+            pages.append(self._page(client, project, home, sem, via=_via(found, home)))
+
+        read = 0
+        failed = 0
         for page in await asyncio.gather(*pages):
             obs.extend(page)
-            # A page that answered at all, as opposed to one that raised.
-            answered = answered or any(o.key == "status" for o in page)
+            if any(o.key == "status" for o in page):
+                read += 1
+            else:
+                failed += 1
 
-        # An attempt, recorded whether or not it worked.
-        #
-        # The rotation reads this and the coverage panel reads deep_crawl_at
-        # below, and they have to be different facts. Sorting the rotation by
-        # successes alone meant an unreachable host never advanced and so was
-        # chosen again every sweep: with deep_sample=1 and one dead secondary,
-        # no healthy host would ever have been crawled in full again. Attempts
-        # decide whose turn it is; successes decide what the panel claims.
         if deep:
+            obs.extend(await self._probe(client, project, site))
+            obs.append(ob("deep_pages_read", str(read)))
+            obs.append(ob("deep_pages_failed", str(failed)))
+            # An attempt, recorded whether or not it worked.
+            #
+            # The rotation reads this and the panel reads deep_crawl_at, and
+            # they have to be different facts. Sorting the rotation by
+            # successes alone meant an unreachable host never advanced and so
+            # was chosen again every sweep: with deep_sample=1 and one dead
+            # secondary, no healthy host would ever be read in full again.
+            # Attempts decide whose turn it is; successes decide what the panel
+            # claims.
             obs.append(ob("deep_attempt_at", datetime.now(UTC).isoformat(timespec="seconds")))
 
-        if deep and answered:
-            obs.append(ob("deep_crawl_at", datetime.now(UTC).isoformat(timespec="seconds")))
+            # "Read in full" has to mean read in full.
+            #
+            # A homepage that answered while the sitemap fetch failed, or while
+            # an interior page timed out, is not a host read in full — and
+            # stamping it as one both overstates the coverage and advances the
+            # date the panel shows. Every discovered page has to have answered.
+            if found.from_sitemap and read and not failed:
+                obs.append(ob("deep_crawl_at", datetime.now(UTC).isoformat(timespec="seconds")))
         return obs
 
     async def _robots(
@@ -370,7 +377,7 @@ class CrawlCollector:
         project: Project,
         site: str,
         declared: list[str],
-    ) -> tuple[list[Observation], str | None]:
+    ) -> list[Observation]:
         """What the host's sitemap actually answers, and how much it lists.
 
         Separate from discovery, which treats a missing sitemap as "use the
@@ -397,22 +404,16 @@ class CrawlCollector:
         try:
             r = await client.get(where)
         except httpx.HTTPError as exc:
-            return [ob("sitemap_url", where), ob("sitemap_error", str(exc))], None
+            return [ob("sitemap_url", where), ob("sitemap_error", str(exc))]
 
         out = [ob("sitemap_url", where), ob("sitemap_status", str(r.status_code))]
-        if r.status_code != 200:
-            # There is no sitemap, so nothing this host serves is in one.
-            return out, ""
-        # Counted from the bytes rather than by parsing: a sitemap that is
-        # valid XML but empty and one that is malformed are different
-        # findings, and sitemap_urls tells them apart.
-        out.append(ob("sitemap_urls", str(r.text.count("<loc>"))))
-        if "<sitemapindex" in r.text:
-            # An index names other sitemaps, so this body cannot say whether
-            # any particular page is listed. None means "unknown", and the
-            # caller records no provenance rather than a guess.
-            return out, None
-        return out, r.text
+        if r.status_code == 200:
+            # Counted from the bytes rather than by parsing: a sitemap that is
+            # valid XML but empty and one that is malformed are different
+            # findings, and sitemap_urls tells them apart. What the sitemap
+            # lists is discovery's question, and it is asked there.
+            out.append(ob("sitemap_urls", str(r.text.count("<loc>"))))
+        return out
 
     async def _probe(
         self, client: httpx.AsyncClient, project: Project, site: str
@@ -469,7 +470,7 @@ class CrawlCollector:
         project: Project,
         url: str,
         sem: asyncio.Semaphore,
-        via: str | None = "sitemap",
+        via: str = "sitemap",
     ) -> list[Observation]:
         """One page. `via` says how it was found, and the rules need to know.
 
@@ -479,9 +480,10 @@ class CrawlCollector:
         secondary that redirects, or an app homepage that is deliberately
         noindex, would be reported as a sitemap listing a page it never listed.
 
-        `via=None` writes no provenance, which leaves whatever the last sweep
-        established in place. That is what an unreadable sitemap index means:
-        not "this page is not listed" but "this fetch cannot say".
+        Every page gets a provenance cell, because every host now runs
+        discovery and so every sweep can answer the question. An omitted cell
+        would mean "unknown", and the rules would have to guess what to do with
+        it — which they did, wrongly, for one revision of this change.
         """
 
         def ob(key: str, value: str | None) -> Observation:
@@ -493,9 +495,9 @@ class CrawlCollector:
             try:
                 r = await client.get(url)
             except httpx.HTTPError as exc:
-                return _with_via(via, ob) + [ob("fetch_error", str(exc))]
+                return [ob("discovered_via", via), ob("fetch_error", str(exc))]
 
-            out = _with_via(via, ob) + [ob("status", str(r.status_code))]
+            out = [ob("discovered_via", via), ob("status", str(r.status_code))]
             # Redirects are not followed on purpose: a sitemap URL that answers
             # 301 is itself the finding, and following it would hide that.
             if 300 <= r.status_code < 400:
