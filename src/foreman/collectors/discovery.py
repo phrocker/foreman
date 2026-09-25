@@ -14,12 +14,22 @@ import httpx
 from ..config import Project
 
 
-async def discover_urls(client: httpx.AsyncClient, project: Project) -> list[str]:
-    """Sitemap first; homepage alone if there is not one."""
+async def discover_urls(
+    client: httpx.AsyncClient, project: Project, site: str | None = None
+) -> list[str]:
+    """Sitemap first; homepage alone if there is not one.
+
+    `site` names which of the surface's hosts to discover, defaulting to the
+    primary. Every host has its own robots.txt and its own sitemap — on a
+    portfolio of county domains they list entirely different pages — so
+    discovery run against the primary and applied to the rest would be
+    reporting one site's pages under another's name.
+    """
     assert project.web is not None, "caller must check for a web surface"
+    base = (site or project.web.url).rstrip("/")
     sitemaps: list[str] = []
     try:
-        r = await client.get(f"{project.web.url}/robots.txt")
+        r = await client.get(f"{base}/robots.txt")
         if r.status_code == 200:
             sitemaps = [
                 line.split(":", 1)[1].strip()
@@ -29,7 +39,7 @@ async def discover_urls(client: httpx.AsyncClient, project: Project) -> list[str
     except httpx.HTTPError:
         pass
     if not sitemaps:
-        sitemaps = [f"{project.web.url}/sitemap.xml"]
+        sitemaps = [f"{base}/sitemap.xml"]
 
     urls: list[str] = []
     seen: set[str] = set()
@@ -40,7 +50,7 @@ async def discover_urls(client: httpx.AsyncClient, project: Project) -> list[str
                 urls.append(url)
             if len(urls) >= project.web.max_urls:
                 return urls
-    return urls or [project.web.url + "/"]
+    return urls or [base + "/"]
 
 
 async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> list[str]:

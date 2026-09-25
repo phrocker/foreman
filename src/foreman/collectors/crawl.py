@@ -1,11 +1,15 @@
-"""Crawl a site's sitemap and record the SEO-critical facts of every page."""
+"""Crawl a site's sitemap and record the SEO-critical facts of every page.
+
+Every host, not only the primary — see the coverage note on `collect`.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import html as htmllib
 import re
-from urllib.parse import urljoin
+from datetime import UTC, datetime
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -80,43 +84,184 @@ class CrawlCollector:
     surface = "web"
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
+        """Crawl the surface. Every host shallowly; a rotating few in full.
+
+        # Why this is not the primary alone
+
+        It was, for eleven weeks, and ProCare Edge is the site that showed what
+        that costs. Twenty-one county domains, all of them answering 404 for
+        robots.txt and sitemap.xml, none of them carrying a canonical — and
+        thirteen crawl observations in the store, every one of them against
+        procareedge.com, which is the operator console and not one of the
+        twenty-one. The surface reported healthy because the collector was
+        looking at the one host where nothing was wrong.
+
+        The argument for primary-only was that twenty-one crawls of one
+        template cost twenty-one times as much for the same finding. A template
+        decides the shape of a page. It does not decide whether this host's
+        robots.txt exists, what this host's canonical says, whether this host's
+        sitemap lists the pages this host serves, or whether this host answers
+        at all. Those are per-host facts, and a report covering one host cannot
+        speak for the others.
+
+        # Shallow and deep
+
+        Shallow, for every host, every run: robots.txt, sitemap.xml, and the
+        home page's own head. Three requests each — sixty-three for this
+        portfolio — which is not a budget anybody needs to think about, and it
+        is the pass that would have caught the missing files on day one.
+
+        Deep, for the primary and a rotating `deep_sample` of the rest: full
+        sitemap discovery, every page it lists, and the 404-shell probes. This
+        is where the cost is, so it rotates by least-recently-crawled, read
+        from the `deep_crawl_at` cell each run leaves behind. Self-correcting
+        rather than a cursor: a host that errored, or one added to the surface
+        yesterday, has no timestamp and therefore goes first.
+        """
         # A project without a web surface is still a project; this collector
         # simply has nothing to look at.
         if project.web is None:
             return []
+
+        deep = self._deep_targets(project, prior)
+        obs: list[Observation] = []
         async with httpx.AsyncClient(
             timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=False
         ) as client:
-            obs = await self._robots(client, project)
-            obs.extend(await self._probe(client, project))
-            urls = await discover_urls(client, project)
-            obs.append(
-                Observation(
-                    project=project.id,
-                    collector=self.name,
-                    subject=project.web.host,
-                    key="urls_discovered",
-                    value=str(len(urls)),
-                )
-            )
+            # Hosts concurrently, and pages within a host concurrently, both
+            # under one semaphore: the deep pass on a large site is the only
+            # thing here that is many requests, and it must not become many
+            # requests times many hosts.
             sem = asyncio.Semaphore(CONCURRENCY)
-            results = await asyncio.gather(*(self._page(client, project, url, sem) for url in urls))
-            for page in results:
-                obs.extend(page)
+            results = await asyncio.gather(
+                *(self._site(client, project, site, site in deep, sem) for site in project.web.urls)
+            )
+            for site_obs in results:
+                obs.extend(site_obs)
+
+        obs.extend(self._coverage(project, deep))
         return obs
 
-    async def _robots(self, client: httpx.AsyncClient, project: Project) -> list[Observation]:
-        """robots.txt, verbatim. It is one file that can silently cost a site
-        every rendered page — an unanchored `Disallow: /assets` blocks the JS
-        bundles, and nothing in a rank tracker will ever tell you."""
+    def _deep_targets(self, project: Project, prior: Facts | None) -> set[str]:
+        """The primary, plus the `deep_sample` secondaries crawled longest ago.
+
+        Least-recently-crawled rather than a stored cursor, because the cursor
+        would have to be right about a list that changes: a host added to the
+        surface, or one that errored out of its turn, is simply a host with no
+        timestamp, and sorts first without anybody arranging it.
+        """
+        assert project.web is not None
+        deep = {project.web.url}
+        secondaries = list(project.web.also)
+        if not secondaries or project.web.deep_sample <= 0:
+            return deep
+
+        facts = prior or {}
+
+        def last_deep(site: str) -> str:
+            # An empty string sorts before every timestamp, which is what a
+            # host nobody has crawled deserves.
+            return str(facts.get(urlparse(site).netloc, {}).get("deep_crawl_at") or "")
+
+        # Declared order breaks ties, so a first run takes the first few rather
+        # than an arbitrary few — and a rerun of the same state is the same run.
+        ordered = sorted(enumerate(secondaries), key=lambda pair: (last_deep(pair[1]), pair[0]))
+        deep.update(site for _, site in ordered[: project.web.deep_sample])
+        return deep
+
+    def _coverage(self, project: Project, deep: set[str]) -> list[Observation]:
+        """What was actually looked at, recorded where the UI can read it.
+
+        The failure this collector had was invisible: nothing in the store said
+        "one host of twenty-one", so nothing could say the coverage was wrong.
+        Coverage is now a fact like any other.
+        """
+        assert project.web is not None
+        host = project.web.host
+        deep_hosts = sorted(urlparse(u).netloc for u in deep)
+        return [
+            Observation(
+                project=project.id,
+                collector=self.name,
+                subject=host,
+                key=key,
+                value=value,
+            )
+            for key, value in (
+                ("hosts_declared", str(len(project.web.urls))),
+                ("hosts_crawled", str(len(project.web.urls))),
+                ("hosts_deep_crawled", str(len(deep_hosts))),
+                ("deep_crawled", ",".join(deep_hosts)),
+            )
+        ]
+
+    async def _site(
+        self,
+        client: httpx.AsyncClient,
+        project: Project,
+        site: str,
+        deep: bool,
+        sem: asyncio.Semaphore,
+    ) -> list[Observation]:
+        """One host: shallow always, deep when it is this host's turn."""
+        assert project.web is not None
+        host = urlparse(site).netloc
+
+        obs = await self._robots(client, project, site)
+        obs.extend(await self._sitemap(client, project, site))
+
+        if not deep:
+            # The home page's own head. A canonical, a title and a robots meta
+            # are per-host facts, and this is the cheapest place they exist.
+            obs.extend(await self._page(client, project, f"{site}/", sem))
+            return obs
+
+        obs.extend(await self._probe(client, project, site))
+        urls = await discover_urls(client, project, site)
+        obs.append(
+            Observation(
+                project=project.id,
+                collector=self.name,
+                subject=host,
+                key="urls_discovered",
+                value=str(len(urls)),
+            )
+        )
+        pages = await asyncio.gather(*(self._page(client, project, url, sem) for url in urls))
+        for page in pages:
+            obs.extend(page)
+        obs.append(
+            Observation(
+                project=project.id,
+                collector=self.name,
+                subject=host,
+                key="deep_crawl_at",
+                # Read back by _deep_targets next run to pick the next few.
+                value=datetime.now(UTC).isoformat(timespec="seconds"),
+            )
+        )
+        return obs
+
+    async def _robots(
+        self, client: httpx.AsyncClient, project: Project, site: str
+    ) -> list[Observation]:
+        """robots.txt, verbatim, for one host.
+
+        It is one file that can silently cost a site every rendered page — an
+        unanchored `Disallow: /assets` blocks the JS bundles, and nothing in a
+        rank tracker will ever tell you. It is also a file that can be absent
+        on twenty hosts and present on the twenty-first, which is why `site` is
+        a parameter now.
+        """
+        host = urlparse(site).netloc
         out: list[Observation] = []
         try:
-            r = await client.get(f"{project.web.url}/robots.txt")
+            r = await client.get(f"{site}/robots.txt")
             out.append(
                 Observation(
                     project=project.id,
                     collector=self.name,
-                    subject=project.web.host,
+                    subject=host,
                     key="robots_txt_status",
                     value=str(r.status_code),
                 )
@@ -126,7 +271,7 @@ class CrawlCollector:
                     Observation(
                         project=project.id,
                         collector=self.name,
-                        subject=project.web.host,
+                        subject=host,
                         key="robots_txt",
                         value=r.text[:8000],
                     )
@@ -136,7 +281,7 @@ class CrawlCollector:
                     Observation(
                         project=project.id,
                         collector=self.name,
-                        subject=project.web.host,
+                        subject=host,
                         key="sitemap_declared",
                         value="true" if declared else "false",
                     )
@@ -146,27 +291,68 @@ class CrawlCollector:
                 Observation(
                     project=project.id,
                     collector=self.name,
-                    subject=project.web.host,
+                    subject=host,
                     key="robots_txt_error",
                     value=str(exc),
                 )
             )
         return out
 
-    async def _probe(self, client: httpx.AsyncClient, project: Project) -> list[Observation]:
-        """Ask for URLs that should 404 and see what actually comes back."""
+    async def _sitemap(
+        self, client: httpx.AsyncClient, project: Project, site: str
+    ) -> list[Observation]:
+        """What the host's sitemap.xml actually answers, and how much it lists.
+
+        Separate from discovery, which treats a missing sitemap as "use the
+        homepage" and moves on — reasonable for finding pages and useless for
+        noticing that the file is gone. A robots.txt declaring a sitemap that
+        404s is one deploy away on any site and was the state of twenty-one of
+        them; the two facts have to be recorded side by side or nothing can
+        compare them.
+        """
+        host = urlparse(site).netloc
+
+        def ob(key: str, value: str | None) -> Observation:
+            return Observation(
+                project=project.id, collector=self.name, subject=host, key=key, value=value
+            )
+
+        try:
+            r = await client.get(f"{site}/sitemap.xml")
+        except httpx.HTTPError as exc:
+            return [ob("sitemap_error", str(exc))]
+
+        out = [ob("sitemap_status", str(r.status_code))]
+        if r.status_code == 200:
+            # Counted from the bytes rather than by parsing: a sitemap that is
+            # valid XML but empty and one that is malformed are different
+            # findings, and _sitemap_urls tells them apart.
+            out.append(ob("sitemap_urls", str(r.text.count("<loc>"))))
+        return out
+
+    async def _probe(
+        self, client: httpx.AsyncClient, project: Project, site: str
+    ) -> list[Observation]:
+        """Ask for URLs that should 404 and see what actually comes back.
+
+        Part of the deep pass rather than the shallow one. Unlike a canonical,
+        what a host does with an unmatched path is decided by the router every
+        host shares, so checking it on a rotating few finds a regression within
+        days without four extra requests per host per run.
+        """
+        host = urlparse(site).netloc
 
         def ob(key: str, value: str | None) -> Observation:
             return Observation(
                 project=project.id,
                 collector=self.name,
-                subject=project.web.host,
+                subject=host,
                 key=key,
                 value=value,
             )
 
         try:
-            home = await client.get(f"{project.web.url}/", follow_redirects=True)
+            home = await client.get(f"{site}/", follow_redirects=True)
             home_title = page_title(home.text[:HEAD_BYTES])
         except httpx.HTTPError:
             home_title = None
@@ -176,7 +362,7 @@ class CrawlCollector:
         shells = 0
         for path in PROBE_PATHS:
             try:
-                r = await client.get(f"{project.web.url}{path}", follow_redirects=True)
+                r = await client.get(f"{site}{path}", follow_redirects=True)
             except httpx.HTTPError:
                 continue
             if r.status_code == 200:

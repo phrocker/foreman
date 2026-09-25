@@ -362,6 +362,22 @@
   .pstate-spend { margin-left: auto; color: var(--text-3); font-variant-numeric: tabular-nums; }
   .pstate-row { display: flex; gap: 12px; align-items: baseline; padding: 3px 0; }
   .pstate-label { color: var(--text-3); min-width: 8.5em; font-size: 0.9em; }
+
+  /* Crawl coverage. A surface is plural, and the panel that reported it as one
+     host is the reason a portfolio went eleven weeks with no robots.txt. */
+  .cov-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+  .cov-host { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px;
+    border: 1px solid var(--border-firm); border-radius: 6px; background: var(--surface);
+    font: 11.5px ui-monospace, Menlo, monospace; color: var(--text-2); }
+  .cov-host.primary { border-color: var(--accent); }
+  /* Never crawled is the state worth seeing across a room. */
+  .cov-host.cold { border-style: dashed; color: var(--text-3); }
+  .cov-host.bad { border-color: var(--high); color: var(--high); }
+  .cov-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good); flex: none; }
+  .cov-host.cold .cov-dot { background: var(--text-3); }
+  .cov-host.bad  .cov-dot { background: var(--high); }
+  .cov-host.shallow .cov-dot { background: var(--low); }
+  .cov-flag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.85; }
   .act-head { font-size: 0.95em; color: var(--text-2); margin: 18px 0 8px; font-weight: 550; }
   .acts { display: flex; flex-direction: column; gap: 2px; }
   .act { display: flex; gap: 12px; align-items: baseline; padding: 5px 8px;
@@ -1750,8 +1766,12 @@ async function renderProjectState() {
   if (!panel) return;
   if (!state.project) { panel.hidden = true; return; }
 
-  const d = await fetchPart(`/api/project/${encodeURIComponent(state.project)}`, null);
+  const [d, coverage] = await Promise.all([
+    fetchPart(`/api/project/${encodeURIComponent(state.project)}`, null),
+    fetchPart(`/api/coverage?project=${encodeURIComponent(state.project)}`, []),
+  ]);
   if (!d) { panel.hidden = true; return; }
+  const cov = coverage[0] || null;
 
   const phases = (d.plans[0]?.phases || []).map((ph) => {
     const done = ph.passed && !ph.pending && !ph.blocked;
@@ -1789,7 +1809,51 @@ async function renderProjectState() {
         <span class="pstate-label">In flight</span>
         <span>${d.issues.length} open issue(s) · ${d.pulls.length} open pull request(s)</span>
       </div>
+      ${coverageRow(cov)}
     </div>`;
+}
+
+/** Which hosts of a web surface have been crawled, and how recently in full.
+ *
+ *  This row exists because its absence was the bug. ProCare Edge declared
+ *  twenty-two hosts, the crawler read one, and the dashboard said nothing —
+ *  a surface of twenty-two with thirteen observations looked exactly like a
+ *  healthy site. Now the hosts are on the page and a cold one is visible from
+ *  across the room.
+ */
+function coverageRow(cov) {
+  if (!cov || cov.declared < 2) return "";
+  const hosts = cov.hosts.map((h) => {
+    // A host that answered 404 for robots.txt or its sitemap is the finding;
+    // one nobody has ever crawled is the coverage gap; one crawled shallowly
+    // is fine and simply not current on every page.
+    const broken = h.robots === "404" || h.sitemap === "404" || (h.status && h.status !== "200");
+    const cls = !h.seen ? "cold" : broken ? "bad" : h.deep_crawl_at ? "" : "shallow";
+    const when = h.deep_crawl_at ? `full crawl ${h.deep_crawl_at.slice(0, 10)}` : "shallow only";
+    const detail = h.seen
+      ? `robots ${h.robots || "?"} · sitemap ${h.sitemap || "?"}${
+          h.sitemap_urls ? ` (${h.sitemap_urls} urls)` : ""} · ${when}`
+      : "never crawled";
+    // What is wrong, in words. Colour alone is not a reading of anything —
+    // and the dashed border already carries "never crawled", so a red chip
+    // has to say which file is missing rather than only that one is.
+    const flag = !h.seen ? ""
+      : h.robots === "404" ? "no robots"
+      : h.sitemap === "404" ? "no sitemap"
+      : h.status && h.status !== "200" ? h.status : "";
+    return `<span class="cov-host ${cls}${h.primary ? " primary" : ""}" title="${esc(detail)}">
+      <span class="cov-dot"></span>${esc(h.host)}${
+        flag ? `<span class="cov-flag">${esc(flag)}</span>` : ""}</span>`;
+  }).join("");
+  const cold = cov.declared - cov.seen;
+  return `<div class="pstate-row">
+      <span class="pstate-label">Crawl coverage</span>
+      <span>${cov.seen} of ${cov.declared} hosts crawled${
+        cold ? ` · <span class="sev-high">${cold} never</span>` : ""} · ${cov.deep} read in full
+        (${cov.deep_sample} secondary per sweep)</span>
+    </div>
+    <div class="pstate-row"><span class="pstate-label"></span>
+      <span class="cov-grid">${hosts}</span></div>`;
 }
 
 // --- working: signals rather than faults ------------------------------------

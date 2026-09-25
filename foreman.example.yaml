@@ -25,6 +25,20 @@ projects:
       kind: spa          # spa | wordpress | static | other
       max_urls: 500
       render_sample: 5
+      # A surface is plural. `also` lists further hosts the same project
+      # answers on — a portfolio of domains behind one deploy, or a marketing
+      # site beside an app. Every one of them is crawled: robots.txt, sitemap
+      # and its own home page each sweep, because those are facts about a
+      # hostname and no template decides them.
+      #
+      # also:
+      #   - https://app.myfinanceadvisor.com
+      #
+      # How many of those `also` hosts also get a full page crawl per sweep,
+      # least-recently-crawled first. Raise it when the sites are small and
+      # you would rather know everything every night; leave it low when a full
+      # crawl is hundreds of pages.
+      deep_sample: 2
 
   - id: example-client
     name: Example Client

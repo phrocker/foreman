@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -1511,6 +1512,80 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # an agent dispatched at this project is reading them.
             "known": len([line for line in known.splitlines() if line.startswith("- ")]),
         }
+
+    @app.get("/api/coverage")
+    def coverage(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        """Which hosts of a web surface have actually been looked at.
+
+        This exists because the failure it reports was invisible. ProCare Edge
+        declared twenty-two hosts and the crawler read one of them, and nothing
+        on the dashboard was wrong: no panel said "one of twenty-two", so no
+        panel could say the coverage was. A surface of twenty-two hosts and
+        thirteen observations looked exactly like a healthy site.
+
+        Coverage is a fact about a project, so it is read from the cells the
+        collectors leave rather than recomputed by asking the network again.
+        """
+        registry = load_registry(registry_path)
+        targets = [registry.get(project)] if project else registry.active
+        s = store()
+        out: list[dict[str, Any]] = []
+        try:
+            for target in targets:
+                if target.web is None:
+                    continue
+                # Crawl cells only. Every host already carries `tls` facts —
+                # that collector has read all of them for months — so counting
+                # any cell as coverage would report twenty-two of twenty-two
+                # crawled while the crawler had visited one. That is the exact
+                # blindness this panel exists to end, and it would have been
+                # reintroduced one layer up.
+                facts: dict[str, dict[str, str | None]] = {}
+                for row in s.latest_observations(target.id):
+                    if row["collector"] != "crawl":
+                        continue
+                    facts.setdefault(row["subject"], {})[row["key"]] = row["value"]
+
+                hosts: list[dict[str, Any]] = []
+                for url in target.web.urls:
+                    host = urlparse(url).netloc
+                    cells = facts.get(host, {})
+                    # The home page's own metadata is filed under the URL, not
+                    # the host: a canonical belongs to a page.
+                    home = facts.get(url + "/", {})
+                    hosts.append(
+                        {
+                            "host": host,
+                            "url": url,
+                            "primary": url == target.web.url,
+                            "robots": cells.get("robots_txt_status"),
+                            "sitemap": cells.get("sitemap_status"),
+                            "sitemap_urls": cells.get("sitemap_urls"),
+                            "urls_discovered": cells.get("urls_discovered"),
+                            "deep_crawl_at": cells.get("deep_crawl_at"),
+                            "status": home.get("status"),
+                            "title": home.get("title"),
+                            "canonical": home.get("canonical"),
+                            # A host with no cells at all has never been
+                            # crawled, which is the state this panel is for.
+                            "seen": bool(cells),
+                        }
+                    )
+                out.append(
+                    {
+                        "project": target.id,
+                        "name": target.label,
+                        "primary": target.web.host,
+                        "declared": len(hosts),
+                        "seen": sum(1 for h in hosts if h["seen"]),
+                        "deep": sum(1 for h in hosts if h["deep_crawl_at"]),
+                        "deep_sample": target.web.deep_sample,
+                        "hosts": hosts,
+                    }
+                )
+        finally:
+            s.close()
+        return out
 
     @app.get("/api/issues")
     def issues(project: str | None = Query(None)) -> list[dict[str, Any]]:

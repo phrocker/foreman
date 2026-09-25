@@ -1,0 +1,378 @@
+"""The crawl collector reads every host, not the primary alone.
+
+The gap this file closes was live for eleven weeks. ProCare Edge serves
+twenty-one county domains, and the crawl collector read `web.url` — which is
+procareedge.com, the operator console, and not one of the twenty-one. Every
+county site answered 404 for robots.txt and sitemap.xml and carried no
+canonical, and the store held thirteen crawl observations, all against the one
+host where nothing was wrong.
+
+Real HTTP servers on random ports rather than mocked transports: what is under
+test is which hosts get asked and what is recorded about each, and a mock would
+have answered whatever the collector asked for.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from foreman.collectors.crawl import CrawlCollector
+from foreman.config import Project
+
+ROBOTS = "User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n"
+
+PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>{title}</title>
+<meta name="description" content="{title} — description.">
+<link rel="canonical" href="{base}{path}">
+</head><body><h1>{title}</h1><p>Words enough to measure.</p></body></html>
+"""
+
+
+def page(title: str, path: str = "/") -> str:
+    return PAGE.replace("{title}", title).replace("{path}", path)
+
+
+def sitemap(paths: list[str]) -> str:
+    locs = "".join(f"<url><loc>{{base}}{p}</loc></url>" for p in paths)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{locs}</urlset>'
+    )
+
+
+def handler_for(routes: dict[str, str]):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path not in routes:
+                self.send_error(404)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = routes[path].replace("{base}", base).encode()
+            kind = "application/xml" if path.endswith(".xml") else "text/html"
+            if path.endswith(".txt"):
+                kind = "text/plain"
+            self.send_response(200)
+            self.send_header("Content-Type", f"{kind}; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return Handler
+
+
+@pytest.fixture
+def serve():
+    """Start a throwaway site; returns its base URL, with no trailing slash."""
+    servers = []
+
+    def start(routes: dict[str, str]) -> str:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(routes))
+        servers.append(server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return f"http://127.0.0.1:{server.server_port}"
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def county(title: str) -> dict[str, str]:
+    """A site shaped like one of the county domains: a home page, two service
+    pages, robots.txt and a sitemap listing all three."""
+    return {
+        "/robots.txt": ROBOTS,
+        "/sitemap.xml": sitemap(["/", "/repair", "/installation"]),
+        "/": page(title),
+        "/repair": page(f"{title} — Repair", "/repair"),
+        "/installation": page(f"{title} — Installation", "/installation"),
+    }
+
+
+def by_host(observations):
+    """subject -> {key: value}, the shape the rules see."""
+    out: dict[str, dict[str, str | None]] = {}
+    for o in observations:
+        out.setdefault(o.subject, {})[o.key] = o.value
+    return out
+
+
+def host_of(url: str) -> str:
+    return url.removeprefix("http://")
+
+
+def test_every_declared_host_is_crawled(serve):
+    """The whole of the gap, in one assertion.
+
+    Before this, a surface of three hosts produced observations about one.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    a = serve(county("Howard County HVAC"))
+    b = serve(county("Loudoun County Plumbing"))
+    project = Project(id="portfolio", web={"url": primary, "also": [a, b], "deep_sample": 1})
+
+    seen = by_host(asyncio.run(CrawlCollector().collect(project)))
+
+    for site in (primary, a, b):
+        assert host_of(site) in seen, f"{site} was never asked for anything"
+        assert "robots_txt_status" in seen[host_of(site)]
+        assert "sitemap_status" in seen[host_of(site)]
+
+    coverage = seen[host_of(primary)]
+    assert coverage["hosts_declared"] == "3"
+    assert coverage["hosts_crawled"] == "3"
+
+
+def test_a_host_missing_robots_and_sitemap_is_recorded_as_such(serve):
+    """The defect that was invisible for eleven weeks.
+
+    One host of three has neither file. The other two are fine, which is
+    exactly the state a primary-only crawl reported as healthy.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    ok = serve(county("Howard County HVAC"))
+    broken = serve({"/": page("Loudoun County Plumbing")})
+    project = Project(id="portfolio", web={"url": primary, "also": [ok, broken]})
+
+    seen = by_host(asyncio.run(CrawlCollector().collect(project)))
+
+    assert seen[host_of(broken)]["robots_txt_status"] == "404"
+    assert seen[host_of(broken)]["sitemap_status"] == "404"
+    assert seen[host_of(ok)]["robots_txt_status"] == "200"
+    assert seen[host_of(ok)]["sitemap_status"] == "200"
+
+
+def test_a_shallow_host_still_reports_its_own_canonical(serve):
+    """The cheap pass has to carry the per-host facts, or it is a ping.
+
+    A canonical is the one metadata field that cannot be inferred from the
+    template: every host's is different, and a wrong one points a whole site at
+    somebody else's page.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    shallow = serve(county("Howard County HVAC"))
+    project = Project(id="portfolio", web={"url": primary, "also": [shallow], "deep_sample": 0})
+
+    obs = asyncio.run(CrawlCollector().collect(project))
+    home = {o.key: o.value for o in obs if o.subject == f"{shallow}/"}
+
+    assert home["canonical"] == f"{shallow}/"
+    assert home["title"] == "Howard County HVAC"
+    assert home["status"] == "200"
+    # Shallow means shallow: the service pages this host's sitemap lists are
+    # somebody else's turn.
+    assert not [o for o in obs if o.subject == f"{shallow}/repair"]
+
+
+def test_the_deep_crawl_rotates_to_the_hosts_it_has_not_visited(serve):
+    """Least-recently-crawled, read from the timestamp the last run left.
+
+    A cursor would have to stay right about a list that changes. A host with no
+    timestamp sorts first without anybody arranging it, which is also the
+    correct answer for a host added yesterday and for one that errored out of
+    its turn.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    hosts = [serve(county(f"County {i}")) for i in range(4)]
+    project = Project(id="portfolio", web={"url": primary, "also": hosts, "deep_sample": 2})
+
+    first = asyncio.run(CrawlCollector().collect(project))
+    deep_first = set(by_host(first)[host_of(primary)]["deep_crawled"].split(","))
+    # The primary is always deep, plus two of the four.
+    assert host_of(primary) in deep_first
+    assert len(deep_first) == 3
+
+    # Feed back what the first run learned, which is what the runner does.
+    second = asyncio.run(CrawlCollector().collect(project, prior=by_host(first)))
+    deep_second = set(by_host(second)[host_of(primary)]["deep_crawled"].split(","))
+
+    assert len(deep_second) == 3
+    secondaries = {host_of(h) for h in hosts}
+    assert (deep_first & secondaries).isdisjoint(deep_second & secondaries), (
+        "the second run crawled the same hosts again; four hosts at two a run "
+        "should cover all four in two runs"
+    )
+    # Two runs, every host covered deeply.
+    assert (deep_first | deep_second) >= secondaries
+
+
+def test_a_deep_host_reports_every_page_its_own_sitemap_lists(serve):
+    """Per-host discovery, not the primary's page list applied to everybody.
+
+    Each county site lists its own service pages. Discovering against the
+    primary and recording the results under another host's name would file one
+    site's pages as another's.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    deep = serve(county("Howard County HVAC"))
+    project = Project(id="portfolio", web={"url": primary, "also": [deep], "deep_sample": 1})
+
+    obs = asyncio.run(CrawlCollector().collect(project))
+    subjects = {o.subject for o in obs}
+
+    assert f"{deep}/repair" in subjects
+    assert f"{deep}/installation" in subjects
+    assert by_host(obs)[host_of(deep)]["urls_discovered"] == "3"
+    # And the primary's single page was not attributed to it.
+    assert f"{primary}/repair" not in subjects
+
+
+def test_a_surface_with_one_host_is_crawled_exactly_as_before(serve):
+    """The common case must not have grown a portfolio to think about."""
+    base = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/", "/about"]),
+            "/": page("Solo"),
+            "/about": page("About", "/about"),
+        }
+    )
+    project = Project(id="solo", web={"url": base})
+
+    seen = by_host(asyncio.run(CrawlCollector().collect(project)))
+
+    host = seen[host_of(base)]
+    assert host["urls_discovered"] == "2"
+    assert host["robots_txt_status"] == "200"
+    assert host["sitemap_declared"] == "true"
+    assert host["probe_paths_tried"] == "3"
+    assert host["hosts_declared"] == "1"
+    assert "deep_crawl_at" in host
+
+
+def test_a_sitemap_declared_and_missing_is_two_facts_side_by_side(serve):
+    """robots.txt says there is a sitemap; the sitemap 404s. One deploy away on
+    any site, and the state twenty-one of them were in."""
+    base = serve({"/robots.txt": ROBOTS, "/": page("Solo")})
+    project = Project(id="solo", web={"url": base})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["sitemap_declared"] == "true"
+    assert host["sitemap_status"] == "404"
+
+
+# --- what the dashboard reads -------------------------------------------------
+
+
+def coverage_app(tmp_path, hosts: list[str], observations: list[tuple[str, str, str]]):
+    """A one-project registry with a multi-host surface, and a store holding
+    exactly the crawl cells given."""
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from foreman.models import Observation
+    from foreman.store import SqliteStore
+    from foreman.web import create_app
+
+    registry_path = tmp_path / "foreman.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(
+            {
+                "store": "sqlite",
+                "projects": [
+                    {
+                        "id": "portfolio",
+                        "name": "Portfolio",
+                        "web": {"url": hosts[0], "also": hosts[1:], "deep_sample": 2},
+                    }
+                ],
+            }
+        )
+    )
+    db_path = tmp_path / "t.db"
+    with SqliteStore(db_path) as s:
+        run = s.start_run("portfolio", "crawl")
+        s.record(
+            run,
+            [
+                Observation(project="portfolio", collector="crawl", subject=sub, key=k, value=v)
+                for sub, k, v in observations
+            ],
+        )
+        s.finish_run(run, ok=True)
+    return TestClient(create_app(registry_path, db_path))
+
+
+def test_the_dashboard_can_see_a_host_nobody_has_crawled(tmp_path):
+    """The panel that did not exist, which is why the gap did not either.
+
+    Two hosts of three have cells; the third has none. That is the ProCare Edge
+    state in miniature, and the API has to name it rather than average it away.
+    """
+    client = coverage_app(
+        tmp_path,
+        ["https://primary.test", "https://a.test", "https://cold.test"],
+        [
+            ("primary.test", "robots_txt_status", "200"),
+            ("primary.test", "sitemap_status", "200"),
+            ("primary.test", "deep_crawl_at", "2026-09-25T10:00:00+00:00"),
+            ("a.test", "robots_txt_status", "404"),
+            ("a.test", "sitemap_status", "404"),
+            ("https://a.test/", "status", "200"),
+            ("https://a.test/", "canonical", "https://a.test/"),
+        ],
+    )
+
+    body = client.get("/api/coverage?project=portfolio").json()
+    assert len(body) == 1
+    cov = body[0]
+    assert cov["declared"] == 3
+    assert cov["seen"] == 2
+    assert cov["deep"] == 1
+
+    hosts = {h["host"]: h for h in cov["hosts"]}
+    assert hosts["primary.test"]["primary"] is True
+    assert hosts["cold.test"]["seen"] is False, "a host with no cells must read as never crawled"
+    assert hosts["cold.test"]["robots"] is None
+    # The 404s are on the host cells; the canonical is on the page's own.
+    assert hosts["a.test"]["robots"] == "404"
+    assert hosts["a.test"]["canonical"] == "https://a.test/"
+
+
+def test_a_project_with_no_web_surface_is_simply_absent(tmp_path):
+    """Not an entry with zeroes in it: a project with nothing to crawl has no
+    coverage to report, and a row saying "0 of 0" invites a fix for it."""
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from foreman.web import create_app
+
+    registry_path = tmp_path / "foreman.yaml"
+    registry_path.write_text(
+        yaml.safe_dump({"store": "sqlite", "projects": [{"id": "codeonly", "name": "Code Only"}]})
+    )
+    client = TestClient(create_app(registry_path, tmp_path / "t.db"))
+
+    assert client.get("/api/coverage").json() == []
+
+
+def test_the_shipped_portfolio_deep_crawls_every_county_domain() -> None:
+    """21 sites of three pages is about a hundred requests. Rotating that would
+    be choosing to know less for no saving worth naming."""
+    import pathlib
+
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    doc = yaml.safe_load((root / "foreman.yaml").read_text())
+    web = next(p for p in doc["projects"] if p["id"] == "procareedge")["web"]
+
+    from foreman.config import WebSurface
+
+    surface = WebSurface(**web)
+    assert surface.deep_sample >= len(surface.also), (
+        "a county domain outside the deep sample is a county domain whose "
+        "canonical and service pages nothing reads"
+    )
