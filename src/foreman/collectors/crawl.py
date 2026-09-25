@@ -367,7 +367,13 @@ class CrawlCollector:
             # one unreadable child, or a list cut off at max_urls, leaves pages
             # nobody has looked at, and fetching the rest successfully says
             # nothing about those.
-            if found.from_sitemap and found.complete and read and not failed:
+            #
+            # sitemap_read rather than from_sitemap, because a sitemap that
+            # parses and lists nothing is a sitemap read successfully. Asking
+            # whether the URLs came from one meant such a host could never earn
+            # the stamp, and so read degraded on every sweep for ever despite
+            # complete discovery and no failures at all.
+            if found.sitemap_read and found.complete and read and not failed:
                 obs.append(ob("deep_crawl_at", datetime.now(UTC).isoformat(timespec="seconds")))
         return obs
 

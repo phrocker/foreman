@@ -1115,3 +1115,51 @@ def test_discovery_is_not_complete_when_robots_could_not_be_read(serve):
     assert host["sitemap_status"] == "200"
     assert host["discovery_complete"] == "false"
     assert "deep_crawl_at" not in host
+
+
+def test_an_empty_sitemap_read_whole_still_counts_as_a_full_crawl(serve):
+    """A sitemap that parses and lists nothing has been read successfully.
+
+    Asking whether the URLs came from a sitemap meant such a host could never
+    earn the stamp, and so read degraded on every sweep for ever despite
+    complete discovery and not one failed page.
+    """
+    empty = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>'
+    )
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": empty, "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["discovery_complete"] == "true"
+    assert host["deep_pages_failed"] == "0"
+    assert "deep_crawl_at" in host
+
+
+def test_a_vanished_declared_sitemap_is_not_read_as_having_none(tmp_path):
+    """`sitemap_status` describes the first declared location only.
+
+    Where robots names two and the first has gone, a 404 there is a confirmed
+    gap rather than a host without a sitemap — and treating it as the latter
+    hid the gap behind "no sitemap" and dropped it from the degraded count.
+    """
+    client = coverage_app(
+        tmp_path,
+        ["https://primary.test", "https://gap.test"],
+        [
+            ("primary.test", "robots_txt_status", "200"),
+            ("primary.test", "sitemap_status", "200"),
+            ("primary.test", "discovery_complete", "true"),
+            ("primary.test", "deep_crawl_at", "2026-09-25T02:00:00+00:00"),
+            ("primary.test", "deep_attempt_at", "2026-09-25T02:00:00+00:00"),
+            # robots declares two; the first is gone, so discovery is short.
+            ("gap.test", "robots_txt_status", "200"),
+            ("gap.test", "sitemap_status", "404"),
+            ("gap.test", "discovery_complete", "false"),
+            ("gap.test", "deep_attempt_at", "2026-09-25T02:00:00+00:00"),
+        ],
+    )
+
+    assert client.get("/api/coverage").json()[0]["degraded"] == 1

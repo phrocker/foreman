@@ -145,6 +145,19 @@ MAX_CONCURRENT = 4
 STALENESS_WORKERS = 8
 
 
+def _has_no_sitemap(host: dict[str, Any]) -> bool:
+    """Whether this host simply has no sitemap, as opposed to one that is
+    missing.
+
+    `sitemap_status` describes the first declared location only. A 404 there
+    means "no sitemap" when discovery agrees it found everything — a guess at
+    the conventional path that missed — and means "a declared sitemap has
+    vanished" when it does not, because a declared location that is absent is
+    counted as a gap.
+    """
+    return host.get("sitemap") in ("404", "410") and host.get("discovery_complete") != "false"
+
+
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
     db = db_path
@@ -1605,13 +1618,18 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         "degraded": sum(
                             1
                             for h in hosts
-                            # A host with no sitemap can never earn a
-                            # full-crawl stamp — that stamp means "everything a
-                            # sitemap listed answered" — so counting it
-                            # degraded would leave it flagged for ever for a
-                            # state its chip already names. It reads "no
-                            # sitemap", which is the more useful thing to say.
-                            if h["sitemap"] not in ("404", "410")
+                            # A host with no sitemap at all can never earn a
+                            # full-crawl stamp — that stamp means "a sitemap
+                            # was read and everything it listed answered" — so
+                            # counting it degraded would flag it for ever for a
+                            # state its chip already names.
+                            #
+                            # With discovery_complete, because sitemap_status
+                            # describes only the first declared location: where
+                            # robots names two and the first has vanished, a
+                            # 404 there is a confirmed gap rather than a host
+                            # without a sitemap, and discovery says so.
+                            if not _has_no_sitemap(h)
                             and (
                                 h["discovery_complete"] == "false"
                                 or (

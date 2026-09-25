@@ -1848,7 +1848,11 @@ function coverageRow(cov) {
     // succeeded and did not finish. Either way the green is out of date.
     // A host with no sitemap can never earn a full-crawl stamp, so it would
     // read "partial" for ever for a state its own chip already names.
-    const noSitemap = h.sitemap === "404" || h.sitemap === "410";
+    // No sitemap at all, as opposed to a declared one that has vanished:
+    // h.sitemap describes the first declared location only, and discovery is
+    // what knows whether anything else was named.
+    const noSitemap = (h.sitemap === "404" || h.sitemap === "410")
+      && h.discovery_complete !== "false";
     const stale = !noSitemap
       && (h.discovery_complete === "false"
         || (h.deep_attempt_at && h.deep_attempt_at > (h.deep_crawl_at || "")));
@@ -1867,7 +1871,7 @@ function coverageRow(cov) {
       : h.error ? "unreachable"
       : h.robots === "404" || h.robots === "410" ? "no robots"
       : h.robots && h.robots !== "200" ? `robots ${h.robots}`
-      : h.sitemap === "404" || h.sitemap === "410" ? "no sitemap"
+      : noSitemap ? "no sitemap"
       : h.discovery_complete === "false" ? "sitemap gap"
       : stale ? "partial"
       : h.sitemap === "404" ? "no sitemap"
