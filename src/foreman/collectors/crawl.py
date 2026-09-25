@@ -387,9 +387,50 @@ class CrawlCollector:
             # whether the URLs came from one meant such a host could never earn
             # the stamp, and so read degraded on every sweep for ever despite
             # complete discovery and no failures at all.
+            # Pages the sitemap used to list and no longer does.
+            #
+            # Provenance is refreshed only for pages this sweep visited, and a
+            # page dropped from the sitemap is by definition not one of them —
+            # so its `discovered_via=sitemap` survived for ever and the sitemap
+            # rules went on reporting it, which means removing the offending
+            # entry did not clear the finding it caused. Only from a complete
+            # read: a discovery that was cut short is not evidence that
+            # anything was dropped.
+            if found.sitemap_read and found.complete:
+                obs.extend(self._unlisted(project, host, prior, set(found.urls)))
+
             if found.sitemap_read and found.complete and read and not failed:
                 obs.append(ob("deep_crawl_at", datetime.now(UTC).isoformat(timespec="seconds")))
         return obs
+
+    def _unlisted(
+        self, project: Project, host: str, prior: Facts, listed: set[str]
+    ) -> list[Observation]:
+        """Correct pages this host's sitemap no longer lists.
+
+        Not a retraction of the page's other cells: `crawl` samples rather than
+        enumerates, so a page missing from one sweep is not proof it is gone,
+        and taking its facts off the board would put them back tomorrow. What
+        is known to be false is the narrow claim that a sitemap lists it.
+        """
+        out: list[Observation] = []
+        for url, cells in prior.items():
+            if cells.get("discovered_via") != "sitemap" or url in listed:
+                continue
+            if not url.startswith(("http://", "https://")):
+                continue  # a host subject, not a page
+            if urlparse(url).netloc != host:
+                continue
+            out.append(
+                Observation(
+                    project=project.id,
+                    collector=self.name,
+                    subject=url,
+                    key="discovered_via",
+                    value="unlisted",
+                )
+            )
+        return out
 
     async def _robots(
         self, client: httpx.AsyncClient, project: Project, site: str

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 import pytest
 
@@ -1216,4 +1217,77 @@ def test_a_page_already_on_the_board_keeps_its_provenance_through_a_bad_night(se
     assert "discovered_via" not in home, (
         "one unreadable sitemap rewrote the provenance of a page that had none, "
         "which takes its standing findings off the board"
+    )
+
+
+def test_a_page_dropped_from_the_sitemap_stops_being_called_sitemapped(serve):
+    """Removing the offending entry has to clear the finding it caused.
+
+    Provenance is refreshed only for pages a sweep visited, and a page dropped
+    from the sitemap is by definition not one of them — so its
+    `discovered_via=sitemap` survived for ever and the sitemap rules went on
+    reporting a page the sitemap no longer mentions.
+    """
+    base = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/"]),  # /old is no longer listed
+            "/": page("Home"),
+            "/old": page("Old", "/old"),
+        }
+    )
+    project = Project(id="solo", web={"url": base})
+    # What the last sweep recorded, when the sitemap still listed it.
+    prior = {
+        f"{base}/old": {"discovered_via": "sitemap", "status": "200", "meta_robots": "noindex"},
+        urlparse(base).netloc: {"robots_txt_status": "200"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    old = {o.key: o.value for o in obs if o.subject == f"{base}/old"}
+
+    assert old.get("discovered_via") == "unlisted"
+
+
+def test_an_incomplete_sweep_does_not_declare_pages_unlisted(serve):
+    """A discovery that was cut short is not evidence that anything was
+    dropped — and rewriting provenance on that basis would take real findings
+    off the board on a bad night."""
+
+    class Down(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/sitemap.xml":
+                self.send_error(503)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = (
+                (ROBOTS if path == "/robots.txt" else page("Home")).replace("{base}", base).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Down)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        prior = {
+            f"{base}/old": {"discovered_via": "sitemap", "status": "200"},
+            urlparse(base).netloc: {"robots_txt_status": "200"},
+        }
+        obs = asyncio.run(
+            CrawlCollector().collect(Project(id="solo", web={"url": base}), prior=prior)
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert not [o for o in obs if o.subject == f"{base}/old"], (
+        "an unreadable sitemap was treated as proof that a page had been dropped from it"
     )
