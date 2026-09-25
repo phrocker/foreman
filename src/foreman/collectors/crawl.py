@@ -79,6 +79,23 @@ def _canonical(head: str, base: str) -> str | None:
     return urljoin(base, href.group(1)) if href else None
 
 
+def _declared_sitemaps(obs: list[Observation]) -> list[str]:
+    """Sitemap locations named by the robots.txt just read.
+
+    Taken from the observation rather than fetched again: _robots has the file
+    and a third request for it per host is three hundred requests a sweep on a
+    portfolio this size, for a byte-identical answer.
+    """
+    for o in obs:
+        if o.key == "robots_txt" and o.value:
+            return [
+                line.split(":", 1)[1].strip()
+                for line in o.value.splitlines()
+                if line.lower().startswith("sitemap:") and ":" in line
+            ]
+    return []
+
+
 class CrawlCollector:
     name = "crawl"
     surface = "web"
@@ -206,40 +223,51 @@ class CrawlCollector:
         """One host: shallow always, deep when it is this host's turn."""
         assert project.web is not None
         host = urlparse(site).netloc
+        home = f"{site}/"
+
+        def ob(key: str, value: str | None) -> Observation:
+            return Observation(
+                project=project.id, collector=self.name, subject=host, key=key, value=value
+            )
 
         obs = await self._robots(client, project, site)
-        obs.extend(await self._sitemap(client, project, site))
+        obs.extend(await self._sitemap(client, project, site, _declared_sitemaps(obs)))
 
-        if not deep:
-            # The home page's own head. A canonical, a title and a robots meta
-            # are per-host facts, and this is the cheapest place they exist.
-            obs.extend(await self._page(client, project, f"{site}/", sem))
-            return obs
+        urls: list[str] = []
+        if deep:
+            obs.extend(await self._probe(client, project, site))
+            urls = await discover_urls(client, project, site)
+            obs.append(ob("urls_discovered", str(len(urls))))
 
-        obs.extend(await self._probe(client, project, site))
-        urls = await discover_urls(client, project, site)
-        obs.append(
-            Observation(
-                project=project.id,
-                collector=self.name,
-                subject=host,
-                key="urls_discovered",
-                value=str(len(urls)),
-            )
-        )
-        pages = await asyncio.gather(*(self._page(client, project, url, sem) for url in urls))
-        for page in pages:
+        # The home page on every host, every run, whether or not a sitemap
+        # mentions it.
+        #
+        # It was the shallow pass's job alone, and a sitemap is not obliged to
+        # list the page it belongs to: a deep host whose sitemap omits "/"
+        # recorded no status and no canonical for it at all, and the primary is
+        # always deep, so the one host that was never shallow was the one that
+        # could lose its homepage facts permanently. Found by the reviewer, not
+        # by me.
+        pages = [self._page(client, project, url, sem, via="sitemap") for url in urls]
+        if home not in urls:
+            pages.append(self._page(client, project, home, sem, via="home"))
+
+        answered = False
+        for page in await asyncio.gather(*pages):
             obs.extend(page)
-        obs.append(
-            Observation(
-                project=project.id,
-                collector=self.name,
-                subject=host,
-                key="deep_crawl_at",
-                # Read back by _deep_targets next run to pick the next few.
-                value=datetime.now(UTC).isoformat(timespec="seconds"),
-            )
-        )
+            # A page that answered at all, as opposed to one that raised.
+            answered = answered or any(o.key == "status" for o in page)
+
+        # A deep crawl that reached nothing is not a deep crawl.
+        #
+        # This stamp is what the rotation reads and what the coverage panel
+        # calls "read in full", and writing it unconditionally meant an
+        # unreachable host was recorded as covered and then deprioritised —
+        # false assurance about coverage, which is the exact failure this
+        # collector was changed to end. A host that answered nothing keeps its
+        # old timestamp, so it stays at the front of the queue.
+        if deep and answered:
+            obs.append(ob("deep_crawl_at", datetime.now(UTC).isoformat(timespec="seconds")))
         return obs
 
     async def _robots(
@@ -299,9 +327,13 @@ class CrawlCollector:
         return out
 
     async def _sitemap(
-        self, client: httpx.AsyncClient, project: Project, site: str
+        self,
+        client: httpx.AsyncClient,
+        project: Project,
+        site: str,
+        declared: list[str],
     ) -> list[Observation]:
-        """What the host's sitemap.xml actually answers, and how much it lists.
+        """What the host's sitemap actually answers, and how much it lists.
 
         Separate from discovery, which treats a missing sitemap as "use the
         homepage" and moves on — reasonable for finding pages and useless for
@@ -309,8 +341,15 @@ class CrawlCollector:
         404s is one deploy away on any site and was the state of twenty-one of
         them; the two facts have to be recorded side by side or nothing can
         compare them.
+
+        `declared` is where robots.txt says the sitemap is. Measuring
+        /sitemap.xml regardless would report "no sitemap" for every WordPress
+        site on the planet — they announce /sitemap_index.xml and mean it — and
+        would disagree with the discovery step, which follows the declaration.
+        Conventional path only when nothing declares one.
         """
         host = urlparse(site).netloc
+        where = declared[0] if declared else f"{site}/sitemap.xml"
 
         def ob(key: str, value: str | None) -> Observation:
             return Observation(
@@ -318,11 +357,11 @@ class CrawlCollector:
             )
 
         try:
-            r = await client.get(f"{site}/sitemap.xml")
+            r = await client.get(where)
         except httpx.HTTPError as exc:
-            return [ob("sitemap_error", str(exc))]
+            return [ob("sitemap_url", where), ob("sitemap_error", str(exc))]
 
-        out = [ob("sitemap_status", str(r.status_code))]
+        out = [ob("sitemap_url", where), ob("sitemap_status", str(r.status_code))]
         if r.status_code == 200:
             # Counted from the bytes rather than by parsing: a sitemap that is
             # valid XML but empty and one that is malformed are different
@@ -380,8 +419,22 @@ class CrawlCollector:
         return out
 
     async def _page(
-        self, client: httpx.AsyncClient, project: Project, url: str, sem: asyncio.Semaphore
+        self,
+        client: httpx.AsyncClient,
+        project: Project,
+        url: str,
+        sem: asyncio.Semaphore,
+        via: str = "sitemap",
     ) -> list[Observation]:
+        """One page. `via` says how it was found, and the rules need to know.
+
+        Everything here used to arrive from a sitemap, so rules could say "this
+        sitemap URL redirects" about anything they were handed. Now the home
+        page of every host is read whether or not a sitemap mentions it, and a
+        secondary that redirects, or an app homepage that is deliberately
+        noindex, would be reported as a sitemap listing a page it never listed.
+        """
+
         def ob(key: str, value: str | None) -> Observation:
             return Observation(
                 project=project.id, collector=self.name, subject=url, key=key, value=value
@@ -391,9 +444,9 @@ class CrawlCollector:
             try:
                 r = await client.get(url)
             except httpx.HTTPError as exc:
-                return [ob("fetch_error", str(exc))]
+                return [ob("discovered_via", via), ob("fetch_error", str(exc))]
 
-            out = [ob("status", str(r.status_code))]
+            out = [ob("discovered_via", via), ob("status", str(r.status_code))]
             # Redirects are not followed on purpose: a sitemap URL that answers
             # 301 is itself the finding, and following it would hide that.
             if 300 <= r.status_code < 400:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -125,6 +126,24 @@ class AnchorAssetDisallow:
         return Patch(edits=(FileEdit(path=params["file"], before=text, after="".join(out)),))
 
 
+def _subjects(finding: dict) -> list[str]:
+    """The hostnames a finding is about.
+
+    Store rows carry the list as JSON and a freshly evaluated Finding carries
+    it as a list, the same split `bump` handles. Iterating the string form
+    character by character would compare "h" to a hostname, find a difference,
+    and quietly refuse every proposal — a check that reads as a safety rail
+    while disabling the action.
+    """
+    raw = finding.get("subjects") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    return [str(x) for x in raw]
+
+
 class AddSitemapReference:
     """Declare the sitemap in robots.txt.
 
@@ -147,6 +166,17 @@ class AddSitemapReference:
         if finding.get("rule") not in self.answers or not project.fixable:
             return []
         if project.web is None:
+            return []
+        # The primary host only.
+        #
+        # `crawl` reads every host of a surface now, so this finding can be
+        # about any of twenty-two hostnames — while the fix below edits the one
+        # robots.txt in the local checkout and writes the primary's sitemap URL
+        # into it. Offered for a secondary, it would propose pointing one
+        # site's robots.txt at another site's sitemap. A surface whose hosts
+        # are served by one repository needs a change this action cannot
+        # express, so it declines rather than guesses.
+        if any(sub != project.web.host for sub in _subjects(finding)):
             return []
         assert project.repo is not None
         path = _locate(project.repo)

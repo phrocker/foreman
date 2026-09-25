@@ -1566,6 +1566,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                             "status": home.get("status"),
                             "title": home.get("title"),
                             "canonical": home.get("canonical"),
+                            # Why a host has no facts, when it has none. A row
+                            # that omits the error reads as a quiet host rather
+                            # than an unreachable one, which is the same false
+                            # assurance in a smaller place.
+                            "error": cells.get("robots_txt_error")
+                            or cells.get("sitemap_error")
+                            or home.get("fetch_error"),
                             # A host with no cells at all has never been
                             # crawled, which is the state this panel is for.
                             "seen": bool(cells),

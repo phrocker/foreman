@@ -164,3 +164,34 @@ def test_a_manifest_git_ignores_is_not_a_place_dependabot_can_look(tmp_path):
     subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, check=True)
 
     assert _detect(repo) == [("npm", "/")]
+
+
+def test_the_sitemap_action_declines_a_finding_about_a_secondary_host(tmp_path):
+    """`crawl` reads every host of a surface now, so this finding can be about
+    any of twenty-two hostnames — while the fix edits the one robots.txt in the
+    local checkout and writes the primary's sitemap URL into it. Offered for a
+    secondary, it would point one site's robots.txt at another site's sitemap.
+    """
+    from foreman.actions.robots import AddSitemapReference
+    from foreman.config import Project
+
+    repo = tmp_path / "repo"
+    (repo / "public").mkdir(parents=True)
+    (repo / "public" / "robots.txt").write_text("User-agent: *\nAllow: /\n")
+    project = Project(
+        id="portfolio",
+        repo=repo,
+        web={"url": "https://primary.test", "also": ["https://county.test"]},
+    )
+
+    action = AddSitemapReference()
+    primary = {"rule": "robots_missing_sitemap", "subjects": ["primary.test"]}
+    secondary = {"rule": "robots_missing_sitemap", "subjects": ["county.test"]}
+
+    assert action.propose(project, primary), "the primary's own robots.txt is still fixable here"
+    assert action.propose(project, secondary) == []
+    # Store rows carry the list as JSON. Iterating that string character by
+    # character would compare "c" to a hostname and refuse everything, which
+    # reads as a safety rail while disabling the action.
+    assert action.propose(project, {**secondary, "subjects": '["county.test"]'}) == []
+    assert action.propose(project, {**primary, "subjects": '["primary.test"]'})

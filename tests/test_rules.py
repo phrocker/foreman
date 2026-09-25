@@ -306,3 +306,60 @@ def test_a_merged_pull_request_has_no_age_and_is_not_judged():
         lambda *a, **k: found.setdefault(a[0], a),
     )
     assert found == {}
+
+
+def test_a_home_page_no_sitemap_lists_is_not_a_sitemap_finding() -> None:
+    """The crawler reads every host's home page now, sitemap or no sitemap.
+
+    A secondary host that redirects, or an app homepage that is deliberately
+    noindex, is not a sitemap listing a page it never listed. Found by the
+    adversarial review of the coverage change.
+    """
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    pages = {
+        # Deliberately noindex, and reached because it is a host's home page.
+        "https://app.test/": {
+            "status": "200",
+            "meta_robots": "noindex",
+            "discovered_via": "home",
+        },
+        # Reached the same way, and redirecting.
+        "https://old.test/": {"redirect_to": "https://new.test/", "discovered_via": "home"},
+        # This one a sitemap really did list.
+        "https://www.test/gone": {
+            "status": "200",
+            "meta_robots": "noindex",
+            "discovered_via": "sitemap",
+        },
+    }
+    seo.evaluate(pages, add)
+
+    rules = {r for r, _ in found}
+    assert "sitemap_url_redirects" not in rules
+    assert ("sitemapped_but_noindex", ["https://www.test/gone"]) in found, (
+        "the page a sitemap did list must still be reported"
+    )
+
+
+def test_a_page_observed_before_provenance_existed_still_counts() -> None:
+    """Every page observed before the shallow pass came from a sitemap.
+
+    Reading a missing `discovered_via` as "not sitemapped" would take standing
+    findings off the board for a sweep and put them back.
+    """
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate({"https://www.test/gone": {"redirect_to": "https://www.test/new"}}, add)
+
+    assert ("sitemap_url_redirects", ["https://www.test/gone"]) in found

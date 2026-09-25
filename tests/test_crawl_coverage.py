@@ -376,3 +376,111 @@ def test_the_shipped_portfolio_deep_crawls_every_county_domain() -> None:
         "a county domain outside the deep sample is a county domain whose "
         "canonical and service pages nothing reads"
     )
+
+
+# --- what the adversarial review found ---------------------------------------
+
+
+def test_a_host_that_answers_nothing_is_not_recorded_as_read_in_full(serve):
+    """False assurance about coverage, in the change that exists to end it.
+
+    `deep_crawl_at` is what the rotation reads and what the panel calls "read
+    in full". Written unconditionally, an unreachable host was recorded as
+    covered and then deprioritised — so the host nobody could reach was the
+    host nobody would look at again.
+    """
+    import socket
+
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    with socket.socket() as probe:  # a port nobody is listening on
+        probe.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    project = Project(id="portfolio", web={"url": primary, "also": [dead], "deep_sample": 1})
+
+    seen = by_host(asyncio.run(CrawlCollector().collect(project)))
+
+    assert "deep_crawl_at" in seen[host_of(primary)]
+    assert "deep_crawl_at" not in seen[host_of(dead)], (
+        "an unreachable host was stamped as read in full, which both lies to "
+        "the panel and sends it to the back of the rotation"
+    )
+
+
+def test_the_home_page_is_read_even_when_the_sitemap_omits_it(serve):
+    """The primary is always deep, so it was never covered by the shallow pass.
+
+    A sitemap is not obliged to list the page it belongs to. When one does not,
+    the home page's status and canonical were recorded nowhere at all — and the
+    host that can never fall back to the shallow pass is the primary.
+    """
+    base = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/about"]),  # no "/"
+            "/": page("Home"),
+            "/about": page("About", "/about"),
+        }
+    )
+    project = Project(id="solo", web={"url": base})
+
+    obs = asyncio.run(CrawlCollector().collect(project))
+    home = {o.key: o.value for o in obs if o.subject == f"{base}/"}
+
+    assert home.get("status") == "200"
+    assert home.get("canonical") == f"{base}/"
+    # And it is marked as found some other way, because no sitemap listed it.
+    assert home.get("discovered_via") == "home"
+
+
+def test_a_page_the_sitemap_lists_is_not_read_twice(serve):
+    """The home page is covered unconditionally, not fetched twice."""
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+
+    obs = [o for o in asyncio.run(CrawlCollector().collect(project)) if o.subject == f"{base}/"]
+
+    assert [o.value for o in obs if o.key == "discovered_via"] == ["sitemap"]
+    assert len([o for o in obs if o.key == "status"]) == 1
+
+
+def test_a_sitemap_declared_somewhere_else_is_the_one_measured(serve):
+    """Every WordPress site on the planet announces /sitemap_index.xml.
+
+    Measuring /sitemap.xml regardless would report "no sitemap" for all of
+    them, and disagree with the discovery step, which follows the declaration.
+    """
+    base = serve(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /\nSitemap: {base}/sitemap_index.xml\n",
+            "/sitemap_index.xml": sitemap(["/", "/about"]),
+            "/": page("Home"),
+            "/about": page("About", "/about"),
+        }
+    )
+    project = Project(id="wp", web={"url": base, "kind": "wordpress"})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["sitemap_url"] == f"{base}/sitemap_index.xml"
+    assert host["sitemap_status"] == "200"
+    assert host["sitemap_urls"] == "2"
+    assert host["urls_discovered"] == "2"
+
+
+def test_an_unreachable_host_says_so_rather_than_looking_quiet(tmp_path):
+    """A row that omits the error reads as a quiet host rather than a broken
+    one, which is the same false assurance in a smaller place."""
+    client = coverage_app(
+        tmp_path,
+        ["https://primary.test", "https://gone.test"],
+        [
+            ("primary.test", "robots_txt_status", "200"),
+            ("gone.test", "robots_txt_error", "ConnectError: [Errno 111] Connection refused"),
+        ],
+    )
+
+    hosts = {h["host"]: h for h in client.get("/api/coverage").json()[0]["hosts"]}
+
+    assert hosts["gone.test"]["seen"] is True, "it was asked; that is not the same as fine"
+    assert "Connection refused" in hosts["gone.test"]["error"]
+    assert hosts["primary.test"]["error"] is None

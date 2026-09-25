@@ -1831,19 +1831,20 @@ function coverageRow(cov) {
     // or a home page that does not answer. A missing sitemap is amber: it is a
     // recommendation, and a one-page host that deliberately has none would
     // otherwise sit red forever, which teaches people to read past red.
-    const broken = h.robots === "404" || (h.status && h.status !== "200");
+    const broken = !!h.error || h.robots === "404" || (h.status && h.status !== "200");
     const cls = !h.seen ? "cold"
       : broken ? "bad"
       : h.sitemap === "404" || !h.deep_crawl_at ? "shallow" : "";
     const when = h.deep_crawl_at ? `full crawl ${h.deep_crawl_at.slice(0, 10)}` : "shallow only";
-    const detail = h.seen
-      ? `robots ${h.robots || "?"} · sitemap ${h.sitemap || "?"}${
-          h.sitemap_urls ? ` (${h.sitemap_urls} urls)` : ""} · ${when}`
-      : "never crawled";
+    const detail = !h.seen ? "never crawled"
+      : h.error ? h.error
+      : `robots ${h.robots || "?"} · sitemap ${h.sitemap || "?"}${
+          h.sitemap_urls ? ` (${h.sitemap_urls} urls)` : ""} · ${when}`;
     // What is wrong, in words. Colour alone is not a reading of anything —
     // and the dashed border already carries "never crawled", so a red chip
     // has to say which file is missing rather than only that one is.
     const flag = !h.seen ? ""
+      : h.error ? "unreachable"
       : h.robots === "404" ? "no robots"
       : h.sitemap === "404" ? "no sitemap"
       : h.status && h.status !== "200" ? h.status : "";

@@ -55,7 +55,25 @@ def _metadata(pages: Pages, add: Add) -> None:
             add(f"missing_{key}", Severity.MEDIUM, f"{len(missing)} pages have no {label}", missing)
 
 
-def _sitemap_hygiene(pages: Pages, add: Add) -> None:
+def _sitemapped(pages: Pages) -> Pages:
+    """Only the pages a sitemap actually listed.
+
+    The crawler now reads the home page of every host whether or not a sitemap
+    mentions it, which is how a host with no sitemap at all gets a canonical
+    recorded. Rules that say "this sitemap URL redirects" have to be handed the
+    pages a sitemap listed, or an app homepage that is deliberately noindex
+    becomes a sitemapped-but-noindex finding about a sitemap that never
+    mentioned it.
+
+    A page with no provenance is treated as sitemapped: every page observed
+    before the crawler grew a shallow pass arrived from one, and reading those
+    as homepage-only would take standing findings off the board for a sweep.
+    """
+    return {u: f for u, f in pages.items() if f.get("discovered_via", "sitemap") == "sitemap"}
+
+
+def _sitemap_hygiene(all_pages: Pages, add: Add) -> None:
+    pages = _sitemapped(all_pages)
     redirecting = sorted(u for u, f in pages.items() if f.get("redirect_to"))
     if redirecting:
         add(
@@ -93,9 +111,11 @@ def _indexability(pages: Pages, add: Add) -> None:
             f"{len(bad_canonical)} pages canonicalise to a URL that redirects",
             bad_canonical,
         )
+    # Only what a sitemap listed: the contradiction is between the sitemap and
+    # the page, and a page no sitemap mentions is not in one.
     noindexed = sorted(
         u
-        for u, f in pages.items()
+        for u, f in _sitemapped(pages).items()
         if "noindex" in ((f.get("meta_robots") or "") + (f.get("x_robots_tag") or "")).lower()
     )
     if noindexed:
