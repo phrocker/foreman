@@ -101,11 +101,32 @@ def _sitemap_hygiene(all_pages: Pages, add: Add) -> None:
         )
 
 
+def _root_spelling(url: str) -> str:
+    """The trailing-slash spelling of a site root; every other URL unchanged.
+
+    The crawler records the root as "<site>/", because a URL with an empty path
+    is defined to mean the same as one with "/" and one page must not become
+    two rows. A canonical naming the bare form then looked up nothing at all,
+    so a page canonicalising to a root that redirects stopped being reported —
+    the lookup has to normalise the same way the subjects do.
+    """
+    _, sep, rest = url.partition("://")
+    if not sep or "/" in rest:
+        return url
+    return url + "/"
+
+
 def _indexability(pages: Pages, add: Add) -> None:
+    def target(canonical: str) -> dict[str, str | None]:
+        spelled = _root_spelling(canonical)
+        return dict(pages.get(spelled) or pages.get(canonical) or {})
+
     bad_canonical = sorted(
         u
         for u, f in pages.items()
-        if (c := f.get("canonical")) and c != u and pages.get(c, {}).get("redirect_to")
+        if (c := f.get("canonical"))
+        and _root_spelling(c) != _root_spelling(u)
+        and target(c).get("redirect_to")
     )
     if bad_canonical:
         add(

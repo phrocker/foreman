@@ -396,3 +396,45 @@ def test_a_page_the_crawler_could_not_place_is_not_called_sitemapped() -> None:
 
     flagged = [subjects for rule, subjects in found if rule == "sitemapped_but_noindex"]
     assert flagged == [["https://legacy.test/gone"]]
+
+
+def test_a_canonical_naming_the_bare_root_still_resolves() -> None:
+    """The crawler records a site root as "<site>/" so one page is not two
+    rows. A canonical naming the bare form then looked up nothing at all, and a
+    page canonicalising to a root that redirects stopped being reported."""
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate(
+        {
+            # Canonical written without the trailing slash.
+            "https://x.test/page": {"status": "200", "canonical": "https://x.test"},
+            # And the root, recorded the way the crawler records it.
+            "https://x.test/": {"redirect_to": "https://www.x.test/"},
+        },
+        add,
+    )
+
+    assert ("canonical_to_redirect", ["https://x.test/page"]) in found
+
+
+def test_a_root_canonicalising_to_itself_is_not_a_finding() -> None:
+    """The two spellings are the same page, so a root whose canonical omits the
+    slash is not canonicalising anywhere."""
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate(
+        {"https://x.test/": {"status": "200", "canonical": "https://x.test"}},
+        add,
+    )
+
+    assert not [r for r, _ in found if r == "canonical_to_redirect"]
