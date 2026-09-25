@@ -1481,3 +1481,48 @@ def test_a_page_this_sweep_fetched_is_not_reconciled_behind_its_own_back(serve):
     cells = [o.value for o in obs if o.subject == f"{base}/a" and o.key == "discovered_via"]
 
     assert cells == ["sitemap"], f"provenance written {len(cells)} times: {cells}"
+
+
+def test_correcting_provenance_does_not_clear_a_standing_fetch_error(serve):
+    """The runner retracts every `*_error` a collector held on a subject it has
+    reported this run without one — sound, because a collector that looked at
+    something and said nothing about a failure has seen it recover. This pass
+    is the one place that reports a subject it deliberately did not fetch, so
+    restoring a page's sitemap membership would otherwise clear its broken-URL
+    finding with nobody having looked at the page.
+    """
+    from foreman.runner import _cleared_errors
+
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    back = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/", "/old"]),
+            "/": page("Home"),
+            "/old": page("Old", "/old"),
+        }
+    )
+    project = Project(id="p", web={"url": primary, "also": [back], "deep_sample": 0})
+    prior = {
+        f"{back}/old": {"discovered_via": "unlisted", "fetch_error": "ConnectTimeout"},
+        urlparse(back).netloc: {"robots_txt_status": "200"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    old = {o.key: o.value for o in obs if o.subject == f"{back}/old"}
+    assert old["discovered_via"] == "sitemap"
+    assert old["fetch_error"] == "ConnectTimeout"
+
+    # And the runner therefore leaves it standing.
+    class FakeStore:
+        def latest_observations(self, project_id, as_of=None):
+            return [
+                {
+                    "subject": f"{back}/old",
+                    "key": "fetch_error",
+                    "value": "ConnectTimeout",
+                    "collector": "crawl",
+                }
+            ]
+
+    assert _cleared_errors(FakeStore(), "p", "crawl", obs) == []

@@ -513,6 +513,27 @@ class CrawlCollector:
                     value=now,
                 )
             )
+            # Restate a standing fetch error, because mentioning this subject
+            # at all would otherwise clear it.
+            #
+            # The runner retracts every `*_error` a collector held on a subject
+            # it has reported this run without one, on the sound reasoning that
+            # a collector which looked at something and said nothing about a
+            # failure has seen it recover. This pass breaks that assumption: it
+            # is the one place that reports a subject it deliberately did not
+            # fetch. Without this, restoring a page's sitemap membership on a
+            # shallow sweep would clear its broken-URL finding without anybody
+            # having looked at the page.
+            if cells.get("fetch_error"):
+                out.append(
+                    Observation(
+                        project=project.id,
+                        collector=self.name,
+                        subject=url,
+                        key="fetch_error",
+                        value=cells["fetch_error"],
+                    )
+                )
         return out
 
     async def _robots(
