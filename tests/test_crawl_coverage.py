@@ -1435,3 +1435,49 @@ def test_a_shallow_sweep_retracts_a_dropped_page_too(serve):
     old = {o.key: o.value for o in obs if o.subject == f"{other}/old"}
 
     assert old.get("discovered_via") == "unlisted"
+
+
+def test_a_page_put_back_into_the_sitemap_counts_again(serve):
+    """Retracting without restoring meant a page put back stayed excluded from
+    the sitemap rules until its next deep crawl — which on a host with
+    deep_sample: 0 never comes."""
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    back = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/", "/old"]),  # listed again
+            "/": page("Home"),
+            "/old": page("Old", "/old"),
+        }
+    )
+    project = Project(id="p", web={"url": primary, "also": [back], "deep_sample": 0})
+    # Marked unlisted by an earlier sweep, when the sitemap had dropped it.
+    prior = {
+        f"{back}/old": {"discovered_via": "unlisted", "status": "200"},
+        urlparse(back).netloc: {"robots_txt_status": "200"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    old = {o.key: o.value for o in obs if o.subject == f"{back}/old"}
+
+    assert old.get("discovered_via") == "sitemap"
+
+
+def test_a_page_this_sweep_fetched_is_not_reconciled_behind_its_own_back(serve):
+    """`_page` writes provenance from what it actually saw, and two cells for
+    one fact in one run is a race about which is the newer."""
+    base = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/", "/a"]),
+            "/": page("Home"),
+            "/a": page("A", "/a"),
+        }
+    )
+    project = Project(id="solo", web={"url": base})
+    prior = {f"{base}/a": {"discovered_via": "unlisted", "status": "200"}}
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    cells = [o.value for o in obs if o.subject == f"{base}/a" and o.key == "discovered_via"]
+
+    assert cells == ["sitemap"], f"provenance written {len(cells)} times: {cells}"

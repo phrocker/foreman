@@ -363,7 +363,7 @@ class CrawlCollector:
                 )
             )
 
-        # Pages the sitemap used to list and no longer does.
+        # Pages whose place in the sitemap has changed since last time.
         #
         # Provenance is refreshed only for pages this sweep visited, and a page
         # dropped from the sitemap is by definition not one of them — so its
@@ -381,8 +381,13 @@ class CrawlCollector:
         # every entry at once. Requiring a readable sitemap meant that site's
         # pages kept their provenance for ever — the one case where every entry
         # went away.
+        #
+        # Both directions. Retracting without restoring meant a page put back
+        # into the sitemap stayed excluded from the sitemap rules until its
+        # next deep crawl, which with deep_sample: 0 is never.
         if found.complete and (found.sitemap_read or no_sitemap):
-            obs.extend(self._unlisted(project, host, prior, set(found.urls)))
+            fetching = {u for u in urls} | {home}
+            obs.extend(self._reconcile(project, host, prior, set(found.urls), fetching))
         obs.extend(self._coalesce_root(project, site, prior))
 
         read = 0
@@ -460,28 +465,44 @@ class CrawlCollector:
             if key in cells
         ]
 
-    def _unlisted(
-        self, project: Project, host: str, prior: Facts, listed: set[str]
+    def _reconcile(
+        self,
+        project: Project,
+        host: str,
+        prior: Facts,
+        listed: set[str],
+        fetching: set[str],
     ) -> list[Observation]:
-        """Correct pages this host's sitemap no longer lists.
+        """Correct the provenance of pages this sweep is not visiting.
 
-        Not a retraction of the page's other cells: `crawl` samples rather than
+        A page dropped from the sitemap is by definition not one this sweep
+        fetches, so nothing refreshed its cell and `discovered_via=sitemap`
+        survived for ever — taking the entry out of the sitemap did not clear
+        the finding it caused. The same in reverse: a page put back stayed
+        excluded from the sitemap rules until its next deep crawl, which on a
+        host with deep_sample: 0 never comes.
+
+        Pages the sweep is about to fetch are skipped, because `_page` writes
+        their provenance from what it actually saw, and two cells for one fact
+        in one run is a race about which is the newer.
+
+        Not a retraction of any page's other facts: `crawl` samples rather than
         enumerates, so a page missing from one sweep is not proof it is gone,
         and taking its facts off the board would put them back tomorrow. What
-        is known to be false is the narrow claim that a sitemap lists it.
+        is known is the narrow question of whether a sitemap lists it.
         """
         out: list[Observation] = []
         for url, cells in prior.items():
+            if url in fetching or not url.startswith(("http://", "https://")):
+                continue  # visited this sweep, or a host subject rather than a page
+            if urlparse(url).netloc != host:
+                continue
             # The legacy default, the same one the rules apply: a page with no
             # provenance cell was observed before this collector had one, and
-            # everything observed then came from a sitemap. Skipping those left
-            # exactly the pages most likely to be stale — the ones already on
-            # the board when this shipped — reporting for ever.
-            if cells.get("discovered_via", "sitemap") != "sitemap" or url in listed:
-                continue
-            if not url.startswith(("http://", "https://")):
-                continue  # a host subject, not a page
-            if urlparse(url).netloc != host:
+            # everything observed then came from a sitemap.
+            was = cells.get("discovered_via", "sitemap")
+            now = "sitemap" if url in listed else "unlisted"
+            if was == now or (now == "unlisted" and was != "sitemap"):
                 continue
             out.append(
                 Observation(
@@ -489,7 +510,7 @@ class CrawlCollector:
                     collector=self.name,
                     subject=url,
                     key="discovered_via",
-                    value="unlisted",
+                    value=now,
                 )
             )
         return out
