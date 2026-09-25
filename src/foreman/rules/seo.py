@@ -55,7 +55,28 @@ def _metadata(pages: Pages, add: Add) -> None:
             add(f"missing_{key}", Severity.MEDIUM, f"{len(missing)} pages have no {label}", missing)
 
 
-def _sitemap_hygiene(pages: Pages, add: Add) -> None:
+def _sitemapped(pages: Pages) -> Pages:
+    """Only the pages a sitemap actually listed.
+
+    The crawler reads the home page of every host whether or not a sitemap
+    mentions it, which is how a host with no sitemap at all gets a canonical
+    recorded. Rules that say "this sitemap URL redirects" have to be handed the
+    pages a sitemap listed, or an app homepage that is deliberately noindex
+    becomes a sitemapped-but-noindex finding about a sitemap that never
+    mentioned it.
+
+    A page with no provenance at all is treated as sitemapped. Every page
+    observed before this collector grew a shallow pass arrived from a sitemap,
+    so reading those as homepage-only would take standing findings off the
+    board for no reason. A page first seen on a sweep that could not read the
+    sitemap is the case that would abuse that default, and the collector marks
+    those "unknown" explicitly rather than leaving them absent.
+    """
+    return {u: f for u, f in pages.items() if f.get("discovered_via", "sitemap") == "sitemap"}
+
+
+def _sitemap_hygiene(all_pages: Pages, add: Add) -> None:
+    pages = _sitemapped(all_pages)
     redirecting = sorted(u for u, f in pages.items() if f.get("redirect_to"))
     if redirecting:
         add(
@@ -80,11 +101,32 @@ def _sitemap_hygiene(pages: Pages, add: Add) -> None:
         )
 
 
+def _root_spelling(url: str) -> str:
+    """The trailing-slash spelling of a site root; every other URL unchanged.
+
+    The crawler records the root as "<site>/", because a URL with an empty path
+    is defined to mean the same as one with "/" and one page must not become
+    two rows. A canonical naming the bare form then looked up nothing at all,
+    so a page canonicalising to a root that redirects stopped being reported —
+    the lookup has to normalise the same way the subjects do.
+    """
+    _, sep, rest = url.partition("://")
+    if not sep or "/" in rest:
+        return url
+    return url + "/"
+
+
 def _indexability(pages: Pages, add: Add) -> None:
+    def target(canonical: str) -> dict[str, str | None]:
+        spelled = _root_spelling(canonical)
+        return dict(pages.get(spelled) or pages.get(canonical) or {})
+
     bad_canonical = sorted(
         u
         for u, f in pages.items()
-        if (c := f.get("canonical")) and c != u and pages.get(c, {}).get("redirect_to")
+        if (c := f.get("canonical"))
+        and _root_spelling(c) != _root_spelling(u)
+        and target(c).get("redirect_to")
     )
     if bad_canonical:
         add(
@@ -93,9 +135,11 @@ def _indexability(pages: Pages, add: Add) -> None:
             f"{len(bad_canonical)} pages canonicalise to a URL that redirects",
             bad_canonical,
         )
+    # Only what a sitemap listed: the contradiction is between the sitemap and
+    # the page, and a page no sitemap mentions is not in one.
     noindexed = sorted(
         u
-        for u, f in pages.items()
+        for u, f in _sitemapped(pages).items()
         if "noindex" in ((f.get("meta_robots") or "") + (f.get("x_robots_tag") or "")).lower()
     )
     if noindexed:

@@ -59,12 +59,29 @@ class WebSurface(BaseModel):
     render_sample: int = 5
     # Further sites on the same project. `url` stays the primary because a
     # project still has a main address, and anything that must pick one picks
-    # that: crawl, render and discovery read the primary alone, because
-    # twenty-one crawls of one template is twenty-one times the cost for the
-    # same finding. What reads all of them is `tls`, where the facts are
-    # genuinely per host — a certificate, a redirect, a set of headers — and
-    # where one missing host is an outage nobody is watching for.
+    # that.
+    #
+    # This list was read by `tls` alone for a while, on the argument that
+    # twenty-one crawls of one template cost twenty-one times as much for the
+    # same finding. The argument was wrong, and ProCare Edge is where it showed:
+    # for eleven weeks every county site answered 404 for robots.txt and
+    # sitemap.xml, carried no canonical and no structured data, and Foreman
+    # recorded thirteen crawl observations against one hostname while
+    # cheerfully reporting the surface healthy. A template produces the shape
+    # of a page; what a crawler reads off it — the canonical, the robots file,
+    # the sitemap, whether the host answers at all — is a fact about one
+    # hostname, and asserting that twenty of them are fine because the
+    # twenty-first is, is not an inference, it is an assumption.
+    #
+    # So `crawl` now reads every host shallowly and a rotating few of them in
+    # full. See collectors/crawl.py for how the rotation is chosen.
     also: list[str] = Field(default_factory=list)
+    # Secondary sites given a complete page crawl per run, least-recently-
+    # crawled first. The shallow pass covers every host every run and costs
+    # three requests each; this is the deeper look, and rotating it means
+    # per-page facts across the whole portfolio are current within days rather
+    # than never.
+    deep_sample: int = 2
 
     @field_validator("url")
     @classmethod

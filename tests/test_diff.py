@@ -130,3 +130,26 @@ def test_a_failed_sweep_does_not_look_like_deletion(tmp_path):
         assert previous is None
         assert changes == []
         assert [c["value"] for c in store.latest_observations("p")] == ["T"]
+
+
+def test_when_a_collector_ran_is_not_drift() -> None:
+    """`deep_attempt_at` changes on every sweep by construction.
+
+    Comparing it would report every host of every surface as drifted, every
+    night, for ever — and a list where everything has changed is a list nobody
+    reads. Drift is about the site; these are about the visit.
+    """
+    from foreman.diff import compare
+
+    before = [
+        {"subject": "a.test", "key": "deep_attempt_at", "value": "2026-09-24T02:00:00+00:00"},
+        {"subject": "a.test", "key": "robots_txt_status", "value": "200"},
+    ]
+    after = [
+        {"subject": "a.test", "key": "deep_attempt_at", "value": "2026-09-25T02:00:00+00:00"},
+        {"subject": "a.test", "key": "robots_txt_status", "value": "404"},
+    ]
+
+    changes = compare(before, after)
+
+    assert [(c.key, c.before, c.after) for c in changes] == [("robots_txt_status", "200", "404")]

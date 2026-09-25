@@ -306,3 +306,135 @@ def test_a_merged_pull_request_has_no_age_and_is_not_judged():
         lambda *a, **k: found.setdefault(a[0], a),
     )
     assert found == {}
+
+
+def test_a_home_page_no_sitemap_lists_is_not_a_sitemap_finding() -> None:
+    """The crawler reads every host's home page now, sitemap or no sitemap.
+
+    A secondary host that redirects, or an app homepage that is deliberately
+    noindex, is not a sitemap listing a page it never listed. Found by the
+    adversarial review of the coverage change.
+    """
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    pages = {
+        # Deliberately noindex, and reached because it is a host's home page.
+        "https://app.test/": {
+            "status": "200",
+            "meta_robots": "noindex",
+            "discovered_via": "home",
+        },
+        # Reached the same way, and redirecting.
+        "https://old.test/": {"redirect_to": "https://new.test/", "discovered_via": "home"},
+        # This one a sitemap really did list.
+        "https://www.test/gone": {
+            "status": "200",
+            "meta_robots": "noindex",
+            "discovered_via": "sitemap",
+        },
+    }
+    seo.evaluate(pages, add)
+
+    rules = {r for r, _ in found}
+    assert "sitemap_url_redirects" not in rules
+    assert ("sitemapped_but_noindex", ["https://www.test/gone"]) in found, (
+        "the page a sitemap did list must still be reported"
+    )
+
+
+def test_a_page_observed_before_provenance_existed_still_counts() -> None:
+    """Every page observed before the shallow pass came from a sitemap.
+
+    Reading a missing `discovered_via` as "not sitemapped" would take standing
+    findings off the board for a sweep and put them back.
+    """
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate({"https://www.test/gone": {"redirect_to": "https://www.test/new"}}, add)
+
+    assert ("sitemap_url_redirects", ["https://www.test/gone"]) in found
+
+
+def test_a_page_the_crawler_could_not_place_is_not_called_sitemapped() -> None:
+    """A missing provenance cell means the page predates the cell, and every
+    page observed then came from a sitemap — so an absent cell keeps its old
+    meaning and standing findings stay on the board. The case that would abuse
+    that default is a page first seen on a sweep that could not read the
+    sitemap, and the collector marks those "unknown" rather than leaving them
+    absent.
+    """
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate(
+        {
+            # First seen on a sweep that could not read the sitemap.
+            "https://blind.test/": {
+                "status": "200",
+                "meta_robots": "noindex",
+                "discovered_via": "unknown",
+            },
+            # Observed before the cell existed, so it came from a sitemap.
+            "https://legacy.test/gone": {"status": "200", "meta_robots": "noindex"},
+        },
+        add,
+    )
+
+    flagged = [subjects for rule, subjects in found if rule == "sitemapped_but_noindex"]
+    assert flagged == [["https://legacy.test/gone"]]
+
+
+def test_a_canonical_naming_the_bare_root_still_resolves() -> None:
+    """The crawler records a site root as "<site>/" so one page is not two
+    rows. A canonical naming the bare form then looked up nothing at all, and a
+    page canonicalising to a root that redirects stopped being reported."""
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate(
+        {
+            # Canonical written without the trailing slash.
+            "https://x.test/page": {"status": "200", "canonical": "https://x.test"},
+            # And the root, recorded the way the crawler records it.
+            "https://x.test/": {"redirect_to": "https://www.x.test/"},
+        },
+        add,
+    )
+
+    assert ("canonical_to_redirect", ["https://x.test/page"]) in found
+
+
+def test_a_root_canonicalising_to_itself_is_not_a_finding() -> None:
+    """The two spellings are the same page, so a root whose canonical omits the
+    slash is not canonicalising anywhere."""
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate(
+        {"https://x.test/": {"status": "200", "canonical": "https://x.test"}},
+        add,
+    )
+
+    assert not [r for r, _ in found if r == "canonical_to_redirect"]

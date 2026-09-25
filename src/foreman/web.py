@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -142,6 +143,19 @@ AGENT_RUNS = ("build", "research", "fix", "revise", "review")
 MAX_CONCURRENT = 4
 
 STALENESS_WORKERS = 8
+
+
+def _has_no_sitemap(host: dict[str, Any]) -> bool:
+    """Whether this host simply has no sitemap, as opposed to one that is
+    missing.
+
+    `sitemap_status` describes the first declared location only. A 404 there
+    means "no sitemap" when discovery agrees it found everything — a guess at
+    the conventional path that missed — and means "a declared sitemap has
+    vanished" when it does not, because a declared location that is absent is
+    counted as a gap.
+    """
+    return host.get("sitemap") in ("404", "410") and host.get("discovery_complete") != "false"
 
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
@@ -1511,6 +1525,132 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # an agent dispatched at this project is reading them.
             "known": len([line for line in known.splitlines() if line.startswith("- ")]),
         }
+
+    @app.get("/api/coverage")
+    def coverage(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        """Which hosts of a web surface have actually been looked at.
+
+        This exists because the failure it reports was invisible. ProCare Edge
+        declared twenty-two hosts and the crawler read one of them, and nothing
+        on the dashboard was wrong: no panel said "one of twenty-two", so no
+        panel could say the coverage was. A surface of twenty-two hosts and
+        thirteen observations looked exactly like a healthy site.
+
+        Coverage is a fact about a project, so it is read from the cells the
+        collectors leave rather than recomputed by asking the network again.
+        """
+        registry = load_registry(registry_path)
+        targets = [registry.get(project)] if project else registry.active
+        s = store()
+        out: list[dict[str, Any]] = []
+        try:
+            for target in targets:
+                if target.web is None:
+                    continue
+                # Crawl cells only. Every host already carries `tls` facts —
+                # that collector has read all of them for months — so counting
+                # any cell as coverage would report twenty-two of twenty-two
+                # crawled while the crawler had visited one. That is the exact
+                # blindness this panel exists to end, and it would have been
+                # reintroduced one layer up.
+                facts: dict[str, dict[str, str | None]] = {}
+                for row in s.latest_observations(target.id):
+                    if row["collector"] != "crawl":
+                        continue
+                    facts.setdefault(row["subject"], {})[row["key"]] = row["value"]
+
+                hosts: list[dict[str, Any]] = []
+                for url in target.web.urls:
+                    host = urlparse(url).netloc
+                    cells = facts.get(host, {})
+                    # The home page's own metadata is filed under the URL, not
+                    # the host: a canonical belongs to a page.
+                    # The collector names the site root `url + "/"`. The bare
+                    # form is read too, for rows a previous version wrote under
+                    # whichever spelling the sitemap happened to use: without
+                    # it, a home page returning 500 has no status here at all
+                    # and the chip stays green on the strength of robots and
+                    # sitemap alone.
+                    home = facts.get(url + "/") or facts.get(url) or {}
+                    hosts.append(
+                        {
+                            "host": host,
+                            "url": url,
+                            "primary": url == target.web.url,
+                            "robots": cells.get("robots_txt_status"),
+                            "sitemap": cells.get("sitemap_status"),
+                            "sitemap_urls": cells.get("sitemap_urls"),
+                            "urls_discovered": cells.get("urls_discovered"),
+                            "deep_crawl_at": cells.get("deep_crawl_at"),
+                            # The last attempt, and whether it got everything.
+                            #
+                            # Coverage counted any historical full crawl, so a
+                            # host read completely once and failing ever since
+                            # stayed green for good — the panel reporting a
+                            # coverage gap it had already been told about.
+                            "deep_attempt_at": cells.get("deep_attempt_at"),
+                            "deep_pages_failed": cells.get("deep_pages_failed"),
+                            # Whether the most recent sweep — shallow or deep —
+                            # could read every sitemap this host names. A
+                            # child sitemap that started failing leaves robots,
+                            # the index and the home page all answering 200, so
+                            # this is the only cell that changes.
+                            "discovery_complete": cells.get("discovery_complete"),
+                            "status": home.get("status"),
+                            "title": home.get("title"),
+                            "canonical": home.get("canonical"),
+                            # Why a host has no facts, when it has none. A row
+                            # that omits the error reads as a quiet host rather
+                            # than an unreachable one, which is the same false
+                            # assurance in a smaller place.
+                            "error": cells.get("robots_txt_error")
+                            or cells.get("sitemap_error")
+                            or home.get("fetch_error"),
+                            # A host with no cells at all has never been
+                            # crawled, which is the state this panel is for.
+                            "seen": bool(cells),
+                        }
+                    )
+                out.append(
+                    {
+                        "project": target.id,
+                        "name": target.label,
+                        "primary": target.web.host,
+                        "declared": len(hosts),
+                        "seen": sum(1 for h in hosts if h["seen"]),
+                        "deep": sum(1 for h in hosts if h["deep_crawl_at"]),
+                        # Tried since, and did not finish. The number that says
+                        # the green is out of date.
+                        "degraded": sum(
+                            1
+                            for h in hosts
+                            # A host with no sitemap at all can never earn a
+                            # full-crawl stamp — that stamp means "a sitemap
+                            # was read and everything it listed answered" — so
+                            # counting it degraded would flag it for ever for a
+                            # state its chip already names.
+                            #
+                            # With discovery_complete, because sitemap_status
+                            # describes only the first declared location: where
+                            # robots names two and the first has vanished, a
+                            # 404 there is a confirmed gap rather than a host
+                            # without a sitemap, and discovery says so.
+                            if not _has_no_sitemap(h)
+                            and (
+                                h["discovery_complete"] == "false"
+                                or (
+                                    h["deep_attempt_at"]
+                                    and (h["deep_attempt_at"] or "") > (h["deep_crawl_at"] or "")
+                                )
+                            )
+                        ),
+                        "deep_sample": target.web.deep_sample,
+                        "hosts": hosts,
+                    }
+                )
+        finally:
+            s.close()
+        return out
 
     @app.get("/api/issues")
     def issues(project: str | None = Query(None)) -> list[dict[str, Any]]:

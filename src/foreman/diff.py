@@ -72,8 +72,27 @@ class Change:
         return self.key in DECISIVE_KEYS
 
 
+# Cells that record how a collector ran rather than what it found.
+#
+# They change on every sweep by construction — timestamps every time, and the
+# rotating list of hosts read in full every time the rotation turns — so a
+# drift view that compared them would report every host of every surface as
+# having drifted, every night, for ever. A list where everything has changed is
+# a list nobody reads. Drift is about the site; these are about the visit.
+#
+# deep_pages_read and deep_pages_failed are deliberately not here: a host whose
+# page count changed, or whose pages stopped answering, has drifted.
+COLLECTION_BOOKKEEPING = frozenset(
+    {"deep_crawl_at", "deep_attempt_at", "deep_crawled", "hosts_deep_crawled"}
+)
+
+
 def _facts(rows: Sequence[Any]) -> dict[tuple[str, str], str | None]:
-    return {(row["subject"], row["key"]): row["value"] for row in rows}
+    return {
+        (row["subject"], row["key"]): row["value"]
+        for row in rows
+        if row["key"] not in COLLECTION_BOOKKEEPING
+    }
 
 
 def _moved_enough(key: str, before: str | None, after: str | None) -> bool:
