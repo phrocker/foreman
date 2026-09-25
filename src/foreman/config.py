@@ -41,7 +41,14 @@ def find_registry(start: Path | None = None) -> Path | None:
 
 
 class WebSurface(BaseModel):
-    """A public web presence."""
+    """A public web presence.
+
+    Plural, like GitHubSurface, because a project is not always one site.
+    ProCare Edge is twenty-one county domains answered by one process behind
+    one load balancer: a certificate covering all of them expires for all of
+    them at once, and a report on "the site" that covered only the first would
+    answer a different question from the one asked.
+    """
 
     url: str
     # spa | wordpress | static | other — decides which rules are meaningful.
@@ -50,15 +57,38 @@ class WebSurface(BaseModel):
     # Pages to render in a real browser. Metadata bugs are template-level, so a
     # handful catches them; rendering all 500 would not pay for itself.
     render_sample: int = 5
+    # Further sites on the same project. `url` stays the primary because a
+    # project still has a main address, and anything that must pick one picks
+    # that: crawl, render and discovery read the primary alone, because
+    # twenty-one crawls of one template is twenty-one times the cost for the
+    # same finding. What reads all of them is `tls`, where the facts are
+    # genuinely per host — a certificate, a redirect, a set of headers — and
+    # where one missing host is an outage nobody is watching for.
+    also: list[str] = Field(default_factory=list)
 
     @field_validator("url")
     @classmethod
     def _no_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
 
+    @field_validator("also")
+    @classmethod
+    def _tidy_also(cls, v: list[str]) -> list[str]:
+        return [u.rstrip("/") for u in v]
+
     @property
     def host(self) -> str:
         return urlparse(self.url).netloc
+
+    @property
+    def urls(self) -> list[str]:
+        """Every site this surface covers, primary first."""
+        return [self.url] + list(self.also)
+
+    @property
+    def hosts(self) -> list[str]:
+        """Every hostname this surface covers, primary first."""
+        return [urlparse(u).netloc for u in self.urls]
 
 
 class GitHubSurface(BaseModel):

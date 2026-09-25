@@ -6,6 +6,7 @@ import asyncio
 import socket
 import ssl
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import httpx
 
@@ -34,8 +35,8 @@ def _cert_not_after(host: str, port: int = 443) -> str | None:
 class TlsCollector:
     name = "tls"
     surface = "web"
-    # Exactly one host, the one the registry names. When that is corrected the
-    # old host's certificate and headers are somebody else's facts.
+    # Exactly the hosts the registry names. When one is corrected the old
+    # host's certificate and headers are somebody else's facts.
     enumerates = True
 
     async def collect(self, project: Project, prior: Facts | None = None) -> list[Observation]:
@@ -43,7 +44,25 @@ class TlsCollector:
         # simply has nothing to look at.
         if project.web is None:
             return []
-        host = project.web.host
+
+        # Every host, not only the primary.
+        #
+        # This is the collector where that distinction is load-bearing. A
+        # certificate, a plain-http redirect and a set of security headers are
+        # facts about one hostname, and a platform serving twenty-one domains
+        # off one managed certificate loses all twenty-one together. Watching
+        # the first one and calling it "the site" is watching one of
+        # twenty-one chances to notice.
+        #
+        # Concurrently, because twenty-one hosts checked in series is a sweep
+        # nobody runs often enough to catch a certificate before it expires.
+        results = await asyncio.gather(
+            *(self._one(project, url) for url in project.web.urls)
+        )
+        return [o for group in results for o in group]
+
+    async def _one(self, project: Project, url: str) -> list[Observation]:
+        host = urlparse(url).netloc
 
         def ob(key: str, value: str | None) -> Observation:
             return Observation(
@@ -62,7 +81,7 @@ class TlsCollector:
 
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False) as client:
             try:
-                r = await client.get(f"{project.web.url}/", follow_redirects=True)
+                r = await client.get(f"{url}/", follow_redirects=True)
                 for header in SECURITY_HEADERS:
                     out.append(ob(f"header_{header.replace('-', '_')}", r.headers.get(header)))
             except httpx.HTTPError as exc:
