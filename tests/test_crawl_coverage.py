@@ -1727,3 +1727,49 @@ def test_a_measured_empty_field_is_not_overwritten_by_a_legacy_value(serve):
     migrated = [o.value for o in obs if o.subject == f"{dead}/" and o.key == "meta_robots"]
 
     assert migrated == [], f"a removed noindex was migrated back: {migrated}"
+
+
+def test_a_deep_crawl_also_knows_the_root_under_its_old_spelling(serve):
+    """The alternate-root check was applied to the fallback branch only.
+
+    When discovery fails, the home page arrives through the discovered-URL
+    branch instead — so on a deep crawl, and therefore always on the primary, a
+    legacy root was still called a page never seen before. The "unknown" that
+    followed overwrote the provenance just migrated from the old row.
+    """
+
+    class Down(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/sitemap.xml":
+                self.send_error(503)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = (
+                (ROBOTS if path == "/robots.txt" else page("Home")).replace("{base}", base).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Down)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        # The primary, which is always deep.
+        project = Project(id="solo", web={"url": base})
+        prior = {base: {"status": "200", "meta_robots": "noindex", "discovered_via": "sitemap"}}
+        obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    via = [o.value for o in obs if o.subject == f"{base}/" and o.key == "discovered_via"]
+
+    assert "unknown" not in via, f"a legacy root was called a page never seen before: {via}"
+    assert via and via[-1] == "sitemap", f"the migrated provenance did not survive: {via}"

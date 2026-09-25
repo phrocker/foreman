@@ -80,6 +80,18 @@ def _canonical(head: str, base: str) -> str | None:
     return urljoin(base, href.group(1)) if href else None
 
 
+def _known(prior: Facts, site: str, url: str) -> bool:
+    """Whether this page is already recorded, under either spelling of the root.
+
+    A store written before the root had one spelling holds the bare form.
+    Calling the slashed form a page never seen before made a sweep that could
+    not read the sitemap mark it "unknown" — which overwrites the provenance
+    just migrated from the old row and clears standing sitemap findings with
+    nothing about the page having changed.
+    """
+    return url in prior or (url == f"{site}/" and site in prior)
+
+
 def _via(found: Discovery, url: str, no_sitemap: bool, known: bool) -> str | None:
     """Whether a sitemap listed `url`, as discovery itself reads sitemaps.
 
@@ -366,7 +378,13 @@ class CrawlCollector:
         # and the primary is always deep — so the one host that never gets the
         # shallow pass was the one that could lose its homepage facts entirely.
         pages = [
-            self._page(client, project, url, sem, via=_via(found, url, no_sitemap, url in prior))
+            self._page(
+                client,
+                project,
+                url,
+                sem,
+                via=_via(found, url, no_sitemap, _known(prior, site, url)),
+            )
             for url in urls
         ]
         if home not in urls:
@@ -376,13 +394,7 @@ class CrawlCollector:
                     project,
                     home,
                     sem,
-                    # Either spelling counts as knowing this page: a store
-                    # written before the root had one spelling holds the bare
-                    # form, and calling the slashed form "never seen" made a
-                    # blind sweep mark it unknown — which, with the old row
-                    # being retired at the same time, took a standing finding
-                    # off the board with nothing having changed.
-                    via=_via(found, home, no_sitemap, home in prior or site in prior),
+                    via=_via(found, home, no_sitemap, _known(prior, site, home)),
                 )
             )
 
