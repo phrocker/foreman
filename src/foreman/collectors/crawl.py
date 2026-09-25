@@ -363,6 +363,28 @@ class CrawlCollector:
                 )
             )
 
+        # Pages the sitemap used to list and no longer does.
+        #
+        # Provenance is refreshed only for pages this sweep visited, and a page
+        # dropped from the sitemap is by definition not one of them — so its
+        # `discovered_via=sitemap` survived for ever and the sitemap rules went
+        # on reporting it, which means removing the offending entry did not
+        # clear the finding it caused.
+        #
+        # Runs on a shallow sweep too: discovery reads the sitemaps on every
+        # host every sweep, so the list is just as good here, and waiting for
+        # this host's turn in the rotation would leave a corrected sitemap
+        # reporting for days.
+        #
+        # `no_sitemap` as well as a sitemap that was read, because a site that
+        # deletes its sitemap and its declaration has confirmed the absence of
+        # every entry at once. Requiring a readable sitemap meant that site's
+        # pages kept their provenance for ever — the one case where every entry
+        # went away.
+        if found.complete and (found.sitemap_read or no_sitemap):
+            obs.extend(self._unlisted(project, host, prior, set(found.urls)))
+        obs.extend(self._coalesce_root(project, site, prior))
+
         read = 0
         failed = 0
         for page in await asyncio.gather(*pages):
@@ -403,21 +425,40 @@ class CrawlCollector:
             # whether the URLs came from one meant such a host could never earn
             # the stamp, and so read degraded on every sweep for ever despite
             # complete discovery and no failures at all.
-            # Pages the sitemap used to list and no longer does.
-            #
-            # Provenance is refreshed only for pages this sweep visited, and a
-            # page dropped from the sitemap is by definition not one of them —
-            # so its `discovered_via=sitemap` survived for ever and the sitemap
-            # rules went on reporting it, which means removing the offending
-            # entry did not clear the finding it caused. Only from a complete
-            # read: a discovery that was cut short is not evidence that
-            # anything was dropped.
-            if found.sitemap_read and found.complete:
-                obs.extend(self._unlisted(project, host, prior, set(found.urls)))
-
             if found.sitemap_read and found.complete and read and not failed:
                 obs.append(ob("deep_crawl_at", datetime.now(UTC).isoformat(timespec="seconds")))
         return obs
+
+    def _coalesce_root(self, project: Project, site: str, prior: Facts) -> list[Observation]:
+        """Retire a home page row stored under the bare URL.
+
+        The root has one spelling here now, and a store written before that
+        may hold the other one. Both rows carry the same title, so the metadata
+        rules — correctly, on what they can see — report one home page as a
+        duplicate title for ever.
+
+        Not a deletion: this collector samples rather than enumerates, so the
+        runner does not retract its subjects, and nothing else can. Writing the
+        judged fields empty is what takes the row out of the comparison, which
+        is the whole of the problem.
+        """
+        cells = prior.get(site)
+        if not cells:
+            return []
+        return [
+            Observation(project=project.id, collector=self.name, subject=site, key=key, value=None)
+            for key in (
+                "title",
+                "meta_description",
+                "meta_robots",
+                "canonical",
+                "status",
+                "redirect_to",
+                "served_text_chars",
+                "discovered_via",
+            )
+            if key in cells
+        ]
 
     def _unlisted(
         self, project: Project, host: str, prior: Facts, listed: set[str]

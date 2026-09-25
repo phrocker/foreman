@@ -1376,3 +1376,62 @@ def test_coverage_reads_the_home_page_the_collector_wrote(tmp_path):
     hosts = {h["host"]: h for h in client.get("/api/coverage").json()[0]["hosts"]}
 
     assert hosts["odd.test"]["status"] == "500"
+
+
+def test_a_root_row_stored_under_the_other_spelling_is_retired(serve):
+    """A store written before the root had one spelling holds the other one.
+
+    Both rows carry the same title, so the metadata rules — correctly, on what
+    they can see — report one home page as a duplicate title for ever.
+    """
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+    prior = {
+        base: {"title": "Home", "meta_description": "Home — description.", "status": "200"},
+        urlparse(base).netloc: {"robots_txt_status": "200"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    stale = {o.key: o.value for o in obs if o.subject == base}
+
+    assert stale.get("title") is None and "title" in stale
+    assert stale.get("meta_description") is None and "meta_description" in stale
+    # The real row is untouched and still carries the page.
+    live = {o.key: o.value for o in obs if o.subject == f"{base}/"}
+    assert live["title"] == "Home"
+
+
+def test_a_site_that_deletes_its_sitemap_clears_the_pages_it_listed(serve):
+    """Deleting the sitemap and its declaration confirms the absence of every
+    entry at once. Requiring a readable sitemap to retract anything meant that
+    site's pages kept their provenance for ever — the one case where all of
+    them went away."""
+    base = serve({"/robots.txt": "User-agent: *\nAllow: /\n", "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+    prior = {
+        f"{base}/old": {"discovered_via": "sitemap", "status": "404"},
+        urlparse(base).netloc: {"robots_txt_status": "200"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    old = {o.key: o.value for o in obs if o.subject == f"{base}/old"}
+
+    assert old.get("discovered_via") == "unlisted"
+
+
+def test_a_shallow_sweep_retracts_a_dropped_page_too(serve):
+    """Discovery reads the sitemaps on every host every sweep, so waiting for
+    this host's turn in the rotation would leave a corrected sitemap reporting
+    for days."""
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    other = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Home")})
+    project = Project(id="p", web={"url": primary, "also": [other], "deep_sample": 0})
+    prior = {
+        f"{other}/old": {"discovered_via": "sitemap", "status": "200"},
+        urlparse(other).netloc: {"robots_txt_status": "200"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    old = {o.key: o.value for o in obs if o.subject == f"{other}/old"}
+
+    assert old.get("discovered_via") == "unlisted"
