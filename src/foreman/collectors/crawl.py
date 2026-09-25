@@ -498,8 +498,12 @@ class CrawlCollector:
         out: list[Observation] = []
         for key in fields:
             value = cells.get(key)
-            if value is None or moved.get(key) is not None:
-                # Nothing to move, or the new row already knows better.
+            # `key in moved`, not a truth test on its value. A cell recorded as
+            # empty is a measurement — this page has no robots meta — and
+            # reading it as "nothing known here" let the legacy row's stale
+            # noindex be migrated back over a directive the site had removed.
+            if value is None or key in moved:
+                # Nothing to move, or the new row has already measured it.
                 continue
             out.append(
                 Observation(

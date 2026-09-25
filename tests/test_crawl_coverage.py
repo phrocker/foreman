@@ -1702,3 +1702,28 @@ def test_a_successful_fetch_wins_over_the_migrated_values(serve):
     titles = [o.value for o in obs if o.subject == f"{base}/" and o.key == "title"]
 
     assert titles[-1] == "Renamed", f"the migrated value outlived the measurement: {titles}"
+
+
+def test_a_measured_empty_field_is_not_overwritten_by_a_legacy_value(serve):
+    """A cell recorded as empty is a measurement — this page has no robots meta
+    — and reading it as "nothing known here" let the legacy row's stale noindex
+    be migrated back over a directive the site had removed."""
+    import socket
+
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{probe.getsockname()[1]}"
+
+    project = Project(id="p", web={"url": primary, "also": [dead], "deep_sample": 0})
+    prior = {
+        # The legacy row, still carrying a directive the site has since removed.
+        dead: {"meta_robots": "noindex", "title": "Home"},
+        # And the current row, which measured its absence.
+        f"{dead}/": {"meta_robots": None, "title": "Home"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    migrated = [o.value for o in obs if o.subject == f"{dead}/" and o.key == "meta_robots"]
+
+    assert migrated == [], f"a removed noindex was migrated back: {migrated}"
