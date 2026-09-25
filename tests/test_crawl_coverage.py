@@ -1291,3 +1291,50 @@ def test_an_incomplete_sweep_does_not_declare_pages_unlisted(serve):
     assert not [o for o in obs if o.subject == f"{base}/old"], (
         "an unreadable sitemap was treated as proof that a page had been dropped from it"
     )
+
+
+def test_a_sitemap_listing_the_bare_host_does_not_make_two_home_pages(serve):
+    """`https://x.test` and `https://x.test/` are the same page.
+
+    Adding the slashed form as a second subject when the bare one is already
+    there gave one homepage two rows with identical titles — and the metadata
+    rules, correctly, called that a duplicate title. A single-page site was
+    manufacturing its own findings.
+    """
+    bare = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<url><loc>{base}</loc></url></urlset>"  # no trailing slash
+    )
+    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": bare, "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+
+    obs = asyncio.run(CrawlCollector().collect(project))
+    home_subjects = {o.subject for o in obs if o.subject in (base, f"{base}/")}
+
+    assert len(home_subjects) == 1, f"one page recorded under two names: {home_subjects}"
+
+
+def test_a_legacy_page_removed_from_the_sitemap_is_retracted_too(serve):
+    """Pages with no provenance cell are read as sitemap entries by the rules,
+    so skipping them here left exactly the pages most likely to be stale — the
+    ones already on the board when this shipped — reporting for ever."""
+    base = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/"]),  # /old is gone
+            "/": page("Home"),
+            "/old": page("Old", "/old"),
+        }
+    )
+    project = Project(id="solo", web={"url": base})
+    # Observed before provenance existed, so it has no cell at all.
+    prior = {
+        f"{base}/old": {"status": "404"},
+        urlparse(base).netloc: {"robots_txt_status": "200"},
+    }
+
+    obs = asyncio.run(CrawlCollector().collect(project, prior=prior))
+    old = {o.key: o.value for o in obs if o.subject == f"{base}/old"}
+
+    assert old.get("discovered_via") == "unlisted"

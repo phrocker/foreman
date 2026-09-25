@@ -340,6 +340,13 @@ class CrawlCollector:
             self._page(client, project, url, sem, via=_via(found, url, no_sitemap, url in prior))
             for url in urls
         ]
+        # `site` and `site + "/"` are the same page, and a sitemap may list
+        # either. Adding the slashed form as a second subject when the bare one
+        # is already there gave one homepage two rows with identical titles —
+        # and the metadata rules, correctly, called that a duplicate title. A
+        # single-page site was manufacturing its own findings.
+        if site in urls:
+            home = site
         if home not in urls:
             pages.append(
                 self._page(
@@ -415,7 +422,12 @@ class CrawlCollector:
         """
         out: list[Observation] = []
         for url, cells in prior.items():
-            if cells.get("discovered_via") != "sitemap" or url in listed:
+            # The legacy default, the same one the rules apply: a page with no
+            # provenance cell was observed before this collector had one, and
+            # everything observed then came from a sitemap. Skipping those left
+            # exactly the pages most likely to be stale — the ones already on
+            # the board when this shipped — reporting for ever.
+            if cells.get("discovered_via", "sitemap") != "sitemap" or url in listed:
                 continue
             if not url.startswith(("http://", "https://")):
                 continue  # a host subject, not a page
