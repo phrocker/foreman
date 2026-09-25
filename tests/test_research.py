@@ -236,7 +236,8 @@ def test_a_domain_that_does_not_parse_gets_no_invented_subject():
 def _claims(n: int) -> Gathered:
     return Gathered(
         claims=[
-            Claim(statement=f"claim {i}", source_url=f"https://example.test/{i}") for i in range(n)
+            Claim(statement=f"claim {i}", source_url=f"https://example.test/{i}")
+            for i in range(n)
         ]
     )
 
@@ -375,7 +376,9 @@ async def test_a_verdict_is_matched_by_number_and_never_by_order(store):
             )
 
     agents = Partial(
-        Gathered(claims=[Claim(statement=f"claim {i}", source_url=url) for i in range(1, 4)])
+        Gathered(
+            claims=[Claim(statement=f"claim {i}", source_url=url) for i in range(1, 4)]
+        )
     )
     out = await research("p", store, "s", [FACET], connectors=[agents])
 
@@ -415,12 +418,7 @@ async def test_a_ceiling_says_so_when_it_cannot_bind(store):
     # A metered backend says nothing, because there is nothing to warn about.
     quiet = []
     await research(
-        "p",
-        store,
-        "s",
-        [FACET],
-        budget=Budget(limit_usd=5.0),
-        connectors=[_Agents(_claims(3))],
-        log=quiet.append,
+        "p", store, "s", [FACET], budget=Budget(limit_usd=5.0),
+        connectors=[_Agents(_claims(3))], log=quiet.append,
     )
     assert not any("cannot bind" in line for line in quiet)

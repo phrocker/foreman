@@ -72,15 +72,24 @@ async def discover(
     urls: list[str] = []
     seen: set[str] = set()
     complete = len(sitemaps) <= 5
-    for sm in sitemaps[:5]:
+    cap = project.web.max_urls
+    for i, sm in enumerate(sitemaps[:5]):
         found, whole = await _read_sitemap(client, sm, depth=0)
         complete = complete and whole
         for url in found:
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
-            if len(urls) >= project.web.max_urls:
-                return Discovery(urls, from_sitemap=True, complete=False)
+        if len(urls) > cap:
+            # More URLs than the crawl will look at. Stop fetching, and say so.
+            return Discovery(urls[:cap], from_sitemap=True, complete=False)
+        if len(urls) == cap and i + 1 < len(sitemaps[:5]):
+            # Exactly full with sitemaps still unread: there may or may not be
+            # more, and "may" is not complete.
+            return Discovery(urls, from_sitemap=True, complete=False)
+    # A sitemap holding exactly max_urls URLs was read whole. Calling that
+    # truncated left such a host permanently "shallow only" on the panel,
+    # because it could never earn a full-crawl stamp it had actually met.
     if urls:
         return Discovery(urls, from_sitemap=True, complete=complete)
     return Discovery([base + "/"], from_sitemap=False, complete=complete)

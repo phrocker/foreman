@@ -704,3 +704,94 @@ def test_a_truncated_discovery_does_not_claim_a_page_is_unlisted(serve):
     assert "discovered_via" not in home, (
         "a truncated list was treated as proof that no sitemap lists this page"
     )
+
+
+def test_a_sitemap_of_exactly_the_limit_is_read_whole(serve):
+    """`len(urls) >= cap` called a complete read truncated, so a host whose
+    sitemap held exactly max_urls URLs could never earn a full-crawl stamp and
+    sat permanently "shallow only" on the panel."""
+    base = serve(
+        {
+            "/robots.txt": ROBOTS,
+            "/sitemap.xml": sitemap(["/", "/a"]),
+            "/": page("Home"),
+            "/a": page("A", "/a"),
+        }
+    )
+    project = Project(id="solo", web={"url": base, "max_urls": 2})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["urls_discovered"] == "2"
+    assert "deep_crawl_at" in host, "a sitemap read whole was treated as truncated"
+
+
+def test_a_sitemap_that_cannot_be_read_does_not_erase_what_is_known(serve):
+    """A 503 is not evidence that a page is unlisted.
+
+    Marking the home page "home" on such a sweep would overwrite the
+    provenance a good deep crawl established, suppressing every sitemap
+    finding about that host until the next one.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+
+    class Flaky(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/sitemap.xml":
+                self.send_error(503)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = (
+                (ROBOTS if path == "/robots.txt" else page("Home")).replace("{base}", base).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Flaky)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    flaky = f"http://127.0.0.1:{server.server_port}"
+    try:
+        project = Project(id="p", web={"url": primary, "also": [flaky], "deep_sample": 0})
+        home = {
+            o.key: o.value
+            for o in asyncio.run(CrawlCollector().collect(project))
+            if o.subject == f"{flaky}/"
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert home["status"] == "200", "the page itself was still read"
+    assert "discovered_via" not in home, (
+        "an unreadable sitemap was treated as proof that nothing is listed in it"
+    )
+
+
+def test_a_host_failing_since_its_last_good_crawl_is_not_still_green(tmp_path):
+    """Coverage counted any historical full crawl, so a host read completely
+    once and failing ever since stayed green for good — the panel reporting a
+    coverage gap it had already been told about."""
+    client = coverage_app(
+        tmp_path,
+        ["https://primary.test", "https://flaky.test"],
+        [
+            ("primary.test", "robots_txt_status", "200"),
+            ("primary.test", "deep_crawl_at", "2026-09-25T02:00:00+00:00"),
+            ("primary.test", "deep_attempt_at", "2026-09-25T02:00:00+00:00"),
+            ("flaky.test", "robots_txt_status", "200"),
+            ("flaky.test", "deep_crawl_at", "2026-09-20T02:00:00+00:00"),
+            ("flaky.test", "deep_attempt_at", "2026-09-25T02:00:00+00:00"),
+        ],
+    )
+
+    cov = client.get("/api/coverage").json()[0]
+
+    assert cov["deep"] == 2, "both have been read in full at some point"
+    assert cov["degraded"] == 1, "and one has failed every attempt since"

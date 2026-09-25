@@ -79,7 +79,7 @@ def _canonical(head: str, base: str) -> str | None:
     return urljoin(base, href.group(1)) if href else None
 
 
-def _via(found: Discovery, url: str) -> str | None:
+def _via(found: Discovery, url: str, no_sitemap: bool) -> str | None:
     """Whether a sitemap listed `url`, as discovery itself reads sitemaps.
 
     Measured every sweep rather than remembered, which is the point. The first
@@ -91,18 +91,21 @@ def _via(found: Discovery, url: str) -> str | None:
     raw bytes, which is not how a sitemap is read: whitespace inside the
     element, or a namespace prefix, is valid and would have been missed.
 
-    `from_sitemap` because discovery falls back to the home page when there is
-    no sitemap, and that URL is in the list without any sitemap having named
-    it.
-
-    None when discovery was cut short and this URL is not in what it did read:
-    the list is then not evidence of absence, and the caller writes no
-    provenance rather than a wrong one. A cell nobody overwrites keeps its
-    value, which is the right behaviour for "this sweep cannot say".
+    Three answers, because there are three states. A sitemap that lists the
+    page. A sitemap that demonstrably does not, or no sitemap at all — the
+    page was found some other way. And a sitemap that could not be read this
+    sweep, where `None` writes nothing and leaves whatever the last sweep
+    established: a 503 is not evidence that a page is unlisted, and treating it
+    as one would suppress every sitemap finding about that host until the next
+    good deep crawl.
     """
-    if url in found.urls:
-        return "sitemap" if found.from_sitemap else "home"
-    return "home" if found.complete else None
+    if found.from_sitemap and url in found.urls:
+        return "sitemap"
+    # Definitively not in a sitemap: either one was read whole and does not
+    # list it, or the host has none to read.
+    if no_sitemap or (found.from_sitemap and found.complete):
+        return "home"
+    return None
 
 
 def _declared_sitemaps(obs: list[Observation]) -> list[str]:
@@ -261,7 +264,14 @@ class CrawlCollector:
             )
 
         obs = await self._robots(client, project, site)
-        obs.extend(await self._sitemap(client, project, site, _declared_sitemaps(obs)))
+        sitemap_obs, sitemap_status = await self._sitemap(
+            client, project, site, _declared_sitemaps(obs)
+        )
+        obs.extend(sitemap_obs)
+        # A sitemap that 404s is a host with no sitemap, which is a fact. One
+        # that 503s or times out is a host whose sitemap nobody could read,
+        # which is not.
+        no_sitemap = sitemap_status is not None and 400 <= sitemap_status < 500
 
         # Discovery on every host, deep or not.
         #
@@ -279,9 +289,11 @@ class CrawlCollector:
         # mentions it. A sitemap is not obliged to list the page it belongs to,
         # and the primary is always deep — so the one host that never gets the
         # shallow pass was the one that could lose its homepage facts entirely.
-        pages = [self._page(client, project, url, sem, via=_via(found, url)) for url in urls]
+        pages = [
+            self._page(client, project, url, sem, via=_via(found, url, no_sitemap)) for url in urls
+        ]
         if home not in urls:
-            pages.append(self._page(client, project, home, sem, via=_via(found, home)))
+            pages.append(self._page(client, project, home, sem, via=_via(found, home, no_sitemap)))
 
         read = 0
         failed = 0
@@ -383,7 +395,7 @@ class CrawlCollector:
         project: Project,
         site: str,
         declared: list[str],
-    ) -> list[Observation]:
+    ) -> tuple[list[Observation], int | None]:
         """What the host's sitemap actually answers, and how much it lists.
 
         Separate from discovery, which treats a missing sitemap as "use the
@@ -410,16 +422,17 @@ class CrawlCollector:
         try:
             r = await client.get(where)
         except httpx.HTTPError as exc:
-            return [ob("sitemap_url", where), ob("sitemap_error", str(exc))]
+            return [ob("sitemap_url", where), ob("sitemap_error", str(exc))], None
 
         out = [ob("sitemap_url", where), ob("sitemap_status", str(r.status_code))]
-        if r.status_code == 200:
-            # Counted from the bytes rather than by parsing: a sitemap that is
-            # valid XML but empty and one that is malformed are different
-            # findings, and sitemap_urls tells them apart. What the sitemap
-            # lists is discovery's question, and it is asked there.
-            out.append(ob("sitemap_urls", str(r.text.count("<loc>"))))
-        return out
+        if r.status_code != 200:
+            return out, r.status_code
+        # Counted from the bytes rather than by parsing: a sitemap that is
+        # valid XML but empty and one that is malformed are different
+        # findings, and sitemap_urls tells them apart. What the sitemap lists
+        # is discovery's question, and it is asked there.
+        out.append(ob("sitemap_urls", str(r.text.count("<loc>"))))
+        return out, r.status_code
 
     async def _probe(
         self, client: httpx.AsyncClient, project: Project, site: str

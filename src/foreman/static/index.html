@@ -1832,9 +1832,13 @@ function coverageRow(cov) {
     // recommendation, and a one-page host that deliberately has none would
     // otherwise sit red forever, which teaches people to read past red.
     const broken = !!h.error || h.robots === "404" || (h.status && h.status !== "200");
+    // Tried since it last succeeded, and did not finish. A host read
+    // completely once and failing ever since stayed green for good, which is
+    // the panel reporting a coverage gap it had already been told about.
+    const stale = h.deep_attempt_at && h.deep_attempt_at > (h.deep_crawl_at || "");
     const cls = !h.seen ? "cold"
       : broken ? "bad"
-      : h.sitemap === "404" || !h.deep_crawl_at ? "shallow" : "";
+      : stale || h.sitemap === "404" || !h.deep_crawl_at ? "shallow" : "";
     const when = h.deep_crawl_at ? `full crawl ${h.deep_crawl_at.slice(0, 10)}` : "shallow only";
     const detail = !h.seen ? "never crawled"
       : h.error ? h.error
@@ -1846,6 +1850,7 @@ function coverageRow(cov) {
     const flag = !h.seen ? ""
       : h.error ? "unreachable"
       : h.robots === "404" ? "no robots"
+      : stale ? "partial"
       : h.sitemap === "404" ? "no sitemap"
       : h.status && h.status !== "200" ? h.status : "";
     return `<span class="cov-host ${cls}${h.primary ? " primary" : ""}" title="${esc(detail)}">
@@ -1856,7 +1861,8 @@ function coverageRow(cov) {
   return `<div class="pstate-row">
       <span class="pstate-label">Crawl coverage</span>
       <span>${cov.seen} of ${cov.declared} hosts crawled${
-        cold ? ` · <span class="sev-high">${cold} never</span>` : ""} · ${cov.deep} read in full
+        cold ? ` · <span class="sev-high">${cold} never</span>` : ""} · ${cov.deep} read in full${
+        cov.degraded ? ` · ${cov.degraded} incomplete since` : ""}
         (${cov.deep_sample} secondary per sweep)</span>
     </div>
     <div class="pstate-row"><span class="pstate-label"></span>

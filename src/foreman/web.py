@@ -1563,6 +1563,14 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                             "sitemap_urls": cells.get("sitemap_urls"),
                             "urls_discovered": cells.get("urls_discovered"),
                             "deep_crawl_at": cells.get("deep_crawl_at"),
+                            # The last attempt, and whether it got everything.
+                            #
+                            # Coverage counted any historical full crawl, so a
+                            # host read completely once and failing ever since
+                            # stayed green for good — the panel reporting a
+                            # coverage gap it had already been told about.
+                            "deep_attempt_at": cells.get("deep_attempt_at"),
+                            "deep_pages_failed": cells.get("deep_pages_failed"),
                             "status": home.get("status"),
                             "title": home.get("title"),
                             "canonical": home.get("canonical"),
@@ -1586,6 +1594,14 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         "declared": len(hosts),
                         "seen": sum(1 for h in hosts if h["seen"]),
                         "deep": sum(1 for h in hosts if h["deep_crawl_at"]),
+                        # Tried since, and did not finish. The number that says
+                        # the green is out of date.
+                        "degraded": sum(
+                            1
+                            for h in hosts
+                            if h["deep_attempt_at"]
+                            and (h["deep_attempt_at"] or "") > (h["deep_crawl_at"] or "")
+                        ),
                         "deep_sample": target.web.deep_sample,
                         "hosts": hosts,
                     }
