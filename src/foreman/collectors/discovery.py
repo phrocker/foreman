@@ -8,15 +8,38 @@ the two collectors compare notes on identical URLs.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 
 import httpx
 
 from ..config import Project
 
 
+@dataclass(frozen=True)
+class Discovery:
+    """What discovery found, and whether a sitemap is what found it.
+
+    The second half matters to whoever records the pages. A host with no
+    sitemap still yields its homepage here, and a caller that files that as
+    "listed in the sitemap" hands the sitemap rules a page no sitemap ever
+    mentioned — which then gets reported as a sitemap listing a broken or
+    noindexed URL, about a file that does not exist.
+    """
+
+    urls: list[str]
+    from_sitemap: bool
+
+
 async def discover_urls(
     client: httpx.AsyncClient, project: Project, site: str | None = None
 ) -> list[str]:
+    """The URLs alone, for callers that do not care where they came from."""
+    return (await discover(client, project, site)).urls
+
+
+async def discover(
+    client: httpx.AsyncClient, project: Project, site: str | None = None
+) -> Discovery:
     """Sitemap first; homepage alone if there is not one.
 
     `site` names which of the surface's hosts to discover, defaulting to the
@@ -49,8 +72,10 @@ async def discover_urls(
                 seen.add(url)
                 urls.append(url)
             if len(urls) >= project.web.max_urls:
-                return urls
-    return urls or [base + "/"]
+                return Discovery(urls, from_sitemap=True)
+    if urls:
+        return Discovery(urls, from_sitemap=True)
+    return Discovery([base + "/"], from_sitemap=False)
 
 
 async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> list[str]:

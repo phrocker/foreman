@@ -484,3 +484,111 @@ def test_an_unreachable_host_says_so_rather_than_looking_quiet(tmp_path):
     assert hosts["gone.test"]["seen"] is True, "it was asked; that is not the same as fine"
     assert "Connection refused" in hosts["gone.test"]["error"]
     assert hosts["primary.test"]["error"] is None
+
+
+def test_a_shallow_sweep_does_not_forget_that_the_sitemap_lists_the_home_page(serve):
+    """Provenance is measured every sweep, not remembered from the last one.
+
+    A host read deeply on Monday and shallowly on Tuesday had its home page
+    rewritten from "sitemap" to "home", and because the rules read the latest
+    cell, a real sitemapped-but-noindex finding vanished on Tuesday and came
+    back on Thursday with nothing about the site having changed.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    other = serve(county("Howard County HVAC"))
+    deep = Project(id="p", web={"url": primary, "also": [other], "deep_sample": 1})
+    shallow = Project(id="p", web={"url": primary, "also": [other], "deep_sample": 0})
+
+    first = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(deep))
+        if o.subject == f"{other}/"
+    }
+    second = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(shallow))
+        if o.subject == f"{other}/"
+    }
+
+    assert first["discovered_via"] == "sitemap"
+    assert second["discovered_via"] == "sitemap", (
+        "the shallow sweep forgot that this host's sitemap lists its home page"
+    )
+
+
+def test_a_home_page_no_sitemap_lists_is_not_called_sitemapped(serve):
+    """discover_urls falls back to the home page when there is no sitemap, and
+    filing that as "listed in the sitemap" hands the sitemap rules a page no
+    sitemap mentioned — a finding about a file that does not exist."""
+    base = serve({"/": page("Solo")})  # no robots.txt, no sitemap
+    project = Project(id="solo", web={"url": base})
+
+    home = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{base}/"
+    }
+
+    assert home["status"] == "200"
+    assert home["discovered_via"] == "home"
+
+
+def test_an_unreadable_sitemap_index_leaves_provenance_alone(serve):
+    """An index names other sitemaps, so its body cannot say whether a page is
+    listed. No provenance is written, and the last sweep's answer survives —
+    which is the right behaviour for "this fetch cannot say"."""
+    index = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<sitemap><loc>{base}/pages.xml</loc></sitemap></sitemapindex>"
+    )
+    base = serve(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n",
+            "/sitemap.xml": index,
+            "/pages.xml": sitemap(["/"]),
+            "/": page("Home"),
+        }
+    )
+    shallow = Project(id="wp", web={"url": base, "also": [], "deep_sample": 0})
+
+    obs = asyncio.run(CrawlCollector().collect(shallow))
+    home = [o for o in obs if o.subject == f"{base}/"]
+
+    # The primary is always deep, so read the shallow path through a secondary.
+    assert [o.key for o in home if o.key == "status"], "the home page was not read"
+    other = serve({"/": page("Elsewhere")})
+    pair = Project(id="wp", web={"url": base, "also": [other], "deep_sample": 0})
+    second = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(pair))
+        if o.subject == f"{base}/"
+    }
+    assert second["discovered_via"] == "sitemap"
+
+
+def test_an_unreachable_host_takes_its_turn_and_then_yields_it(serve):
+    """Rotation reads attempts; the panel reads successes.
+
+    Sorting the rotation by successes meant an unreachable host never advanced
+    and so was chosen every sweep: with deep_sample=1 and one dead secondary,
+    no healthy host would ever have been crawled in full again.
+    """
+    import socket
+
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    healthy = serve(county("Howard County HVAC"))
+    project = Project(id="p", web={"url": primary, "also": [dead, healthy], "deep_sample": 1})
+
+    first = by_host(asyncio.run(CrawlCollector().collect(project)))
+    assert "deep_attempt_at" in first[host_of(dead)], "the dead host was never tried"
+    assert "deep_crawl_at" not in first[host_of(dead)], "and it did not succeed"
+
+    second = by_host(asyncio.run(CrawlCollector().collect(project, prior=first)))
+    assert "deep_crawl_at" in second[host_of(healthy)], (
+        "the unreachable host kept the only deep slot, so the healthy one "
+        "would never be read in full"
+    )
