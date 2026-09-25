@@ -1296,23 +1296,36 @@ def test_an_incomplete_sweep_does_not_declare_pages_unlisted(serve):
 def test_a_sitemap_listing_the_bare_host_does_not_make_two_home_pages(serve):
     """`https://x.test` and `https://x.test/` are the same page.
 
-    Adding the slashed form as a second subject when the bare one is already
-    there gave one homepage two rows with identical titles — and the metadata
-    rules, correctly, called that a duplicate title. A single-page site was
-    manufacturing its own findings.
+    Across sweeps, not only within one. The first attempt switched the subject
+    to whichever form the sitemap used, so a deep sweep stored the bare form
+    and the next shallow sweep stored the slashed one — one home page as two
+    rows with identical titles, which the metadata rules correctly called a
+    duplicate title. A single-page site was manufacturing its own findings.
     """
     bare = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
         "<url><loc>{base}</loc></url></urlset>"  # no trailing slash
     )
-    base = serve({"/robots.txt": ROBOTS, "/sitemap.xml": bare, "/": page("Home")})
-    project = Project(id="solo", web={"url": base})
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    odd = serve({"/robots.txt": ROBOTS, "/sitemap.xml": bare, "/": page("Home")})
 
-    obs = asyncio.run(CrawlCollector().collect(project))
-    home_subjects = {o.subject for o in obs if o.subject in (base, f"{base}/")}
+    deep = Project(id="p", web={"url": primary, "also": [odd], "deep_sample": 1})
+    shallow = Project(id="p", web={"url": primary, "also": [odd], "deep_sample": 0})
 
-    assert len(home_subjects) == 1, f"one page recorded under two names: {home_subjects}"
+    seen: set[str] = set()
+    facts: dict = {}
+    for project in (deep, shallow, deep):
+        obs = asyncio.run(CrawlCollector().collect(project, prior=facts))
+        for o in obs:
+            facts.setdefault(o.subject, {})[o.key] = o.value
+            if o.subject in (odd, f"{odd}/"):
+                seen.add(o.subject)
+
+    assert seen == {f"{odd}/"}, f"one page recorded under two names across sweeps: {seen}"
+    # And the rules see one home page, not two with the same title.
+    titles = [(u, f.get("title")) for u, f in facts.items() if u.startswith(odd) and f.get("title")]
+    assert len(titles) == 1, f"duplicate home rows: {titles}"
 
 
 def test_a_legacy_page_removed_from_the_sitemap_is_retracted_too(serve):
@@ -1338,3 +1351,28 @@ def test_a_legacy_page_removed_from_the_sitemap_is_retracted_too(serve):
     old = {o.key: o.value for o in obs if o.subject == f"{base}/old"}
 
     assert old.get("discovered_via") == "unlisted"
+
+
+def test_coverage_reads_the_home_page_the_collector_wrote(tmp_path):
+    """A home page returning 500 has to reach the panel.
+
+    Coverage read only the trailing-slash subject while an older collector
+    stored whichever spelling the sitemap used, so such a host lost its
+    homepage status entirely and the chip stayed green on the strength of
+    robots and sitemap alone.
+    """
+    client = coverage_app(
+        tmp_path,
+        ["https://primary.test", "https://odd.test"],
+        [
+            ("primary.test", "robots_txt_status", "200"),
+            ("odd.test", "robots_txt_status", "200"),
+            ("odd.test", "sitemap_status", "200"),
+            # Written under the bare form by an older sweep.
+            ("https://odd.test", "status", "500"),
+        ],
+    )
+
+    hosts = {h["host"]: h for h in client.get("/api/coverage").json()[0]["hosts"]}
+
+    assert hosts["odd.test"]["status"] == "500"

@@ -1565,7 +1565,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     cells = facts.get(host, {})
                     # The home page's own metadata is filed under the URL, not
                     # the host: a canonical belongs to a page.
-                    home = facts.get(url + "/", {})
+                    # The collector names the site root `url + "/"`. The bare
+                    # form is read too, for rows a previous version wrote under
+                    # whichever spelling the sitemap happened to use: without
+                    # it, a home page returning 500 has no status here at all
+                    # and the chip stays green on the strength of robots and
+                    # sitemap alone.
+                    home = facts.get(url + "/") or facts.get(url) or {}
                     hosts.append(
                         {
                             "host": host,

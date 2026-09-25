@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import html as htmllib
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlparse
 
@@ -321,6 +322,21 @@ class CrawlCollector:
         # established. It also follows a sitemap index to the sitemaps it
         # names, which reading the index's own bytes cannot do.
         found = await discover(client, project, site)
+        # One spelling for the site root, everywhere.
+        #
+        # `https://x.test` and `https://x.test/` are the same page and a sitemap
+        # may list either. The first attempt at this switched the subject to
+        # whichever form the sitemap used, which is worse: a deep sweep stored
+        # the bare form and the next shallow sweep stored the slashed one, so
+        # one home page ended up as two rows with identical titles and the
+        # metadata rules — correctly — called that a duplicate title. A
+        # single-page site was manufacturing its own findings.
+        #
+        # Normalising here instead means every sweep, and the coverage panel,
+        # name that page the same way. Only the root: /foo and /foo/ are
+        # genuinely different pages on plenty of servers, while a URL with an
+        # empty path is defined to mean the same as one with "/".
+        found = replace(found, urls=[f"{site}/" if u == site else u for u in found.urls])
         obs.append(ob("urls_discovered", str(len(found.urls))))
         # Recorded every sweep, shallow included.
         #
@@ -340,13 +356,6 @@ class CrawlCollector:
             self._page(client, project, url, sem, via=_via(found, url, no_sitemap, url in prior))
             for url in urls
         ]
-        # `site` and `site + "/"` are the same page, and a sitemap may list
-        # either. Adding the slashed form as a second subject when the bare one
-        # is already there gave one homepage two rows with identical titles —
-        # and the metadata rules, correctly, called that a duplicate title. A
-        # single-page site was manufacturing its own findings.
-        if site in urls:
-            home = site
         if home not in urls:
             pages.append(
                 self._page(
