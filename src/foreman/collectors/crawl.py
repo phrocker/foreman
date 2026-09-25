@@ -158,23 +158,6 @@ def _robots_known(obs: list[Observation]) -> bool:
     return False
 
 
-def _declared_sitemaps(obs: list[Observation]) -> list[str]:
-    """Sitemap locations named by the robots.txt just read.
-
-    Taken from the observation rather than fetched again: _robots has the file
-    and a third request for it per host is three hundred requests a sweep on a
-    portfolio this size, for a byte-identical answer.
-    """
-    for o in obs:
-        if o.key == "robots_txt" and o.value:
-            return [
-                line.split(":", 1)[1].strip()
-                for line in o.value.splitlines()
-                if line.lower().startswith("sitemap:") and ":" in line
-            ]
-    return []
-
-
 class CrawlCollector:
     name = "crawl"
     surface = "web"
@@ -330,8 +313,7 @@ class CrawlCollector:
                 project=project.id, collector=self.name, subject=host, key=key, value=value
             )
 
-        obs = await self._robots(client, project, site)
-        declared = _declared_sitemaps(obs)
+        obs, declared = await self._robots(client, project, site)
         sitemap_obs, sitemap_status = await self._sitemap(client, project, site, declared)
         obs.extend(sitemap_obs)
         # Gone means gone. 404 and 410 are a host saying it has no sitemap,
@@ -621,7 +603,7 @@ class CrawlCollector:
 
     async def _robots(
         self, client: httpx.AsyncClient, project: Project, site: str
-    ) -> list[Observation]:
+    ) -> tuple[list[Observation], list[str]]:
         """robots.txt, verbatim, for one host.
 
         It is one file that can silently cost a site every rendered page — an
@@ -632,6 +614,14 @@ class CrawlCollector:
         """
         host = urlparse(site).netloc
         out: list[Observation] = []
+        # Read from the response rather than from the cell this writes.
+        #
+        # The stored copy is capped at 8,000 characters, and a Sitemap line
+        # past the cutoff was invisible to the measurement while discovery —
+        # which fetches the file itself — crawled it happily. The panel then
+        # reported "no sitemap" for a host whose sitemap was being read on the
+        # same sweep.
+        declared: list[str] = []
         try:
             r = await client.get(f"{site}/robots.txt")
             out.append(
@@ -669,7 +659,11 @@ class CrawlCollector:
                         value=r.text[:8000],
                     )
                 )
-                declared = any(line.lower().startswith("sitemap:") for line in r.text.splitlines())
+                declared = [
+                    line.split(":", 1)[1].strip()
+                    for line in r.text.splitlines()
+                    if line.lower().startswith("sitemap:") and ":" in line
+                ]
                 out.append(
                     Observation(
                         project=project.id,
@@ -689,7 +683,7 @@ class CrawlCollector:
                     value=_why(exc),
                 )
             )
-        return out
+        return out, declared
 
     async def _sitemap(
         self,

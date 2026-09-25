@@ -1790,3 +1790,31 @@ def test_a_failure_message_is_never_empty():
         "ConnectError: nodename nor servname provided"
     )
     assert _why(httpx.ReadTimeout("   ")) == "ReadTimeout"
+
+
+def test_a_sitemap_declared_past_the_robots_excerpt_is_still_measured(serve):
+    """The stored robots.txt is capped at 8,000 characters, and reparsing that
+    copy meant a Sitemap line past the cutoff was invisible to the measurement
+    while discovery — which fetches the file itself — crawled it happily. The
+    panel reported "no sitemap" for a host whose sitemap was being read on the
+    same sweep.
+    """
+    padding = "\n".join(f"Disallow: /section-{i}" for i in range(900))
+    robots = "User-agent: *\nAllow: /\n" + padding + "\nSitemap: {base}/custom.xml\n"
+    assert len(robots) > 8000, "this test needs the declaration past the cutoff"
+
+    base = serve(
+        {
+            "/robots.txt": robots,
+            "/custom.xml": sitemap(["/"]),
+            "/": page("Home"),
+        }
+    )
+    project = Project(id="solo", web={"url": base})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["sitemap_url"] == f"{base}/custom.xml"
+    assert host["sitemap_status"] == "200"
+    assert host["sitemap_declared"] == "true"
+    assert host["urls_discovered"] == "1"
