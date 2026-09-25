@@ -79,7 +79,7 @@ def _canonical(head: str, base: str) -> str | None:
     return urljoin(base, href.group(1)) if href else None
 
 
-def _via(found: Discovery, url: str, no_sitemap: bool) -> str | None:
+def _via(found: Discovery, url: str, no_sitemap: bool, known: bool) -> str | None:
     """Whether a sitemap listed `url`, as discovery itself reads sitemaps.
 
     Measured every sweep rather than remembered, which is the point. The first
@@ -88,17 +88,22 @@ def _via(found: Discovery, url: str, no_sitemap: bool) -> str | None:
     from "sitemap" to "home" — and because the rules read the latest cell, a
     real finding vanished on Tuesday and came back on Thursday with nothing
     about the site having changed. The second matched `<loc>url</loc>` in the
-    raw bytes, which is not how a sitemap is read: whitespace inside the
-    element, or a namespace prefix, is valid and would have been missed.
+    raw bytes, which is not how a sitemap is read.
 
-    Three answers, because there are three states. A sitemap that lists the
-    page. A sitemap that demonstrably does not — read whole and without it,
-    including one that parses and lists nothing at all — or no sitemap on the
-    host to begin with. And a sitemap that could not be read this
-    sweep, where `None` writes nothing and leaves whatever the last sweep
-    established: a 503 is not evidence that a page is unlisted, and treating it
-    as one would suppress every sitemap finding about that host until the next
-    good deep crawl.
+    Four answers, because there are four situations.
+
+    Listed. Demonstrably not listed — a sitemap read whole and without it,
+    including one that parses and lists nothing, or no sitemap on the host to
+    begin with. Unreadable this sweep for a page already on the board, where
+    `None` writes nothing and leaves what is known alone: a 503 is not evidence
+    that a page is unlisted.
+
+    And unreadable this sweep for a page nobody has recorded before, which is
+    "unknown" — written explicitly, because absence has to keep meaning what it
+    meant before this collector existed. Every page observed then came from a
+    sitemap, so the rules read an absent cell as sitemapped; a page first seen
+    on a sweep that could not read the sitemap has no such history, and leaving
+    its cell absent would lend it one.
     """
     if found.from_sitemap and url in found.urls:
         return "sitemap"
@@ -106,7 +111,7 @@ def _via(found: Discovery, url: str, no_sitemap: bool) -> str | None:
     # list it, or the host has none to read.
     if no_sitemap or (found.sitemap_read and found.complete):
         return "home"
-    return None
+    return None if known else "unknown"
 
 
 def _robots_known(obs: list[Observation]) -> bool:
@@ -197,7 +202,10 @@ class CrawlCollector:
             # requests times many hosts.
             sem = asyncio.Semaphore(CONCURRENCY)
             results = await asyncio.gather(
-                *(self._site(client, project, site, site in deep, sem) for site in project.web.urls)
+                *(
+                    self._site(client, project, site, site in deep, sem, prior or {})
+                    for site in project.web.urls
+                )
             )
             for site_obs in results:
                 obs.extend(site_obs)
@@ -269,6 +277,7 @@ class CrawlCollector:
         site: str,
         deep: bool,
         sem: asyncio.Semaphore,
+        prior: Facts,
     ) -> list[Observation]:
         """One host: shallow always, deep when it is this host's turn."""
         assert project.web is not None
@@ -328,10 +337,15 @@ class CrawlCollector:
         # and the primary is always deep — so the one host that never gets the
         # shallow pass was the one that could lose its homepage facts entirely.
         pages = [
-            self._page(client, project, url, sem, via=_via(found, url, no_sitemap)) for url in urls
+            self._page(client, project, url, sem, via=_via(found, url, no_sitemap, url in prior))
+            for url in urls
         ]
         if home not in urls:
-            pages.append(self._page(client, project, home, sem, via=_via(found, home, no_sitemap)))
+            pages.append(
+                self._page(
+                    client, project, home, sem, via=_via(found, home, no_sitemap, home in prior)
+                )
+            )
 
         read = 0
         failed = 0

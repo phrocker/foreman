@@ -708,7 +708,7 @@ def test_a_truncated_discovery_does_not_claim_a_page_is_unlisted(serve):
     }
 
     assert home["status"] == "200", "the home page is still read"
-    assert "discovered_via" not in home, (
+    assert home["discovered_via"] == "unknown", (
         "a truncated list was treated as proof that no sitemap lists this page"
     )
 
@@ -776,7 +776,7 @@ def test_a_sitemap_that_cannot_be_read_does_not_erase_what_is_known(serve):
         server.server_close()
 
     assert home["status"] == "200", "the page itself was still read"
-    assert "discovered_via" not in home, (
+    assert home["discovered_via"] == "unknown", (
         "an unreadable sitemap was treated as proof that nothing is listed in it"
     )
 
@@ -865,7 +865,7 @@ def test_a_rate_limited_sweep_does_not_erase_what_is_known(serve):
         server.shutdown()
         server.server_close()
 
-    assert "discovered_via" not in home, "a 429 was read as proof the host has no sitemap"
+    assert home["discovered_via"] == "unknown", "a 429 was read as proof the host has no sitemap"
 
 
 def test_a_shallow_sweep_notices_a_child_sitemap_that_started_failing(serve):
@@ -916,7 +916,9 @@ def test_an_error_page_served_with_a_200_is_not_an_empty_sitemap(serve):
         if o.subject == f"{lying}/"
     }
 
-    assert "discovered_via" not in home, "an error page was read as a sitemap listing nothing"
+    assert home["discovered_via"] == "unknown", (
+        "an error page was read as a sitemap listing nothing"
+    )
 
 
 def test_one_declared_sitemap_missing_does_not_speak_for_the_others(serve):
@@ -936,7 +938,9 @@ def test_one_declared_sitemap_missing_does_not_speak_for_the_others(serve):
         if o.subject == f"{two}/"
     }
 
-    assert "discovered_via" not in home, "one missing sitemap was taken as proof the host has none"
+    assert home["discovered_via"] == "unknown", (
+        "one missing sitemap was taken as proof the host has none"
+    )
 
 
 def test_an_unreadable_robots_does_not_prove_there_is_no_sitemap(serve):
@@ -977,7 +981,7 @@ def test_an_unreadable_robots_does_not_prove_there_is_no_sitemap(serve):
         server.shutdown()
         server.server_close()
 
-    assert "discovered_via" not in home, (
+    assert home["discovered_via"] == "unknown", (
         "a sweep that could not read robots.txt concluded the host has no sitemap"
     )
 
@@ -1163,3 +1167,53 @@ def test_a_vanished_declared_sitemap_is_not_read_as_having_none(tmp_path):
     )
 
     assert client.get("/api/coverage").json()[0]["degraded"] == 1
+
+
+def test_a_page_already_on_the_board_keeps_its_provenance_through_a_bad_night(serve):
+    """The distinction "unknown" exists to draw.
+
+    A page nobody has recorded before, on a sweep that cannot read the sitemap,
+    has no history and is marked unknown. A page already in the store has one —
+    every page observed before this collector grew a shallow pass came from a
+    sitemap — so its cell is left exactly as it was rather than rewritten by a
+    503.
+    """
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+
+    class Down(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/sitemap.xml":
+                self.send_error(503)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = (
+                (ROBOTS if path == "/robots.txt" else page("Home")).replace("{base}", base).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Down)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    flaky = f"http://127.0.0.1:{server.server_port}"
+    try:
+        project = Project(id="p", web={"url": primary, "also": [flaky], "deep_sample": 0})
+        # A page the store already knows about, with no provenance recorded —
+        # exactly the shape of every page observed before this change.
+        legacy = {f"{flaky}/": {"status": "200", "title": "Home"}}
+        obs = asyncio.run(CrawlCollector().collect(project, prior=legacy))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    home = {o.key: o.value for o in obs if o.subject == f"{flaky}/"}
+    assert "discovered_via" not in home, (
+        "one unreadable sitemap rewrote the provenance of a page that had none, "
+        "which takes its standing findings off the board"
+    )
