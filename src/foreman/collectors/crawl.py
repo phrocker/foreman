@@ -80,6 +80,21 @@ def _canonical(head: str, base: str) -> str | None:
     return urljoin(base, href.group(1)) if href else None
 
 
+def _why(exc: Exception) -> str:
+    """A failure message that is never empty.
+
+    httpx raises timeouts with no message at all, so `str(exc)` is "" — and an
+    empty error cell is read as no error by the coverage panel, by the UI and
+    by the runner's own retraction rule, which tests the value for truth. A
+    homepage that timed out therefore left the host green on its previous
+    status. The type name is always there and is the part that says what
+    happened anyway.
+    """
+    detail = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {detail}" if detail else name
+
+
 def _known(prior: Facts, site: str, url: str) -> bool:
     """Whether this page is already recorded, under either spelling of the root.
 
@@ -671,7 +686,7 @@ class CrawlCollector:
                     collector=self.name,
                     subject=host,
                     key="robots_txt_error",
-                    value=str(exc),
+                    value=_why(exc),
                 )
             )
         return out
@@ -709,7 +724,7 @@ class CrawlCollector:
         try:
             r = await client.get(where)
         except httpx.HTTPError as exc:
-            return [ob("sitemap_url", where), ob("sitemap_error", str(exc))], None
+            return [ob("sitemap_url", where), ob("sitemap_error", _why(exc))], None
 
         out = [
             ob("sitemap_url", where),
@@ -805,7 +820,7 @@ class CrawlCollector:
             try:
                 r = await client.get(url)
             except httpx.HTTPError as exc:
-                out = [ob("fetch_error", str(exc))]
+                out = [ob("fetch_error", _why(exc))]
                 return [ob("discovered_via", via), *out] if via else out
 
             out = [ob("status", str(r.status_code)), ob("fetch_error", None)]

@@ -1773,3 +1773,20 @@ def test_a_deep_crawl_also_knows_the_root_under_its_old_spelling(serve):
 
     assert "unknown" not in via, f"a legacy root was called a page never seen before: {via}"
     assert via and via[-1] == "sitemap", f"the migrated provenance did not survive: {via}"
+
+
+def test_a_failure_message_is_never_empty():
+    """httpx raises timeouts with no message at all, so `str(exc)` is "" — and
+    an empty error cell is read as no error by the coverage panel, by the UI
+    and by the runner's own retraction rule, which tests the value for truth.
+    A homepage that timed out left the host green on its previous status.
+    """
+    import httpx
+
+    from foreman.collectors.crawl import _why
+
+    assert _why(httpx.ReadTimeout("")) == "ReadTimeout"
+    assert _why(httpx.ConnectError("nodename nor servname provided")) == (
+        "ConnectError: nodename nor servname provided"
+    )
+    assert _why(httpx.ReadTimeout("   ")) == "ReadTimeout"
