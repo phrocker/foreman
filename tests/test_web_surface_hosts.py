@@ -58,7 +58,14 @@ def test_the_shipped_configuration_declares_every_county_domain(
     import yaml
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    doc = yaml.safe_load((root / "foreman.yaml").read_text())
+    registry = root / "foreman.yaml"
+    if not registry.exists():
+        # The operator's own registry, which is gitignored: it names real
+        # client projects. This check is about the configuration actually in
+        # use, so in a clean checkout there is nothing to check rather than
+        # something to fail.
+        pytest.skip("no local foreman.yaml; this checks the operator's own registry")
+    doc = yaml.safe_load(registry.read_text())
     project = next(p for p in doc["projects"] if p["id"] == project_id)
 
     surface = WebSurface(**project["web"])

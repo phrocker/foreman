@@ -366,7 +366,14 @@ def test_the_shipped_portfolio_deep_crawls_every_county_domain() -> None:
     import yaml
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    doc = yaml.safe_load((root / "foreman.yaml").read_text())
+    registry = root / "foreman.yaml"
+    if not registry.exists():
+        # The operator's own registry, which is gitignored: it names real
+        # client projects. This check is about the configuration actually in
+        # use, so in a clean checkout there is nothing to check rather than
+        # something to fail.
+        pytest.skip("no local foreman.yaml; this checks the operator's own registry")
+    doc = yaml.safe_load(registry.read_text())
     web = next(p for p in doc["projects"] if p["id"] == "procareedge")["web"]
 
     from foreman.config import WebSurface
@@ -795,3 +802,67 @@ def test_a_host_failing_since_its_last_good_crawl_is_not_still_green(tmp_path):
 
     assert cov["deep"] == 2, "both have been read in full at some point"
     assert cov["degraded"] == 1, "and one has failed every attempt since"
+
+
+def test_a_sitemap_that_lists_nothing_says_so(serve):
+    """An empty urlset that parses is a host stating, definitively, that it
+    lists nothing. Read as "no sitemap found", a page removed from a sitemap
+    kept its old provenance and went on producing sitemap findings about an
+    entry that had been deleted."""
+    empty = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>'
+    )
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    emptied = serve({"/robots.txt": ROBOTS, "/sitemap.xml": empty, "/": page("Home")})
+    project = Project(id="p", web={"url": primary, "also": [emptied], "deep_sample": 0})
+
+    home = {
+        o.key: o.value
+        for o in asyncio.run(CrawlCollector().collect(project))
+        if o.subject == f"{emptied}/"
+    }
+
+    assert home["discovered_via"] == "home"
+
+
+def test_a_rate_limited_sweep_does_not_erase_what_is_known(serve):
+    """404 and 410 are a host saying it has no sitemap. 429 is a host declining
+    to answer tonight, and treating that as proof of absence lets one
+    rate-limited sweep suppress every sitemap finding for the host."""
+
+    class Limited(BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/sitemap.xml":
+                self.send_error(429)
+                return
+            base = f"http://{self.headers['Host']}"
+            body = (
+                (ROBOTS if path == "/robots.txt" else page("Home")).replace("{base}", base).encode()
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    primary = serve({"/robots.txt": ROBOTS, "/sitemap.xml": sitemap(["/"]), "/": page("Operator")})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Limited)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    limited = f"http://127.0.0.1:{server.server_port}"
+    try:
+        project = Project(id="p", web={"url": primary, "also": [limited], "deep_sample": 0})
+        home = {
+            o.key: o.value
+            for o in asyncio.run(CrawlCollector().collect(project))
+            if o.subject == f"{limited}/"
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert "discovered_via" not in home, "a 429 was read as proof the host has no sitemap"

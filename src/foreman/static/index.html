@@ -1822,7 +1822,11 @@ async function renderProjectState() {
  *  across the room.
  */
 function coverageRow(cov) {
-  if (!cov || cov.declared < 2) return "";
+  // Shown for any declared web surface, not only a plural one. A single host
+  // nobody has ever crawled is the same blind spot as twenty-one of them, and
+  // hiding the row for it meant the panel could only report a gap it had
+  // already been built to notice.
+  if (!cov || !cov.declared) return "";
   const hosts = cov.hosts.map((h) => {
     // A host that answered 404 for robots.txt or its sitemap is the finding;
     // one nobody has ever crawled is the coverage gap; one crawled shallowly

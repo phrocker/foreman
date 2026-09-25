@@ -92,8 +92,9 @@ def _via(found: Discovery, url: str, no_sitemap: bool) -> str | None:
     element, or a namespace prefix, is valid and would have been missed.
 
     Three answers, because there are three states. A sitemap that lists the
-    page. A sitemap that demonstrably does not, or no sitemap at all — the
-    page was found some other way. And a sitemap that could not be read this
+    page. A sitemap that demonstrably does not — read whole and without it,
+    including one that parses and lists nothing at all — or no sitemap on the
+    host to begin with. And a sitemap that could not be read this
     sweep, where `None` writes nothing and leaves whatever the last sweep
     established: a 503 is not evidence that a page is unlisted, and treating it
     as one would suppress every sitemap finding about that host until the next
@@ -103,7 +104,7 @@ def _via(found: Discovery, url: str, no_sitemap: bool) -> str | None:
         return "sitemap"
     # Definitively not in a sitemap: either one was read whole and does not
     # list it, or the host has none to read.
-    if no_sitemap or (found.from_sitemap and found.complete):
+    if no_sitemap or (found.sitemap_read and found.complete):
         return "home"
     return None
 
@@ -268,10 +269,12 @@ class CrawlCollector:
             client, project, site, _declared_sitemaps(obs)
         )
         obs.extend(sitemap_obs)
-        # A sitemap that 404s is a host with no sitemap, which is a fact. One
-        # that 503s or times out is a host whose sitemap nobody could read,
-        # which is not.
-        no_sitemap = sitemap_status is not None and 400 <= sitemap_status < 500
+        # Gone means gone. 404 and 410 are a host saying it has no sitemap,
+        # which is a fact about the host. 429 and 403 are a host declining to
+        # answer this sweep, and treating those as proof of absence would let a
+        # rate-limited night overwrite provenance that a good crawl
+        # established.
+        no_sitemap = sitemap_status in (404, 410)
 
         # Discovery on every host, deep or not.
         #

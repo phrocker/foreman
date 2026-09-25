@@ -27,7 +27,14 @@ class Discovery:
     """
 
     urls: list[str]
+    # Whether these URLs came from a sitemap, as opposed to the homepage
+    # fallback a host with no readable sitemap gets.
     from_sitemap: bool
+    # Whether a sitemap was successfully read, which is not the same question.
+    # A sitemap that parses and lists nothing is a host saying, definitively,
+    # that it lists nothing — and a page removed from a sitemap has to stop
+    # being treated as listed in it.
+    sitemap_read: bool = False
     # Whether this is all of them. False when the crawl limit cut the list
     # short, or when a sitemap an index named could not be read: both leave
     # pages nobody has looked at, and a caller that calls the host "read in
@@ -73,26 +80,28 @@ async def discover(
     seen: set[str] = set()
     complete = len(sitemaps) <= 5
     cap = project.web.max_urls
+    read = False
     for i, sm in enumerate(sitemaps[:5]):
         found, whole = await _read_sitemap(client, sm, depth=0)
         complete = complete and whole
+        read = read or whole
         for url in found:
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
         if len(urls) > cap:
             # More URLs than the crawl will look at. Stop fetching, and say so.
-            return Discovery(urls[:cap], from_sitemap=True, complete=False)
+            return Discovery(urls[:cap], from_sitemap=True, complete=False, sitemap_read=True)
         if len(urls) == cap and i + 1 < len(sitemaps[:5]):
             # Exactly full with sitemaps still unread: there may or may not be
             # more, and "may" is not complete.
-            return Discovery(urls, from_sitemap=True, complete=False)
+            return Discovery(urls, from_sitemap=True, complete=False, sitemap_read=True)
     # A sitemap holding exactly max_urls URLs was read whole. Calling that
     # truncated left such a host permanently "shallow only" on the panel,
     # because it could never earn a full-crawl stamp it had actually met.
     if urls:
-        return Discovery(urls, from_sitemap=True, complete=complete)
-    return Discovery([base + "/"], from_sitemap=False, complete=complete)
+        return Discovery(urls, from_sitemap=True, complete=complete, sitemap_read=True)
+    return Discovery([base + "/"], from_sitemap=False, complete=complete, sitemap_read=read)
 
 
 async def _read_sitemap(client: httpx.AsyncClient, url: str, depth: int) -> tuple[list[str], bool]:
