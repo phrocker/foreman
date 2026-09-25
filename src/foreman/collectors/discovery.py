@@ -73,6 +73,12 @@ async def discover(
             ]
     except httpx.HTTPError:
         pass
+    # Whether robots.txt named these, or we are guessing at the conventional
+    # path. It decides what a 404 means: a declared sitemap that is gone is a
+    # gap, exactly like a child an index names and which has vanished, because
+    # something said it should be there. A guess that misses means the host
+    # simply has no sitemap.
+    guessed = not sitemaps
     if not sitemaps:
         sitemaps = [f"{base}/sitemap.xml"]
 
@@ -83,9 +89,10 @@ async def discover(
     read = False
     for i, sm in enumerate(sitemaps[:5]):
         found, state = await _read_sitemap(client, sm, depth=0)
-        # Absent is an answer; unreadable is not. A host with no sitemap has
-        # not been incompletely discovered — there was nothing to discover.
-        complete = complete and state != UNREADABLE
+        # Absent is an answer where we were guessing; where robots.txt named
+        # the file, absent is a gap.
+        ok = state == READ or (state == ABSENT and guessed)
+        complete = complete and ok
         read = read or state == READ
         for url in found:
             if url not in seen:

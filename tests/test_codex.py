@@ -60,9 +60,7 @@ def test_the_web_is_off_unless_the_task_asked_for_it(tmp_path):
     assert "tools.web_search=true" not in c._command(
         task(needs=frozenset({REPO})), schema, answer, None
     )
-    assert "tools.web_search=true" in c._command(
-        task(needs=frozenset({WEB})), schema, answer, None
-    )
+    assert "tools.web_search=true" in c._command(task(needs=frozenset({WEB})), schema, answer, None)
     assert "--search" not in c._command(task(needs=frozenset({WEB})), schema, answer, None)
 
 
@@ -329,9 +327,7 @@ def test_one_event_is_read_on_its_own() -> None:
     from foreman.connectors.codex import _event
 
     steps: list[str] = []
-    cost, tokens = _event(
-        '{"type":"item.command","command":"go test ./..."}', steps.append, None
-    )
+    cost, tokens = _event('{"type":"item.command","command":"go test ./..."}', steps.append, None)
     assert steps == ["go test ./..."]
     assert (cost, tokens) == (0.0, 0)
 

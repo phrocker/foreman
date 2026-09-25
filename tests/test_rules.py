@@ -363,3 +363,35 @@ def test_a_page_observed_before_provenance_existed_still_counts() -> None:
     seo.evaluate({"https://www.test/gone": {"redirect_to": "https://www.test/new"}}, add)
 
     assert ("sitemap_url_redirects", ["https://www.test/gone"]) in found
+
+
+def test_a_page_first_seen_on_a_blind_sweep_is_not_called_sitemapped() -> None:
+    """A missing provenance cell means two things.
+
+    Legacy pages predate the cell and all came from a sitemap. But the crawler
+    also writes nothing when a sweep could not read the sitemap, and a page
+    first seen on such a sweep has no evidence behind it at all — so a noindex
+    homepage became a sitemapped-but-noindex finding about a sitemap nobody had
+    managed to read.
+    """
+    from foreman.rules import seo
+
+    found: list[tuple] = []
+
+    def add(rule, severity, summary, subjects=(), detail=None):
+        found.append((rule, sorted(subjects)))
+
+    seo.evaluate(
+        {
+            # The host said its discovery failed this sweep.
+            "blind.test": {"discovery_complete": "false", "robots_txt_status": "200"},
+            "https://blind.test/": {"status": "200", "meta_robots": "noindex"},
+            # And a host whose discovery was fine, with a legacy page on it.
+            "known.test": {"discovery_complete": "true", "robots_txt_status": "200"},
+            "https://known.test/gone": {"status": "200", "meta_robots": "noindex"},
+        },
+        add,
+    )
+
+    flagged = [subjects for rule, subjects in found if rule == "sitemapped_but_noindex"]
+    assert flagged == [["https://known.test/gone"]]

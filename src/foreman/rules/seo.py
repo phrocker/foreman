@@ -58,18 +58,37 @@ def _metadata(pages: Pages, add: Add) -> None:
 def _sitemapped(pages: Pages) -> Pages:
     """Only the pages a sitemap actually listed.
 
-    The crawler now reads the home page of every host whether or not a sitemap
+    The crawler reads the home page of every host whether or not a sitemap
     mentions it, which is how a host with no sitemap at all gets a canonical
     recorded. Rules that say "this sitemap URL redirects" have to be handed the
     pages a sitemap listed, or an app homepage that is deliberately noindex
     becomes a sitemapped-but-noindex finding about a sitemap that never
     mentioned it.
 
-    A page with no provenance is treated as sitemapped: every page observed
-    before the crawler grew a shallow pass arrived from one, and reading those
-    as homepage-only would take standing findings off the board for a sweep.
+    A page with no provenance is read two ways, because the absence means two
+    things. Every page observed before the crawler grew a shallow pass arrived
+    from a sitemap, so treating those as homepage-only would take standing
+    findings off the board for a sweep. But the crawler also writes nothing
+    when a sweep could not read the sitemap — a 503, a rate limit — and a page
+    first seen on such a sweep has no evidence behind it at all. The host's own
+    `discovery_complete` cell tells them apart.
     """
-    return {u: f for u, f in pages.items() if f.get("discovered_via", "sitemap") == "sitemap"}
+    blind = {host for host, facts in pages.items() if facts.get("discovery_complete") == "false"}
+
+    def listed(url: str, facts: dict[str, str | None]) -> bool:
+        via = facts.get("discovered_via")
+        if via is not None:
+            return via == "sitemap"
+        return _host_of(url) not in blind
+
+    return {u: f for u, f in pages.items() if listed(u, f)}
+
+
+def _host_of(url: str) -> str:
+    """The hostname a page subject belongs to. Page subjects are URLs and host
+    subjects are bare hostnames, so the two sit in one dict and this is what
+    joins a page to what is known about its host."""
+    return url.split("//", 1)[-1].split("/", 1)[0]
 
 
 def _sitemap_hygiene(all_pages: Pages, add: Add) -> None:

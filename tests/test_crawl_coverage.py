@@ -1038,3 +1038,19 @@ def test_a_host_with_no_sitemap_is_not_permanently_degraded(tmp_path):
     )
 
     assert client.get("/api/coverage").json()[0]["degraded"] == 0
+
+
+def test_a_declared_sitemap_that_is_gone_is_a_gap(serve):
+    """robots.txt naming a sitemap that 404s is the same shape as an index
+    naming a child that has vanished: something said it should be there. Only a
+    guess at the conventional path can miss harmlessly."""
+    robots = "User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\nSitemap: {base}/gone.xml\n"
+    base = serve({"/robots.txt": robots, "/sitemap.xml": sitemap(["/"]), "/": page("Home")})
+    project = Project(id="solo", web={"url": base})
+
+    host = by_host(asyncio.run(CrawlCollector().collect(project)))[host_of(base)]
+
+    assert host["discovery_complete"] == "false"
+    assert "deep_crawl_at" not in host, (
+        "full coverage was claimed while a sitemap robots.txt names is missing"
+    )
