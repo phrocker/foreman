@@ -104,6 +104,7 @@ class Store(Protocol):
         self, run_id: int, findings: Iterable[Finding], source: str = "rule"
     ) -> int: ...
     def retire_rule_findings(self, project: str) -> int: ...
+    def retire_findings_about(self, project: str, gone: set[str]) -> int: ...
 
     def finding(self, finding_id: int) -> Record | None: ...
     def open_findings(self, project: str | None = None) -> list[Record]: ...
@@ -529,6 +530,22 @@ def _many(rows: Iterable[sqlite3.Row]) -> list[Record]:
     return [dict(row) for row in rows]
 
 
+def _subject_set(raw: Any) -> set[str]:
+    """A finding's subjects, however the store happened to hold them.
+
+    SQLite keeps the list as a JSON string and shoal keeps it as a list, and a
+    caller comparing one against a set of names should not have to know which.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {raw}
+    if isinstance(raw, (list, tuple, set)):
+        return {str(x) for x in raw}
+    return set()
+
+
 class SqliteStore:
     """SQLite implementation. Single operator, single machine, WAL mode."""
 
@@ -784,6 +801,49 @@ class SqliteStore:
         )
         self._db.commit()
         return cur.rowcount
+
+    def retire_findings_about(self, project: str, gone: set[str]) -> int:
+        """Close findings whose every subject has gone.
+
+        `retire_rule_findings` above gives rule findings an ending: a sweep
+        re-derives them, so one that stops being true stops being raised. Agent
+        findings deliberately escape that — they cost money and come from their
+        own run — which left them with no ending at all. They are raised once
+        and never looked at again.
+
+        An adversarial review of a pull request is the case that matters. It is
+        expensive, it is the best signal on the board, and the moment the pull
+        request merges every objection on it is finished by definition. Nothing
+        said so. Measured on this portfolio: 427 of 591 open findings were
+        review objections against twenty-five pull requests, every one of them
+        merged or closed. Seven in ten items on the board were ghosts, and no
+        amount of ranking rescues a queue like that.
+
+        Resolved without an outcome, which is the whole point of the
+        distinction. `rule_precision` counts only findings whose outcome is set,
+        so a finding that ended because its subject vanished never enters the
+        score: nobody judged it, and recording it as acted or dismissed would be
+        inventing a decision.
+
+        Every subject, not any. A finding naming two subjects where one survives
+        is still about something that exists.
+        """
+        if not gone:
+            return 0
+        closing = [
+            row["id"]
+            for row in self.open_findings(project)
+            if _subject_set(row["subjects"]) and _subject_set(row["subjects"]) <= gone
+        ]
+        if not closing:
+            return 0
+        now = utcnow()
+        self._db.executemany(
+            "UPDATE findings SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL",
+            [(now, i) for i in closing],
+        )
+        self._db.commit()
+        return len(closing)
 
     def finding(self, finding_id: int) -> Record | None:
         return _one(

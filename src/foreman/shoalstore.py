@@ -569,6 +569,31 @@ class ShoalStore:
         self._write([self._put(row.encode(), "finding", {"resolved_at": now}) for row in retired])
         return len(retired)
 
+    def retire_findings_about(self, project: str, gone: set[str]) -> int:
+        """Close findings whose every subject has gone. See the SQLite twin.
+
+        Resolved rather than deleted, for the reason retire_rule_findings
+        gives: in a cell store the history is the point, and "this was open
+        until the pull request merged" is worth keeping.
+        """
+        if not gone:
+            return 0
+        from .store import _subject_set
+
+        closing = [
+            row
+            for row, record in self._entities("ent:finding|").items()
+            if record.get("project") == project
+            and not record.get("resolved_at")
+            and (subjects := _subject_set(record.get("subjects")))
+            and subjects <= gone
+        ]
+        if not closing:
+            return 0
+        now = utcnow()
+        self._write([self._put(row.encode(), "finding", {"resolved_at": now}) for row in closing])
+        return len(closing)
+
     def dismissals(self, project: str | None = None) -> list[Record]:
         rows = [
             r

@@ -78,8 +78,24 @@ async def collect_project(
         # reported, which is why a collector that raised reaches neither — the
         # `continue` above is the whole guard.
         observations = reported + _cleared_errors(store, project.id, name, reported)
-        observations += _retracted_orphans(store, project.id, collector, reported)
+        orphans = _retracted_orphans(store, project.id, collector, reported)
+        observations += orphans
         total += store.record(run_id, observations)
+
+        # A subject that has gone takes its findings with it.
+        #
+        # The retraction above stops the rules judging cells that describe
+        # something which no longer exists. The findings already raised about
+        # it are the same mistake one layer up, and only rule findings had an
+        # answer for it: they are re-derived each sweep, so one that stops
+        # being true stops being raised. Agent findings never are, so a review
+        # of a pull request stayed on the board long after the pull request
+        # merged — 427 of 591 open findings, on this portfolio, about
+        # twenty-five pull requests that were all closed.
+        if gone := {o.subject for o in orphans}:
+            if closed := store.retire_findings_about(project.id, gone):
+                log(f"{project.id}/{name}: closed {closed} finding(s) whose subject has gone")
+
         store.finish_run(run_id, ok=True)
         log(f"{project.id}/{name}: {len(observations)} observations")
     return total

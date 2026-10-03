@@ -1158,3 +1158,69 @@ def test_a_thin_report_is_still_a_report(store):
     row = store.report(report_id)
     assert json.loads(row["highlights"]) == []
     assert row["cost_usd"] is None
+
+
+def test_a_finding_whose_subject_has_gone_is_closed(store):
+    """An agent finding had no ending.
+
+    Rule findings are re-derived each sweep, so one that stops being true stops
+    being raised. Agent findings escape that deliberately — they cost money —
+    which left a review of a pull request on the board long after the pull
+    request merged.
+    """
+    run = store.start_run("p", "review")
+    store.record_findings(
+        run, [_finding(rule="review/correctness", subjects=["pull:o/r#1"])], source="agent"
+    )
+
+    assert len(store.open_findings("p")) == 1
+    assert store.retire_findings_about("p", {"pull:o/r#1"}) == 1
+    assert store.open_findings("p") == []
+
+
+def test_a_finding_is_kept_while_any_subject_survives(store):
+    """Every subject, not any. A finding naming two things where one still
+    exists is still about something that exists."""
+    run = store.start_run("p", "review")
+    store.record_findings(
+        run, [_finding(rule="review/blast", subjects=["pull:o/r#1", "pull:o/r#2"])], source="agent"
+    )
+
+    assert store.retire_findings_about("p", {"pull:o/r#1"}) == 0
+    assert len(store.open_findings("p")) == 1
+
+
+def test_closing_a_finding_this_way_records_no_decision(store):
+    """The distinction the whole thing turns on. `rule_precision` counts only
+    findings whose outcome is set, so one that ended because its subject
+    vanished must never enter the score: nobody judged it, and recording it as
+    acted or dismissed would be inventing a decision."""
+    run = store.start_run("p", "review")
+    store.record_findings(
+        run, [_finding(rule="review/scope", subjects=["pull:o/r#9"])], source="agent"
+    )
+    store.retire_findings_about("p", {"pull:o/r#9"})
+
+    assert store.rule_precision() == []
+
+
+def test_another_projects_findings_are_untouched(store):
+    run = store.start_run("other", "review")
+    store.record_findings(
+        run,
+        [_finding(project="other", rule="review/scope", subjects=["pull:o/r#1"])],
+        source="agent",
+    )
+
+    assert store.retire_findings_about("p", {"pull:o/r#1"}) == 0
+    assert len(store.open_findings("other")) == 1
+
+
+def test_retiring_about_nothing_closes_nothing(store):
+    run = store.start_run("p", "review")
+    store.record_findings(
+        run, [_finding(rule="review/scope", subjects=["pull:o/r#1"])], source="agent"
+    )
+
+    assert store.retire_findings_about("p", set()) == 0
+    assert len(store.open_findings("p")) == 1
