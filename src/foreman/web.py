@@ -158,6 +158,60 @@ def _has_no_sitemap(host: dict[str, Any]) -> bool:
     return host.get("sitemap") in ("404", "410") and host.get("discovery_complete") != "false"
 
 
+# How many rows one project may contribute before it yields the floor.
+PER_PROJECT = 3
+
+
+def _capped(rows: list[dict[str, Any]], limit: int = PER_PROJECT) -> list[dict[str, Any]]:
+    """Interleave by project so the loudest cannot own the screen.
+
+    Twelve projects and one global sort is a leaderboard, not a queue: the
+    project with four hundred findings takes every row and the other eleven are
+    invisible, which is the state this whole view exists to end. Each project
+    offers its worst few, then stands aside, and the rounds repeat — so the
+    eleventh project's only problem is on screen above the loud one's fourth.
+    """
+    by_project: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_project.setdefault(row.get("project") or "", []).append(row)
+    out: list[dict[str, Any]] = []
+    for depth in range(limit):
+        for project in sorted(by_project):
+            if depth < len(by_project[project]):
+                out.append(by_project[project][depth])
+    # Worst first, and stable — so the ordering within a grade is still the
+    # round-robin above and no project owns the top of the list. Interleaving
+    # alone put a project's sitemap warning above another's critical advisory,
+    # which is fair in the wrong dimension.
+    rank = {"critical": 0, "serious": 1, "warning": 2}
+    return sorted(out, key=lambda r: rank.get(str(r.get("grade")), 3))
+
+
+def _noisy(findings: list[dict[str, Any]], floor: int = 20) -> list[dict[str, Any]]:
+    """Projects loud enough that the noise is itself the thing to decide.
+
+    A finding that recurs every sweep stops registering — it becomes furniture,
+    permanently present and never prioritised. Showing the hundredth copy does
+    not help; showing that there are a hundred, once, does. The decision this
+    offers is not "fix these" but "fix the generator, or suppress the rule, or
+    accept it and stop paying for it".
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for f in findings:
+        key = (str(f.get("project") or ""), str(f.get("rule") or ""))
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {
+            "project": project,
+            "rule": rule,
+            "count": n,
+            "why": "one rule, this many times — decide about the rule, not the instances",
+        }
+        for (project, rule), n in sorted(counts.items(), key=lambda kv: -kv[1])
+        if n >= floor
+    ]
+
+
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
     db = db_path
@@ -1524,6 +1578,171 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # has a tab for them. What belongs here is that they exist, because
             # an agent dispatched at this project is reading them.
             "known": len([line for line in known.splitlines() if line.startswith("- ")]),
+        }
+
+    # What a finding actually costs, in the reader's terms rather than the
+    # rule's. A board that says "vulnerable_dependency, high" and "seo-page/
+    # no-internal-links, high" gives them the same weight, and they are not the
+    # same kind of trouble at all. The consequence is the "so what" — the part
+    # a list of rule names has never once answered.
+    CONSEQUENCE = {
+        "vulnerable_dependency": ("exploitable in production", "critical"),
+        "default_branch_broken": ("nothing can merge", "critical"),
+        "site_not_answering": ("the site is down", "critical"),
+        "site_certificate_wrong_name": ("browsers will refuse it", "critical"),
+        "certificate_expiring": ("browsers will refuse it, soon", "serious"),
+        "domain_not_delegated": ("the domain serves nothing", "serious"),
+        "missing_security_header": ("weaker than it should be", "warning"),
+        "unreliable_ci": ("the gates cannot be trusted", "serious"),
+        "stale_review_queue": ("work is stalled waiting on people", "serious"),
+        "alert_backlog": ("too many to triage one at a time", "warning"),
+    }
+    # Not findings about a thing being wrong — findings about nobody looking.
+    # A project whose alerts cannot be read has no findings and renders green,
+    # which is the most dangerous square on any board.
+    BLIND = {
+        "dependabot_unavailable": "dependency alerts cannot be read",
+        "dependabot_not_configured": "nothing opens dependency updates",
+        "cloud_surface_partly_read": "part of the cloud account was unreadable",
+    }
+
+    def _consequence(rule: str, severity: str) -> tuple[str, str]:
+        if rule in CONSEQUENCE:
+            return CONSEQUENCE[rule]
+        if rule.startswith("seo-page/") or rule.startswith("seo/"):
+            return ("search visibility", "warning" if severity != "high" else "serious")
+        return ("", {"high": "serious", "medium": "warning"}.get(severity, "good"))
+
+    @app.get("/api/attention")
+    def attention() -> dict[str, Any]:
+        """The two questions worth opening this for: what is on fire, and what
+        is waiting on me.
+
+        Everything else on this dashboard is inventory. This is the only view
+        that answers a question rather than listing a table, and it exists
+        because twelve projects times six tabs is not a portfolio view, it is
+        homework.
+
+        Capped per project. `open_pulls` already does this for one case, with a
+        comment that reads like the specification: Accumulo has 108 open pull
+        requests and "listing them unasked buried the nine that actually wait on
+        somebody here". The same is true of findings, and the fix should not
+        have to be hand-written per project — so a noisy neighbour contributes
+        its worst few and then yields the floor, with the fact that it is noisy
+        shown as its own row rather than as a hundred of them.
+        """
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            findings = [dict(r) for r in s.open_findings()]
+            actions = [dict(r) for r in s.pending_actions()]
+            pulls = open_pulls(s, registry)
+            swept = {t.id: (s.sweep_times(t.id, limit=1) or [None])[0] for t in registry.active}
+        finally:
+            s.close()
+
+        fire: list[dict[str, Any]] = []
+        for f in findings:
+            rule, sev = str(f["rule"]), str(f["severity"])
+            if rule in BLIND:
+                continue  # listed separately: not wrong, unwatched
+            if sev != "high":
+                continue
+            why, grade = _consequence(rule, sev)
+            fire.append(
+                {
+                    "project": f.get("project") or "",
+                    "title": f.get("summary") or rule,
+                    "why": why,
+                    "grade": grade,
+                    "rule": rule,
+                    "found_at": f.get("found_at"),
+                    "id": f.get("id"),
+                }
+            )
+
+        # Collapsed by reason rather than listed per project. Eight rows saying
+        # "part of the cloud account was unreadable" is not eight things to
+        # know, it is one thing about eight projects — and listing them pushed
+        # every actual fire below the fold, which is the disappearance this
+        # column exists to prevent.
+        unwatched: dict[str, list[str]] = {}
+        for f in findings:
+            if (rule := str(f["rule"])) in BLIND:
+                unwatched.setdefault(BLIND[rule], []).append(str(f.get("project") or ""))
+        blind = [
+            {
+                "project": projects[0] if len(projects) == 1 else f"{len(projects)} projects",
+                "title": title,
+                "why": ", ".join(sorted(set(projects)))
+                if len(projects) > 1
+                else "unmonitored, which reads as clean",
+                "grade": "serious",
+                "rule": "",
+            }
+            for title, projects in sorted(unwatched.items(), key=lambda kv: -len(kv[1]))
+        ]
+        # A project nobody has swept is the same blindness by another route, and
+        # it is the one nothing else on this page can show: there is no finding
+        # to render, because nothing ran to raise one.
+        if never := sorted(p for p, last in swept.items() if last is None):
+            blind.append(
+                {
+                    "project": never[0] if len(never) == 1 else f"{len(never)} projects",
+                    "title": "never swept",
+                    "why": ", ".join(never) if len(never) > 1 else "no collector has ever run here",
+                    "grade": "serious",
+                    "rule": "",
+                }
+            )
+
+        blocked: list[dict[str, Any]] = []
+        for a in actions:
+            # Four rows reading "add_security_header" with nothing to tell them
+            # apart is a list that has to be clicked to be read. The statement
+            # is the written form; the parameters are what make one of them
+            # different from the next.
+            detail = ""
+            try:
+                params = json.loads(a.get("params") or "{}")
+                detail = ", ".join(f"{k}={v}" for k, v in sorted(params.items()) if v)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                detail = ""
+            blocked.append(
+                {
+                    "project": a.get("project") or "",
+                    "title": str(a.get("verb") or "action").replace("_", " "),
+                    "why": detail or "waiting for your approval",
+                    "where": "",
+                    "id": a.get("id"),
+                }
+            )
+        for p in pulls:
+            threads = int(p.get("threads_open") or 0)
+            if threads:
+                blocked.append(
+                    {
+                        "project": p.get("project") or "",
+                        "title": p.get("title") or p.get("subject") or "",
+                        "why": f"{threads} review comment(s) unanswered",
+                        "where": p.get("url") or "",
+                    }
+                )
+            elif p.get("blocking"):
+                blocked.append(
+                    {
+                        "project": p.get("project") or "",
+                        "title": p.get("title") or p.get("subject") or "",
+                        "why": "blocked",
+                        "where": p.get("url") or "",
+                    }
+                )
+
+        return {
+            "fire": _capped(fire),
+            "blind": blind,
+            "blocked": _capped(blocked),
+            "noisy": _noisy(findings),
         }
 
     @app.get("/api/coverage")

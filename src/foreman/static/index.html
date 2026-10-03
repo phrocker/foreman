@@ -363,6 +363,34 @@
   .pstate-row { display: flex; gap: 12px; align-items: baseline; padding: 3px 0; }
   .pstate-label { color: var(--text-3); min-width: 8.5em; font-size: 0.9em; }
 
+  /* Attention: the two questions this page is opened for. Everything below it
+     is inventory; this is the only part that answers something. */
+  .att { display: grid; gap: 14px; margin-bottom: 18px; }
+  @media (min-width: 70rem) { .att { grid-template-columns: 1fr 1fr; } }
+  .att-col { border: 1px solid var(--border-firm); border-radius: var(--radius);
+    background: var(--surface); padding: 12px 14px; }
+  .att-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .att-title { font-size: 0.95em; font-weight: 600; letter-spacing: -0.01em; }
+  .att-sub { color: var(--text-3); font-size: 0.82em; }
+  .att-row { display: flex; gap: 9px; align-items: baseline; padding: 6px 0;
+    border-top: 1px solid var(--border); }
+  .att-row:first-of-type { border-top: none; }
+  /* Grade is never colour alone: a glyph and a word carry it, and the colour
+     agrees with them. Status hues are reserved and never used for anything
+     that is not a state. */
+  .att-grade { flex: none; font-size: 0.72em; text-transform: uppercase;
+    letter-spacing: 0.05em; font-weight: 600; min-width: 5.6em; }
+  .att-grade.critical { color: var(--high); }
+  .att-grade.serious  { color: var(--medium); }
+  .att-grade.warning  { color: var(--low); }
+  .att-proj { flex: none; font: 11.5px ui-monospace, Menlo, monospace; color: var(--text-2);
+    background: var(--surface-alt); border-radius: 5px; padding: 1px 6px; }
+  .att-what { flex: 1 1 auto; min-width: 0; }
+  .att-why { color: var(--text-3); font-size: 0.86em; }
+  .att-empty { color: var(--text-3); font-size: 0.88em; padding: 6px 0; }
+  .att-noisy { margin-top: 10px; border-top: 1px dashed var(--border-firm); padding-top: 8px;
+    color: var(--text-2); font-size: 0.86em; }
+
   /* Crawl coverage. A surface is plural, and the panel that reported it as one
      host is the reason a portfolio went eleven weeks with no robots.txt. */
   .cov-grid { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -662,6 +690,8 @@
   <div class="tiles" id="tiles"></div>
   <div id="log" class="log" hidden></div>
 
+  <section id="attention"></section>
+
   <section>
     <h2>Projects</h2>
     <div class="panel" id="projectRows"></div>
@@ -829,7 +859,7 @@ const SEV = {
   low:    { glyph: "●", label: "Low" },
 };
 const state = {
-  findings: [], overview: null, actions: [], drift: [], precision: [], history: [],
+  findings: [], overview: null, actions: [], drift: [], precision: [], history: [], attention: null,
   connectors: [], skills: [], memories: [], settings: null, plans: [], reports: [],
   pulls: [], issues: [], activity: null, signals: [], subjects: [], next: [],
   declared: [],
@@ -925,10 +955,11 @@ let stale = [];
 
 async function load() {
   stale = [];
-  const [overview, findings, actions, drift, precision, history, connectors, skills, memories,
+  const [attention, overview, findings, actions, drift, precision, history, connectors, skills, memories,
          settings, plans, reports, declared, pulls, activity, signals, issues,
          subjects, next] =
     await Promise.all([
+    fetchPart("/api/attention", null),
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
     fetchPart("/api/actions", []),
@@ -950,7 +981,7 @@ async function load() {
     fetchPart("/api/next", []),
   ]);
   Object.assign(state, {
-    overview, findings, actions, drift, precision, history,
+    attention, overview, findings, actions, drift, precision, history,
     connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
     signals, issues, subjects, next,
   });
@@ -967,7 +998,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["nextUp", renderNext], ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
+    ["attention", renderAttention], ["nextUp", renderNext], ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -1709,6 +1740,65 @@ function siblingsOf(f) {
  *  "what should I do next" was answered by reading across six tabs. The reason
  *  travels with each step so that when the ordering is wrong — and it will be —
  *  you can see which rule was wrong rather than which symptom annoyed you. */
+/** The two questions worth opening this page for.
+ *
+ *  "What is on fire" and "what is waiting on me" — the operator's own words,
+ *  and between them they cover why anybody opens a portfolio dashboard. Drift
+ *  is not a third question: a number heading the wrong way is a fire that has
+ *  not started yet, and it belongs in the same column.
+ *
+ *  Grades carry a word as well as a colour. A reader who cannot separate the
+ *  reds from the ambers still reads "CRITICAL", and the colour only agrees
+ *  with what the text already said.
+ */
+function renderAttention() {
+  const d = state.attention;
+  const el = $("attention");
+  if (!el || !d) return;
+
+  const row = (r) => `<div class="att-row">
+      ${r.grade ? `<span class="att-grade ${esc(r.grade)}">${esc(r.grade)}</span>` : ""}
+      <span class="att-proj">${esc(r.project || "—")}</span>
+      <span class="att-what">${
+        r.where ? `<a href="${esc(r.where)}" target="_blank" rel="noopener">${esc(r.title)}</a>`
+                : esc(r.title)
+      }${r.why ? ` <span class="att-why">— ${esc(r.why)}</span>` : ""}</span>
+    </div>`;
+
+  // Blind spots go above the fires, not after them. A project whose alerts
+  // cannot be read has no findings and renders green everywhere else on this
+  // page, which is the most dangerous square on any board — unmonitored is not
+  // clean, and the one thing it must not look like is clean. Appending them
+  // put every one below the fold, which is the same disappearance by a nicer
+  // route.
+  const unwatched = d.blind.length
+    ? `<div class="att-sub" style="margin:2px 0 4px">Not watched — no finding here means nothing looked</div>`
+      + d.blind.map(row).join("")
+      + `<div class="att-sub" style="margin:10px 0 4px">Burning</div>`
+    : "";
+  const noisy = (d.noisy || []).map((n) =>
+    `<div class="att-noisy">${esc(n.project)} · <code>${esc(n.rule)}</code> ×${n.count}
+      — ${esc(n.why)}</div>`).join("");
+
+  el.innerHTML = `<div class="att">
+    <div class="att-col">
+      <div class="att-head"><span class="att-title">On fire</span>
+        <span class="att-sub">${d.blind.length} unwatched · ${d.fire.length} burning
+          · worst few per project</span></div>
+      ${unwatched}${d.fire.length ? d.fire.map(row).join("")
+        : `<div class="att-empty">Nothing burning.</div>`}
+      ${noisy}
+    </div>
+    <div class="att-col">
+      <div class="att-head"><span class="att-title">Waiting on you</span>
+        <span class="att-sub">${d.blocked.length || "nothing"} ${
+          d.blocked.length === 1 ? "decision" : "decisions"}</span></div>
+      ${d.blocked.length ? d.blocked.map(row).join("")
+        : `<div class="att-empty">Nothing is blocked on a decision from you.</div>`}
+    </div>
+  </div>`;
+}
+
 function renderNext() {
   const panel = $("nextUp");
   const steps = (state.next || []).filter((s) => !state.project || !s.project || s.project === state.project);
