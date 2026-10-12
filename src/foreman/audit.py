@@ -177,7 +177,7 @@ async def run_audit(
     # count as already known and every one would look like a duplicate.
     since = store.last_run_time(project.id, f"audit:{skill}")
     already = {
-        _fingerprint(r["project"], r["rule"], json.loads(r["subjects"]))
+        _fingerprint(r["project"], r["rule"], json.loads(r["subjects"] or "[]"))
         for r in store.open_findings(project.id)
     }
     run_id = store.start_run(project.id, f"audit:{skill}")

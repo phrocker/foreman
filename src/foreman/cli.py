@@ -156,7 +156,7 @@ def status(
             row["project"],
             f"[{style}]{row['severity']}[/]",
             row["summary"],
-            str(len(json.loads(row["subjects"]))),
+            str(len(json.loads(row["subjects"] or "[]"))),
             f"[dim]{standing}[/]" if standing == "unmeasured" else standing,
         )
     console.print(table)

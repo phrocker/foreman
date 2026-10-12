@@ -464,7 +464,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             if severity and row["severity"] != severity:
                 continue
             item = dict(row)
-            item["subjects"] = json.loads(row["subjects"])
+            item["subjects"] = json.loads(row["subjects"] or "[]")
             item["precision"] = precision_label(row, scores)
             item["also_on"] = len(elsewhere.get(row["rule"], set()) - {row["project"]})
             out.append(item)
@@ -485,7 +485,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         if row is None:
             raise HTTPException(404, "no such finding")
         item = dict(row)
-        item["subjects"] = json.loads(row["subjects"])
+        item["subjects"] = json.loads(row["subjects"] or "[]")
         return item
 
     def _decorate(store: Store, row: Any, registry) -> dict[str, Any]:

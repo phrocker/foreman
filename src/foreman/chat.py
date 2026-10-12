@@ -328,7 +328,7 @@ def portfolio_state(store: Store, registry: Registry) -> str:
     findings = store.open_findings()
     lines.append(f"\n### Open findings ({len(findings)})")
     for row in findings:
-        subjects = json.loads(row["subjects"])
+        subjects = json.loads(row["subjects"] or "[]")
         where = f" [{len(subjects)} subjects]" if subjects else ""
         lines.append(
             f"- #{row['id']} {row['severity']} {row['project']} {row['rule']}: "

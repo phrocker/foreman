@@ -24,6 +24,7 @@ from typing import Any, Protocol, runtime_checkable
 from .graph import (
     HAS_PHASE,
     SUPERSEDES,
+    canonical,
     edges_for,
     grounding_edges,
     memory_edges,
@@ -1403,7 +1404,7 @@ class SqliteStore:
     # --- graph ------------------------------------------------------------
 
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int:
-        rows = list(edges)
+        rows = [(canonical(a), r, canonical(b)) for a, r, b in edges]
         if not rows:
             return 0
         self._db.executemany(
@@ -1443,6 +1444,7 @@ class SqliteStore:
         hop and the two have to agree. Anchors are excluded from the result:
         "what can I reach from here" should not include here.
         """
+        sources = [canonical(s) for s in sources]
         seen: set[str] = set(sources)
         frontier = list(sources)
         found: set[str] = set()

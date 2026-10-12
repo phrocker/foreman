@@ -114,6 +114,21 @@ def node(kind: str, key: str | int) -> str:
     return f"{kind}|{key}"
 
 
+def canonical(node_id: str) -> str:
+    """The one spelling of a node id the stores key by.
+
+    `node("finding", 1612)` pads to twelve digits; a model asked to name what
+    a memory is about writes `finding|1612`. Both mean one entity, and an edge
+    written under the second spelling created a second, empty row that read
+    back with every field None — so every numeric key is padded here, once,
+    on the way into any store.
+    """
+    kind, sep, key = node_id.partition("|")
+    if sep and key.isdigit():
+        return f"{kind}|{int(key):0{ID_WIDTH}d}"
+    return node_id
+
+
 def kind_of(node_id: str) -> str:
     return node_id.split("|", 1)[0]
 

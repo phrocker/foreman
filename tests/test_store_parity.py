@@ -673,8 +673,8 @@ def test_neighbours_of_nothing_is_nothing(store):
 
 
 def test_several_anchors_are_unioned(store):
-    store.relate([("project|a", SEEN_ON, "x|1"), ("project|b", SEEN_ON, "x|2")])
-    assert store.neighbors(["project|a", "project|b"], [SEEN_ON]) == ["x|1", "x|2"]
+    store.relate([("project|a", SEEN_ON, "x|one"), ("project|b", SEEN_ON, "x|two")])
+    assert store.neighbors(["project|a", "project|b"], [SEEN_ON]) == ["x|one", "x|two"]
 
 
 def test_relink_recovers_findings_recorded_before_the_graph_existed(store):
@@ -1284,3 +1284,27 @@ def test_which_finding_keys_were_on_the_books_before_a_moment(store):
     # Resolving it does not erase that it was once found.
     store.retire_rule_findings("a")
     assert store.finding_keys_before(far_future) == {("a", "r1", '["s"]')}
+
+
+def test_an_edge_written_with_an_unpadded_id_lands_on_the_entity(store):
+    """A model names a finding `finding|1612`; the store keys it
+    `finding|000000001612`. Relating the former must not create a second,
+    empty entity that reads back with every field None — which is how the
+    findings page returned 500 the first time somebody asked the chat to
+    remember something about a finding."""
+    run = store.start_run("a", "crawl")
+    store.record_findings(
+        run,
+        [Finding(project="a", rule="r1", severity=Severity.HIGH, summary="x", subjects=["s"])],
+    )
+    (row,) = store.open_findings()
+    fid = int(row["id"])
+
+    store.relate([(f"finding|{fid}", REMEMBERS, "memory|7")])
+
+    rows = store.open_findings()
+    assert len(rows) == 1
+    assert rows[0]["subjects"] == '["s"]'
+    # And the neighbour comes back in the one spelling, however it was named.
+    assert store.neighbors([node("finding", fid)], [REMEMBERS]) == [node("memory", 7)]
+    assert store.neighbors([f"finding|{fid}"], [REMEMBERS]) == [node("memory", 7)]

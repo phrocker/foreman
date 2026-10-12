@@ -70,6 +70,7 @@ from .graph import (
     ID_WIDTH,
     SEP,
     SUPERSEDES,
+    canonical,
     edges_for,
     grounding_edges,
     kind_of,
@@ -300,7 +301,10 @@ class ShoalStore:
         defaults = dict.fromkeys(FIELDS.get(kind, ()))
         out: dict[str, Record] = {}
         for cell in self._cells(prefix, as_of):
-            row = cell.row.decode()
+            # Folded by canonical id, so a row written under an unpadded
+            # spelling (see graph.canonical) joins its entity rather than
+            # reading back as a second one with every field None.
+            row = "ent:" + canonical(cell.row.decode().removeprefix("ent:"))
             record = out.setdefault(row, dict(defaults))
             record[cell.column_qualifier.decode()] = cell.value.decode() or None
         for row, record in out.items():
@@ -1177,7 +1181,7 @@ class ShoalStore:
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int:
         by_row: dict[bytes, list[pb.Entry]] = {}
         count = 0
-        for source, relationship, target in edges:
+        for source, relationship, target in ((canonical(a), r, canonical(b)) for a, r, b in edges):
             count += 1
             by_row.setdefault(f"ent:{source}".encode(), []).append(
                 pb.Entry(
@@ -1230,7 +1234,7 @@ class ShoalStore:
         request = pb.ScanRequest(
             table=self.table,
             edge_expand=pb.EdgeExpand(
-                anchor_rows=[f"ent:{s}".encode() for s in sources],
+                anchor_rows=[f"ent:{canonical(s)}".encode() for s in sources],
                 edge_cf=EDGE_CF.encode(),
                 edge_field="qualifier",
                 field_sep=SEP.encode(),
@@ -1244,7 +1248,7 @@ class ShoalStore:
             for resp in self._stub.Scan(request)
             for cell in resp.cells
         }
-        return sorted(reached - set(sources))
+        return sorted(reached - {canonical(s) for s in sources})
 
     # --- history -----------------------------------------------------------
 
