@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Callable, Sequence
 
-from . import plans
+from . import commitments, plans
 from .actions import OpNotApplicable, Stale, landed_at, propose, rehydrate
 from .actions import apply as apply_patch
 from .actions.sagform import policy_allows
@@ -295,6 +295,11 @@ def check_all(
         suppressed = len(findings) - len(kept)
         note = f", {suppressed} dismissed earlier" if suppressed else ""
         log(f"{target.id}: {len(kept)} finding(s){note}")
+    # Last, over everything: what you said you would do is judged by the same
+    # facts, and the morning after the work lands it should be marked kept
+    # without anybody having to say so.
+    if settled := commitments.settle(store, log=log):
+        log(f"{settled} commitment(s) kept")
     return total
 
 

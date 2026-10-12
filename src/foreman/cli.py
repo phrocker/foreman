@@ -18,6 +18,7 @@ from .audit import DEFAULT_SKILL, STALE_AFTER_DAYS, AuditError, run_audit, selec
 from .budget import Budget
 from .chat import ChatError, ask
 from .collectors import COLLECTORS
+from .commitments import from_row, keep_by_hand, parse_due, settle, what_you_said
 from .config import DEFAULT_REGISTRY, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
@@ -777,6 +778,106 @@ def plan_new(
             store.add_phase(plan_id, position, name, gate, params)
     console.print(f"[bold]plan {plan_id}[/] — {goal}")
     console.print(f"[dim]{len(subject or [])} subject(s), {len(phase)} phase(s)[/]")
+
+
+@app.command()
+def commit(
+    said: str = typer.Argument(..., help="What you will do, in your words."),
+    project: str = typer.Option(..., "--project", "-P"),
+    due: str = typer.Option(..., "--due", "-d", help="YYYY-MM-DD."),
+    subject: str = typer.Option(
+        None,
+        "--subject",
+        "-s",
+        help="What it is about: a URL, a host, a repo. Default: the project.",
+    ),
+    gate: str = typer.Option(
+        "confirmed", "--gate", "-g", help="How Foreman will know. Default: you tick it."
+    ),
+    param: list[str] = typer.Option(None, "--param", help="k=v for the gate, repeatable."),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Say what you will do, and by when. Foreman asks on the day after."""
+    if gate not in GATES:
+        raise typer.BadParameter(f"unknown gate {gate!r} (have: {', '.join(GATES)})")
+    try:
+        when = parse_due(due)
+    except ValueError as exc:
+        raise typer.BadParameter(f"--due must be a date, YYYY-MM-DD: {due!r}") from exc
+    reg = load_registry(registry)
+    if reg.get(project) is None:
+        raise typer.BadParameter(f"no project {project!r}")
+    params = dict(pair.split("=", 1) for pair in (param or []) if "=" in pair)
+    with open_store(db, registry=registry) as store:
+        cid = store.commit(project, subject or f"project:{project}", said, when, gate, params)
+    console.print(f"[bold]commitment {cid}[/] — {said}")
+    how = "you will tick it" if gate == "confirmed" else GATES[gate].summary
+    console.print(f"[dim]{project} · due {when} · kept when {how}[/]")
+
+
+@app.command(name="commitments")
+def commitments_cmd(
+    everything: bool = typer.Option(False, "--all", help="Include dropped and long-kept."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """What you said you would do, and where each stands."""
+    with open_store(db) as store:
+        settle(store)
+        rows = what_you_said(store, everything=everything)
+    if not rows:
+        console.print("[dim]Nothing promised. Say something with `foreman commit`.[/]")
+        return
+    style = {"overdue": "red", "soon": "yellow", "open": "", "kept": "green", "dropped": "dim"}
+    table = Table(box=None, pad_edge=False)
+    for column in ("id", "state", "project", "said", "why"):
+        table.add_column(column)
+    for r in rows:
+        st = style.get(r["state"], "")
+        table.add_row(
+            str(r["id"]),
+            f"[{st}]{r['state']}[/]" if st else r["state"],
+            r["project"],
+            _clip(r["title"], 50),
+            _clip(r["why"], 60),
+        )
+    console.print(table)
+
+
+@app.command()
+def kept(
+    commitment_id: int = typer.Argument(..., help="Which commitment."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Say you did it. Only for a commitment Foreman cannot measure."""
+    with open_store(db) as store:
+        row = store.commitment(commitment_id)
+        if row is None:
+            console.print(f"[red]no commitment {commitment_id}[/]")
+            raise typer.Exit(1)
+        c = from_row(row)
+        try:
+            keep_by_hand(store, c)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise typer.Exit(1) from exc
+        settle(store)
+    console.print(f"[green]kept[/] — {c.said}")
+
+
+@app.command()
+def drop(
+    commitment_id: int = typer.Argument(..., help="Which commitment."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Take it back. It stays in the ledger as dropped; nothing is deleted."""
+    with open_store(db) as store:
+        row = store.commitment(commitment_id)
+        if row is None:
+            console.print(f"[red]no commitment {commitment_id}[/]")
+            raise typer.Exit(1)
+        store.set_commitment_status(commitment_id, "dropped")
+    console.print(f"dropped — {row['said']}")
 
 
 @app.command()

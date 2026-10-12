@@ -173,6 +173,15 @@ class Store(Protocol):
     def set_plan_status(self, plan_id: int, status: str) -> None: ...
     def update_phase(self, phase_id: int, params: dict[str, str]) -> None: ...
 
+    # --- commitments ---
+    def commit(
+        self, project: str, subject: str, said: str, due: str, gate: str, params: dict[str, str]
+    ) -> int: ...
+    def commitments(self, status: str | None = None) -> list[Record]: ...
+    def commitment(self, commitment_id: int) -> Record | None: ...
+    def keep_commitment(self, commitment_id: int, kept_at: str, evidence: str) -> None: ...
+    def set_commitment_status(self, commitment_id: int, status: str) -> None: ...
+
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
     def nodes(self, kind: str) -> list[str]: ...
@@ -424,6 +433,25 @@ CREATE TABLE IF NOT EXISTS phases (
     params   TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_phases_plan ON phases (plan_id, position);
+
+-- What somebody said they would do, by when. A plan with one phase and a date;
+-- the gate is a plan gate. `kept_at` is written once by `commitments.settle`
+-- when the gate first holds and is never recomputed: the promise was met on a
+-- day, and that day is the record.
+CREATE TABLE IF NOT EXISTS commitments (
+    id         INTEGER PRIMARY KEY,
+    project    TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    said       TEXT NOT NULL,
+    due        TEXT NOT NULL,
+    gate       TEXT NOT NULL,
+    params     TEXT NOT NULL DEFAULT '{}',
+    status     TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    kept_at    TEXT,
+    evidence   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments (status, due);
 
 -- Relationships between entities, written when the facts are so they can be
 -- walked rather than rediscovered. Node ids are "<kind>|<key>"; the shoal
@@ -1307,6 +1335,55 @@ class SqliteStore:
 
     def set_plan_status(self, plan_id: int, status: str) -> None:
         self._db.execute("UPDATE plans SET status = ? WHERE id = ?", (status, plan_id))
+        self._db.commit()
+
+    # --- commitments ------------------------------------------------------
+
+    def commit(
+        self, project: str, subject: str, said: str, due: str, gate: str, params: dict[str, str]
+    ) -> int:
+        cursor = self._db.execute(
+            "INSERT INTO commitments"
+            " (project, subject, said, due, gate, params, status, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
+            (
+                project,
+                subject,
+                said,
+                due,
+                gate,
+                json.dumps(params or {}, sort_keys=True),
+                utcnow(),
+            ),
+        )
+        self._db.commit()
+        return int(cursor.lastrowid)
+
+    def commitments(self, status: str | None = None) -> list[Record]:
+        sql = "SELECT * FROM commitments"
+        args: tuple = ()
+        if status:
+            sql += " WHERE status = ?"
+            args = (status,)
+        rows = self._db.execute(sql + " ORDER BY due, id", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def commitment(self, commitment_id: int) -> Record | None:
+        return _one(
+            self._db.execute("SELECT * FROM commitments WHERE id = ?", (commitment_id,)).fetchone()
+        )
+
+    def keep_commitment(self, commitment_id: int, kept_at: str, evidence: str) -> None:
+        # Once. A second settle must not move the date the promise was met.
+        self._db.execute(
+            "UPDATE commitments SET status = 'kept', kept_at = ?, evidence = ?"
+            " WHERE id = ? AND status = 'open'",
+            (kept_at, evidence, commitment_id),
+        )
+        self._db.commit()
+
+    def set_commitment_status(self, commitment_id: int, status: str) -> None:
+        self._db.execute("UPDATE commitments SET status = ? WHERE id = ?", (status, commitment_id))
         self._db.commit()
 
     # --- graph ------------------------------------------------------------

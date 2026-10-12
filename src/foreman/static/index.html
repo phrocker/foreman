@@ -373,6 +373,17 @@
   .att-title { font-size: 0.95em; font-weight: 600; letter-spacing: -0.01em; }
   .att-sub { color: var(--text-3); font-size: 0.82em; }
   .att-fresh { color: var(--text-3); font-size: 0.82em; margin: 0 0 10px; }
+  .att-said { margin-top: 14px; }
+  .att-said .att-row { align-items: baseline; }
+  .att-state { font-size: 0.72em; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; min-width: 4.5em; }
+  .att-state.overdue { color: var(--high); } .att-state.soon { color: var(--medium); }
+  .att-state.open { color: var(--text-3); } .att-state.kept { color: var(--ok, #2d7a3e); }
+  .att-said form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+  .att-said form input, .att-said form select { font: inherit; font-size: 0.85em; padding: 4px 6px;
+    border: 1px solid var(--border-firm); border-radius: 4px; background: var(--surface); color: inherit; }
+  .att-said form input[name=said] { flex: 1 1 18em; }
+  .att-said form button { font: inherit; font-size: 0.85em; padding: 4px 10px; }
+  .att-act { font-size: 0.8em; color: var(--text-3); margin-left: 6px; }
   .att-stale { color: var(--medium); }
   .att-row { display: flex; gap: 9px; align-items: baseline; padding: 6px 0;
     border-top: 1px solid var(--border); }
@@ -1820,7 +1831,82 @@ function renderAttention() {
       ${d.blocked.length ? d.blocked.map(row).join("")
         : `<div class="att-empty">Nothing is blocked on a decision from you.</div>`}
     </div>
+  </div>${renderSaid(d.said)}`;
+  wireSaid();
+}
+
+// --- what you said ----------------------------------------------------------
+//
+// The third question, and the only one no collector can ask. A finding is what
+// is wrong with what exists; a commitment is a date you put your name next to.
+// Overdue first, then this week, then the rest, then what you kept — because
+// being asked is only half of it; being told you did it is the other half.
+
+function renderSaid(said) {
+  const rows = (said && said.rows) || [];
+  const n = (st) => rows.filter((r) => r.state === st).length;
+  const sub = rows.length
+    ? [n("overdue") && `${n("overdue")} overdue`, n("soon") && `${n("soon")} due this week`,
+       n("open") && `${n("open")} later`, n("kept") && `${n("kept")} kept`].filter(Boolean).join(" · ")
+    : "nothing promised";
+  const line = (r) => `<div class="att-row">
+      <span class="att-state ${esc(r.state)}">${esc(r.state)}</span>
+      <span class="att-proj">${esc(r.project)}</span>
+      <span class="att-what">${esc(r.title)} <span class="att-why">— ${esc(r.why)}</span>${
+        r.state === "kept" || r.state === "dropped" ? "" :
+        (r.by_hand
+          ? `<label class="tick att-act"><input type="checkbox" class="keep-box" data-id="${r.id}"> done</label>`
+          : "") + `<button class="link-ish att-act drop-btn" data-id="${r.id}">drop</button>`
+      }</span>
+    </div>`;
+  const projects = ((said && said.projects) || []).map((p) => `<option value="${esc(p)}">`).join("");
+  const gates = ((said && said.gates) || []).map((g) =>
+    `<option value="${esc(g.name)}" ${g.name === "confirmed" ? "selected" : ""}>${esc(g.name)} — ${esc(g.summary)}</option>`).join("");
+  const nextWeek = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  return `<div class="att-col att-said">
+    <div class="att-head"><span class="att-title">What you said</span><span class="att-sub">${esc(sub)}</span></div>
+    ${rows.length ? rows.map(line).join("") : `<div class="att-empty">No commitments. Say one below; Foreman asks on the day after.</div>`}
+    <form id="sayForm" autocomplete="off">
+      <input name="said" placeholder="I will…" required>
+      <input name="project" list="sayProjects" placeholder="project" required style="width:8em">
+      <datalist id="sayProjects">${projects}</datalist>
+      <input name="subject" placeholder="about (URL, host; optional)" style="width:14em">
+      <input name="due" type="date" value="${nextWeek}" required>
+      <select name="gate">${gates}</select>
+      <button type="submit">Commit</button>
+    </form>
   </div>`;
+}
+
+function wireSaid() {
+  const form = $("sayForm");
+  if (!form) return;
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    const res = await fetch("/api/commitments", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ said: f.get("said"), project: f.get("project"), subject: f.get("subject"),
+                             due: f.get("due"), gate: f.get("gate") }),
+    });
+    if (!res.ok) { alert(`Could not record that: ${(await res.json()).detail}`); return; }
+    await refreshAttention();
+  });
+  document.querySelectorAll(".keep-box").forEach((box) => box.addEventListener("change", async () => {
+    const res = await fetch(`/api/commitments/${box.dataset.id}/keep`, { method: "POST" });
+    if (!res.ok) { box.checked = false; alert(`Could not record that: ${(await res.json()).detail}`); return; }
+    await refreshAttention();
+  }));
+  document.querySelectorAll(".drop-btn").forEach((btn) => btn.addEventListener("click", async () => {
+    if (!confirm("Drop this commitment? It stays in the ledger as dropped.")) return;
+    await fetch(`/api/commitments/${btn.dataset.id}/drop`, { method: "POST" });
+    await refreshAttention();
+  }));
+}
+
+async function refreshAttention() {
+  const res = await fetch("/api/attention");
+  if (res.ok) { state.attention = await res.json(); renderAttention(); }
 }
 
 function renderNext() {

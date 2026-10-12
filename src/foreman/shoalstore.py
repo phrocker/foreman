@@ -151,6 +151,18 @@ FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "plan": ("goal", "status", "created_at", "subjects"),
     "phase": ("plan_id", "position", "name", "gate", "params"),
+    "commitment": (
+        "project",
+        "subject",
+        "said",
+        "due",
+        "gate",
+        "params",
+        "status",
+        "created_at",
+        "kept_at",
+        "evidence",
+    ),
     "conv": ("title", "started_at"),
     "memory": ("statement", "created_at", "retired_at", "retired_because"),
     "msg": ("conversation_id", "role", "content", "created_at", "refs", "cost_usd"),
@@ -1092,6 +1104,66 @@ class ShoalStore:
 
     def set_plan_status(self, plan_id: int, status: str) -> None:
         self._write([self._put(_rid("plan", _pad(plan_id)), "plan", {"status": status})])
+
+    # --- commitments -------------------------------------------------------
+
+    def commit(
+        self, project: str, subject: str, said: str, due: str, gate: str, params: dict[str, str]
+    ) -> int:
+        commitment_id = self._next_id("commitment")
+        self._write(
+            [
+                self._put(
+                    _rid("commitment", _pad(commitment_id)),
+                    "commitment",
+                    {
+                        "project": project,
+                        "subject": subject,
+                        "said": said,
+                        "due": due,
+                        "gate": gate,
+                        "params": json.dumps(params or {}, sort_keys=True),
+                        "status": "open",
+                        "created_at": utcnow(),
+                    },
+                )
+            ]
+        )
+        return commitment_id
+
+    def commitments(self, status: str | None = None) -> list[Record]:
+        rows = [
+            r
+            for r in self._entities("ent:commitment|").values()
+            if not status or r.get("status") == status
+        ]
+        rows.sort(key=lambda r: (str(r.get("due") or ""), int(r["id"])))
+        return rows
+
+    def commitment(self, commitment_id: int) -> Record | None:
+        rows = self._entities(f"ent:commitment|{_pad(commitment_id)}")
+        return next(iter(rows.values()), None)
+
+    def keep_commitment(self, commitment_id: int, kept_at: str, evidence: str) -> None:
+        # Once: the sqlite twin conditions on status = 'open', and a second
+        # settle must not move the date the promise was met here either.
+        row = self.commitment(commitment_id)
+        if row is None or row.get("status") != "open":
+            return
+        self._write(
+            [
+                self._put(
+                    _rid("commitment", _pad(commitment_id)),
+                    "commitment",
+                    {"status": "kept", "kept_at": kept_at, "evidence": evidence},
+                )
+            ]
+        )
+
+    def set_commitment_status(self, commitment_id: int, status: str) -> None:
+        self._write(
+            [self._put(_rid("commitment", _pad(commitment_id)), "commitment", {"status": status})]
+        )
 
     # --- graph -------------------------------------------------------------
 

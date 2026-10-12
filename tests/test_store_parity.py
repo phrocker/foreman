@@ -1224,3 +1224,45 @@ def test_retiring_about_nothing_closes_nothing(store):
 
     assert store.retire_findings_about("p", set()) == 0
     assert len(store.open_findings("p")) == 1
+
+
+# --- commitments -------------------------------------------------------------
+
+
+def test_a_commitment_remembers_what_was_said_and_when_it_is_due(store):
+    cid = store.commit("mfa", "project:mfa", "ship the page", "2026-10-19", "confirmed", {"k": "v"})
+    row = store.commitment(cid)
+    assert row["project"] == "mfa"
+    assert row["said"] == "ship the page"
+    assert row["due"] == "2026-10-19"
+    assert row["gate"] == "confirmed"
+    assert json.loads(row["params"]) == {"k": "v"}
+    assert row["status"] == "open"
+    assert row["kept_at"] is None
+    assert row["evidence"] is None
+
+
+def test_commitments_come_back_soonest_due_first_and_filter_by_status(store):
+    late = store.commit("a", "project:a", "later", "2026-12-01", "confirmed", {})
+    soon = store.commit("a", "project:a", "sooner", "2026-10-15", "confirmed", {})
+    store.keep_commitment(late, "2026-10-12T08:00:00", "{}")
+    assert [r["id"] for r in store.commitments()] == [soon, late]
+    assert [r["id"] for r in store.commitments(status="open")] == [soon]
+    assert [r["id"] for r in store.commitments(status="kept")] == [late]
+
+
+def test_keeping_a_commitment_is_written_once(store):
+    cid = store.commit("a", "project:a", "do it", "2026-10-15", "confirmed", {})
+    store.keep_commitment(cid, "2026-10-13T08:00:00", '{"x": "1"}')
+    store.keep_commitment(cid, "2026-10-20T08:00:00", '{"x": "2"}')
+    row = store.commitment(cid)
+    assert row["status"] == "kept"
+    assert row["kept_at"] == "2026-10-13T08:00:00"
+    assert row["evidence"] == '{"x": "1"}'
+
+
+def test_a_dropped_commitment_is_still_there(store):
+    cid = store.commit("a", "project:a", "never mind", "2026-10-15", "confirmed", {})
+    store.set_commitment_status(cid, "dropped")
+    assert store.commitment(cid)["status"] == "dropped"
+    assert store.commitment(cid + 1) is None

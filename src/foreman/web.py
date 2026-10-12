@@ -28,6 +28,7 @@ from .adversary import DEFAULT_CEILING_USD as REVIEW_CEILING_USD
 from .adversary import LENSES, diff_of, review_change, summarise
 from .budget import Budget
 from .chat import ChatError, ask
+from .commitments import from_row, keep_by_hand, parse_due, settle, what_you_said
 from .config import find_registry, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
@@ -38,7 +39,7 @@ from .graph import ANSWERED_BY, MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
 from .memory import briefing, describe
 from .models import Observation, utcnow
 from .next import next_steps
-from .plans import CONFIRM_PREFIX, plan_progress
+from .plans import CONFIRM_PREFIX, GATES, plan_progress
 from .plans import _project_for as project_for
 from .precision import label as precision_label
 from .precision import rank, rule_scores
@@ -1699,6 +1700,10 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             actions = [dict(r) for r in s.pending_actions()]
             pulls = open_pulls(s, registry)
             swept = {t.id: (s.sweep_times(t.id, limit=1) or [None])[0] for t in registry.active}
+            # Settled on read as well as on check, so a tick is kept the moment
+            # it is ticked rather than the next morning.
+            settle(s)
+            said = what_you_said(s)
         finally:
             s.close()
 
@@ -1819,6 +1824,14 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "blind": blind,
             "blocked": _capped(blocked),
             "noisy": _noisy(findings),
+            # The third question, and the one no collector can ask: what did
+            # you say you would do. Uncapped — a promise is yours, and there
+            # is no noisy neighbour to be fair to.
+            "said": {
+                "rows": said,
+                "projects": [t.id for t in registry.active],
+                "gates": [{"name": g.name, "summary": g.summary} for g in GATES.values()],
+            },
             # The line the grades stand on. "As of" is the newest sweep anywhere;
             # "next" is None when no timer exists, and the page says so.
             "sweep": {
@@ -1827,6 +1840,81 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 "next": _sweep_schedule(),
             },
         }
+
+    @app.get("/api/commitments")
+    def commitments(everything: bool = Query(False)) -> list[dict[str, Any]]:
+        """What you said you would do, where each stands; the ledger with `everything`."""
+        s = store()
+        try:
+            settle(s)
+            return what_you_said(s, everything=everything)
+        finally:
+            s.close()
+
+    @app.post("/api/commitments")
+    def commit(payload: dict[str, Any]) -> dict[str, Any]:
+        """Say what you will do, and by when.
+
+        A commitment is a plan with one phase and a date, so the gate is a plan
+        gate and the default is your own tick — the only gate that needs no
+        collector, and the one most promises are about.
+        """
+        registry = load_registry(registry_path)
+        project = str(payload.get("project") or "").strip()
+        said = str(payload.get("said") or "").strip()
+        gate = str(payload.get("gate") or "confirmed").strip()
+        if not (project and said):
+            raise HTTPException(400, "need a project and what you said")
+        if registry.get(project) is None:
+            raise HTTPException(400, f"no project {project!r}")
+        if gate not in GATES:
+            raise HTTPException(400, f"unknown gate {gate!r}")
+        try:
+            due = parse_due(str(payload.get("due") or ""))
+        except ValueError:
+            raise HTTPException(400, "due must be a date, YYYY-MM-DD") from None
+        subject = str(payload.get("subject") or "").strip() or f"project:{project}"
+        params = payload.get("params") or {}
+        if not isinstance(params, dict):
+            raise HTTPException(400, "params must be an object")
+        s = store()
+        try:
+            cid = s.commit(
+                project, subject, said, due, gate, {str(k): str(v) for k, v in params.items()}
+            )
+            return {"id": cid, "project": project, "subject": subject, "said": said, "due": due}
+        finally:
+            s.close()
+
+    @app.post("/api/commitments/{commitment_id}/keep")
+    def keep(commitment_id: int) -> dict[str, Any]:
+        """Your word that it is done. Refused for a commitment a collector decides."""
+        s = store()
+        try:
+            row = s.commitment(commitment_id)
+            if row is None:
+                raise HTTPException(404, f"no commitment {commitment_id}")
+            try:
+                keep_by_hand(s, from_row(row))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            settle(s)
+            after = s.commitment(commitment_id)
+            return {"id": commitment_id, "status": after["status"] if after else None}
+        finally:
+            s.close()
+
+    @app.post("/api/commitments/{commitment_id}/drop")
+    def drop(commitment_id: int) -> dict[str, Any]:
+        """Take it back. Kept in the ledger as dropped; nothing is deleted."""
+        s = store()
+        try:
+            if s.commitment(commitment_id) is None:
+                raise HTTPException(404, f"no commitment {commitment_id}")
+            s.set_commitment_status(commitment_id, "dropped")
+            return {"id": commitment_id, "status": "dropped"}
+        finally:
+            s.close()
 
     @app.get("/api/coverage")
     def coverage(project: str | None = Query(None)) -> list[dict[str, Any]]:
