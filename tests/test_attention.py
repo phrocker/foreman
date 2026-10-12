@@ -8,7 +8,9 @@ it by the fires it is hiding.
 
 from __future__ import annotations
 
-from foreman.web import _capped, _noisy
+from datetime import UTC, datetime, timedelta
+
+from foreman.web import STALE_AFTER, _capped, _noisy, _stale, _sweep_schedule
 
 
 def _row(project, grade="serious", title="x"):
@@ -68,3 +70,78 @@ def test_a_rule_firing_many_times_becomes_one_decision():
 
 def test_a_rule_below_the_floor_is_left_alone():
     assert _noisy([{"project": "p", "rule": "r"} for _ in range(5)], floor=20) == []
+
+
+# --- freshness ----------------------------------------------------------------
+#
+# Every grade on the page is as good as the sweep behind it. For a month the
+# board read green while nothing had collected since the previous quarter.
+
+
+def test_a_project_swept_within_a_missed_day_is_fresh():
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+    swept = {"a": (now - timedelta(hours=20)).isoformat()}
+    assert _stale(swept, now=now) == {}
+
+
+def test_a_project_swept_before_that_is_stale_with_its_age_in_hours():
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+    swept = {
+        "a": (now - timedelta(days=9)).isoformat(),
+        "b": (now - timedelta(hours=1)).isoformat(),
+    }
+    assert _stale(swept, now=now) == {"a": 9 * 24}
+
+
+def test_never_swept_is_someone_elses_row():
+    """None is "never", which has its own blind-spot row; counting it here
+    would show the same project twice."""
+    assert _stale({"a": None}, now=datetime.now(UTC)) == {}
+
+
+def test_naive_and_zulu_timestamps_are_read_as_utc():
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+    old = now - timedelta(days=3)
+    assert _stale({"a": old.strftime("%Y-%m-%dT%H:%M:%S")}, now=now) == {"a": 72}
+    assert _stale({"a": old.strftime("%Y-%m-%dT%H:%M:%SZ")}, now=now) == {"a": 72}
+
+
+def test_the_stale_threshold_is_longer_than_a_day():
+    """The timer is daily; a sweep that is 25 hours old is on time, not late."""
+    assert STALE_AFTER > timedelta(hours=24)
+
+
+def test_no_timer_means_no_next_sweep(monkeypatch):
+    """None is the answer the page turns into "nothing scheduled" — not an
+    exception, and not a guess."""
+    import subprocess
+
+    def missing(*a, **k):
+        raise FileNotFoundError("systemctl")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    assert _sweep_schedule("no-such.timer") is None
+
+
+def test_an_inactive_timer_means_no_next_sweep(monkeypatch):
+    import subprocess
+
+    class Done:
+        stdout = "n/a\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Done())
+    assert _sweep_schedule() is None
+
+
+def test_systemds_wall_clock_form_becomes_an_instant(monkeypatch):
+    import subprocess
+
+    class Done:
+        stdout = "Tue 2026-10-13 06:01:14 EDT\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Done())
+    out = _sweep_schedule()
+    assert out is not None and out.endswith("Z")
+    # The local wall-clock reading, re-expressed in UTC: same instant either way.
+    expect = datetime(2026, 10, 13, 6, 1, 14).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert out == expect

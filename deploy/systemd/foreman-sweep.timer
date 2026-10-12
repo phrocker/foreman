@@ -1,0 +1,11 @@
+[Unit]
+Description=Sweep the portfolio every morning
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+# A machine that was asleep at six sweeps when it wakes rather than skipping.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+# The store. Everything else depends on it, so it starts first and comes back
+# on its own; a store that was started by hand from a shell is a store that
+# dies with that shell, which is how this ran for a month.
+[Unit]
+Description=Foreman store (shoal-embed on 127.0.0.1:9880)
+
+[Service]
+ExecStart=%h/.shoal/bin/shoal-embed serve --data %h/.shoal/foreman --port 9880
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

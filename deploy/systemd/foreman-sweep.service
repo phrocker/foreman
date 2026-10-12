@@ -1,0 +1,16 @@
+# One sweep: collect every surface of every project, then judge it. Oneshot,
+# fired by the timer. Until this existed nothing collected unless somebody
+# typed `foreman collect`, and the board was reading evidence that was weeks
+# old while looking current — which an accountability tool must never do.
+[Unit]
+Description=Foreman sweep (collect, then check)
+Requires=foreman-store.service
+After=foreman-store.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/ExtraDrive/repos/foreman
+ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman collect
+ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman check
+# A full sweep is about four minutes; this is the ceiling, not the expectation.
+TimeoutStartSec=30min

@@ -372,6 +372,8 @@
   .att-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
   .att-title { font-size: 0.95em; font-weight: 600; letter-spacing: -0.01em; }
   .att-sub { color: var(--text-3); font-size: 0.82em; }
+  .att-fresh { color: var(--text-3); font-size: 0.82em; margin: 0 0 10px; }
+  .att-stale { color: var(--medium); }
   .att-row { display: flex; gap: 9px; align-items: baseline; padding: 6px 0;
     border-top: 1px solid var(--border); }
   .att-row:first-of-type { border-top: none; }
@@ -915,6 +917,19 @@ function md(text) {
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function until(iso) {
+  // ago() reads a future instant as "just now", which is the wrong answer to
+  // "when is the next sweep". Same shape, other direction.
+  if (!iso) return "never";
+  const ms = new Date(/[Z+]|-\d\d:\d\d$/.test(iso) ? iso : iso + "Z").getTime();
+  if (Number.isNaN(ms)) return "unknown";
+  const secs = (ms - Date.now()) / 1000;
+  if (secs < 90) return "any moment";
+  if (secs < 5400) return "in " + Math.round(secs / 60) + "m";
+  if (secs < 172800) return "in " + Math.round(secs / 3600) + "h";
+  return "in " + Math.round(secs / 86400) + "d";
+}
 
 function ago(iso) {
   if (!iso) return "never";
@@ -1780,7 +1795,16 @@ function renderAttention() {
     `<div class="att-noisy">${esc(n.project)} · <code>${esc(n.rule)}</code> ×${n.count}
       — ${esc(n.why)}</div>`).join("");
 
-  el.innerHTML = `<div class="att">
+  // The line every grade below stands on. A board whose evidence is weeks old
+  // looks exactly like a board whose projects are fine; this is where the two
+  // are told apart, and "nothing scheduled" is the loudest thing it can say.
+  const sw = d.sweep || {};
+  const swept = sw.last ? `evidence as of ${ago(sw.last)}` : "never swept";
+  const next = sw.next ? `next sweep ${until(sw.next)}` : "nothing scheduled — sweeps only when you run one";
+  const stale = sw.stale ? ` · <span class="att-stale">${sw.stale} ${sw.stale === 1 ? "project" : "projects"} stale</span>` : "";
+  const freshness = `<div class="att-fresh ${sw.next ? "" : "att-stale"}">${esc(swept)} · ${esc(next)}${stale}</div>`;
+
+  el.innerHTML = `${freshness}<div class="att">
     <div class="att-col">
       <div class="att-head"><span class="att-title">On fire</span>
         <span class="att-sub">${d.blind.length} unwatched · ${d.fire.length} burning

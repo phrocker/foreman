@@ -1,0 +1,13 @@
+[Unit]
+Description=Foreman dashboard (127.0.0.1:8815)
+Requires=foreman-store.service
+After=foreman-store.service
+
+[Service]
+WorkingDirectory=/mnt/ExtraDrive/repos/foreman
+ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman serve --port 8815
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

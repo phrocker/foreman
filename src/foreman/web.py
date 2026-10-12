@@ -212,6 +212,67 @@ def _noisy(findings: list[dict[str, Any]], floor: int = 20) -> list[dict[str, An
     ]
 
 
+# A daily timer that misses a day is a quiet board, not a clean one. Older
+# than this and the evidence stops being shown as current.
+STALE_AFTER = timedelta(hours=36)
+
+
+def _stale(
+    swept: dict[str, str | None], now: datetime | None = None, after: timedelta = STALE_AFTER
+) -> dict[str, int]:
+    """Projects whose last sweep is older than a missed day, with the age in hours.
+
+    Every grade on this page is as good as the sweep behind it. For a month this
+    board read green while nothing had collected since the previous quarter,
+    which is the one state an accountability tool must not be able to reach
+    silently. A project that has *never* been swept is reported elsewhere; this
+    is the one that was, and then stopped.
+    """
+    now = now or datetime.now(UTC)
+    out: dict[str, int] = {}
+    for project, last in swept.items():
+        if not last:
+            continue
+        try:
+            then = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=UTC)
+        age = now - then
+        if age > after:
+            out[project] = int(age.total_seconds() // 3600)
+    return out
+
+
+def _sweep_schedule(unit: str = "foreman-sweep.timer") -> str | None:
+    """When the next unattended sweep is due, if a timer owns one.
+
+    Asked of systemd rather than stored, because the schedule lives there and a
+    copy here would be the thing that drifts. None when there is no timer, which
+    the page shows as exactly that: nothing will sweep unless somebody types it.
+    """
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "show", unit, "-p", "NextElapseUSecRealtime", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out or out in {"n/a", "0", "infinity"}:
+        return None
+    # systemd prints its own wall-clock form ("Tue 2026-10-13 06:01:14 EDT") in
+    # the service's zone; the page wants an instant it can show on the viewer's.
+    try:
+        local = datetime.strptime(out.rsplit(" ", 1)[0], "%a %Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
     db = db_path
@@ -1695,6 +1756,21 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     "rule": "",
                 }
             )
+        # And a project that was swept, once, and then stopped: the grades it
+        # shows are real, and they are about a version of it that no longer
+        # exists. Shown as one row with the oldest age, not one per project.
+        if stale := _stale(swept):
+            oldest = max(stale.values())
+            age = f"{oldest // 24}d" if oldest >= 48 else f"{oldest}h"
+            blind.append(
+                {
+                    "project": next(iter(stale)) if len(stale) == 1 else f"{len(stale)} projects",
+                    "title": f"evidence is {age} old",
+                    "why": ", ".join(sorted(stale)) if len(stale) > 1 else "nothing swept it since",
+                    "grade": "serious",
+                    "rule": "",
+                }
+            )
 
         blocked: list[dict[str, Any]] = []
         for a in actions:
@@ -1743,6 +1819,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "blind": blind,
             "blocked": _capped(blocked),
             "noisy": _noisy(findings),
+            # The line the grades stand on. "As of" is the newest sweep anywhere;
+            # "next" is None when no timer exists, and the page says so.
+            "sweep": {
+                "last": max((t for t in swept.values() if t), default=None),
+                "stale": len(_stale(swept)),
+                "next": _sweep_schedule(),
+            },
         }
 
     @app.get("/api/coverage")
