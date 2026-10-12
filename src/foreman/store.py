@@ -108,6 +108,7 @@ class Store(Protocol):
 
     def finding(self, finding_id: int) -> Record | None: ...
     def open_findings(self, project: str | None = None) -> list[Record]: ...
+    def finding_keys_before(self, since: str) -> set[tuple[str, str, str]]: ...
     def set_finding_outcome(self, finding_id: int, outcome: str | None) -> None: ...
     def dismissals(self, project: str | None = None) -> list[Record]: ...
     def rule_precision(self) -> list[Record]: ...
@@ -1183,6 +1184,19 @@ class SqliteStore:
         return _many(self._db.execute(sql, params))
 
     # --- memory -----------------------------------------------------------
+
+    def finding_keys_before(self, since: str) -> set[tuple[str, str, str]]:
+        """Which (project, rule, subjects) had already been found before `since`.
+
+        A rule finding is re-derived every sweep — retired and recorded again
+        with a fresh `found_at` — so its date says when it was last derived,
+        not when it first appeared. "Is this new or have I been ignoring it"
+        is answered by whether the same key existed before the window.
+        """
+        rows = self._db.execute(
+            "SELECT DISTINCT project, rule, subjects FROM findings WHERE found_at < ?", (since,)
+        ).fetchall()
+        return {(str(r["project"]), str(r["rule"]), str(r["subjects"])) for r in rows}
 
     def remember(
         self,

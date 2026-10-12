@@ -384,6 +384,15 @@
   .att-said form input[name=said] { flex: 1 1 18em; }
   .att-said form button { font: inherit; font-size: 0.85em; padding: 4px 10px; }
   .att-act { font-size: 0.8em; color: var(--text-3); margin-left: 6px; }
+  .cp { border: 1px solid var(--border-firm); border-radius: var(--radius); background: var(--surface);
+    padding: 12px 14px; margin-bottom: 18px; }
+  .cp-lines { margin: 6px 0 10px; padding: 0; list-style: none; }
+  .cp-lines li { padding: 3px 0; }
+  .cp-lines li.cp-ask { font-weight: 600; }
+  .cp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 6px 14px;
+    font-size: 0.85em; color: var(--text-3); }
+  .cp-grid .quiet { color: var(--medium); font-weight: 600; }
+  .cp-grid .unknown { font-style: italic; }
   .att-stale { color: var(--medium); }
   .att-row { display: flex; gap: 9px; align-items: baseline; padding: 6px 0;
     border-top: 1px solid var(--border); }
@@ -705,6 +714,8 @@
 
   <section id="attention"></section>
 
+  <section id="checkpoint"></section>
+
   <section>
     <h2>Projects</h2>
     <div class="panel" id="projectRows"></div>
@@ -981,11 +992,12 @@ let stale = [];
 
 async function load() {
   stale = [];
-  const [attention, overview, findings, actions, drift, precision, history, connectors, skills, memories,
+  const [attention, checkpoint, overview, findings, actions, drift, precision, history, connectors, skills, memories,
          settings, plans, reports, declared, pulls, activity, signals, issues,
          subjects, next] =
     await Promise.all([
     fetchPart("/api/attention", null),
+    fetchPart("/api/checkpoint", null),
     fetchPart("/api/overview", null),
     fetchPart("/api/findings", []),
     fetchPart("/api/actions", []),
@@ -1007,7 +1019,7 @@ async function load() {
     fetchPart("/api/next", []),
   ]);
   Object.assign(state, {
-    attention, overview, findings, actions, drift, precision, history,
+    attention, checkpoint, overview, findings, actions, drift, precision, history,
     connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
     signals, issues, subjects, next,
   });
@@ -1024,7 +1036,7 @@ async function load() {
   for (const [name, render] of [
     ["overview", renderOverview], ["projects", renderProjects],
     ["findings", renderFindings], ["actions", renderActions],
-    ["attention", renderAttention], ["nextUp", renderNext], ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
+    ["attention", renderAttention], ["checkpoint", renderCheckpoint], ["nextUp", renderNext], ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
     ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
@@ -1833,6 +1845,31 @@ function renderAttention() {
     </div>
   </div>${renderSaid(d.said)}`;
   wireSaid();
+}
+
+// --- this week ----------------------------------------------------------------
+//
+// The four questions a partner asks once a week: did you do what you said,
+// what have you not touched, what are you putting off, what is still burning.
+// Sentences first — the numbers underneath are the evidence, not the point.
+
+function renderCheckpoint() {
+  const cp = state.checkpoint;
+  const el = $("checkpoint");
+  if (!el || !cp) return;
+  const lines = (cp.lines || []).map((l) =>
+    `<li class="${/\?$/.test(l) || /say which|Say one/.test(l) ? "cp-ask" : ""}">${esc(l)}</li>`).join("");
+  const cells = (cp.silence || []).map((s) => {
+    if (s.unknown) return `<div class="unknown">${esc(s.project)} · no history recorded</div>`;
+    const last = s.last_commit_days === 0 ? "today" : `${s.last_commit_days}d ago`;
+    return `<div class="${s.quiet ? "quiet" : ""}">${esc(s.project)} · ${s.commits} commit${s.commits === 1 ? "" : "s"} this week · last ${last}</div>`;
+  }).join("");
+  el.innerHTML = `<div class="cp">
+    <div class="att-head"><span class="att-title">This week</span>
+      <span class="att-sub">as of ${esc(ago(cp.as_of))} · ${cp.window_days}-day window</span></div>
+    <ul class="cp-lines">${lines || "<li>Nothing to say yet.</li>"}</ul>
+    <div class="cp-grid">${cells}</div>
+  </div>`;
 }
 
 // --- what you said ----------------------------------------------------------

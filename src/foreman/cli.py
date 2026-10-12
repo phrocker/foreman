@@ -17,6 +17,7 @@ from .actions.sagform import automatable, policy_allows
 from .audit import DEFAULT_SKILL, STALE_AFTER_DAYS, AuditError, run_audit, select_for_audit
 from .budget import Budget
 from .chat import ChatError, ask
+from .checkpoint import checkpoint, narrate
 from .collectors import COLLECTORS
 from .commitments import from_row, keep_by_hand, parse_due, settle, what_you_said
 from .config import DEFAULT_REGISTRY, load_registry
@@ -43,6 +44,7 @@ from .runner import (
 )
 from .skills import merge_label, merge_rate, track_records
 from .store import default_db, open_store
+from .work import open_pulls
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
 console = Console()
@@ -878,6 +880,22 @@ def drop(
             raise typer.Exit(1)
         store.set_commitment_status(commitment_id, "dropped")
     console.print(f"dropped — {row['said']}")
+
+
+@app.command(name="checkpoint")
+def checkpoint_cmd(
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """The weekly conversation: what you said, what went quiet, what you defer."""
+    reg = load_registry(registry)
+    with open_store(db, registry=registry) as store:
+        settle(store)
+        cp = checkpoint(
+            store, reg, open_pulls(store, reg), [dict(r) for r in store.open_findings()]
+        )
+    for line in narrate(cp):
+        console.print(line)
 
 
 @app.command()

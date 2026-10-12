@@ -11,6 +11,9 @@ After=foreman-store.service
 Type=oneshot
 WorkingDirectory=/mnt/ExtraDrive/repos/foreman
 ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman collect
+# Repository history is its own feed with its own cursor; the checkpoint's
+# "what went quiet" reads it, so it is swept too.
+ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman history
 ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman check
 # A full sweep is about four minutes; this is the ceiling, not the expectation.
 TimeoutStartSec=30min

@@ -635,6 +635,13 @@ class ShoalStore:
         )
         return rows
 
+    def finding_keys_before(self, since: str) -> set[tuple[str, str, str]]:
+        return {
+            (str(r.get("project")), str(r.get("rule")), str(r.get("subjects")))
+            for r in self._entities("ent:finding|").values()
+            if str(r.get("found_at") or "") < since
+        }
+
     def set_finding_outcome(self, finding_id: int, outcome: str | None) -> None:
         self._write(
             [

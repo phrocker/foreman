@@ -28,6 +28,7 @@ from .adversary import DEFAULT_CEILING_USD as REVIEW_CEILING_USD
 from .adversary import LENSES, diff_of, review_change, summarise
 from .budget import Budget
 from .chat import ChatError, ask
+from .checkpoint import checkpoint, narrate
 from .commitments import from_row, keep_by_hand, parse_due, settle, what_you_said
 from .config import find_registry, load_registry
 from .connectors import build as build_connectors
@@ -1840,6 +1841,22 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 "next": _sweep_schedule(),
             },
         }
+
+    @app.get("/api/checkpoint")
+    def weekly_checkpoint() -> dict[str, Any]:
+        """The weekly conversation: what you said, what went quiet, what you
+        keep deferring, what is still burning. Computed, never recollected."""
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            settle(s)
+            pulls = open_pulls(s, registry)
+            findings = [dict(r) for r in s.open_findings()]
+            cp = checkpoint(s, registry, pulls, findings)
+        finally:
+            s.close()
+        cp["lines"] = narrate(cp)
+        return cp
 
     @app.get("/api/commitments")
     def commitments(everything: bool = Query(False)) -> list[dict[str, Any]]:

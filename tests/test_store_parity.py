@@ -1266,3 +1266,21 @@ def test_a_dropped_commitment_is_still_there(store):
     store.set_commitment_status(cid, "dropped")
     assert store.commitment(cid)["status"] == "dropped"
     assert store.commitment(cid + 1) is None
+
+
+def test_which_finding_keys_were_on_the_books_before_a_moment(store):
+    """A rule finding is re-derived every sweep with a fresh date, so "is this
+    new" is answered by key — the same rule about the same subjects — against
+    what existed before the window, open or since resolved."""
+    run = store.start_run("a", "crawl")
+    store.record_findings(
+        run,
+        [Finding(project="a", rule="r1", severity=Severity.HIGH, summary="x", subjects=["s"])],
+    )
+    far_future = "2999-01-01T00:00:00"
+    long_ago = "2000-01-01T00:00:00"
+    assert store.finding_keys_before(far_future) == {("a", "r1", '["s"]')}
+    assert store.finding_keys_before(long_ago) == set()
+    # Resolving it does not erase that it was once found.
+    store.retire_rule_findings("a")
+    assert store.finding_keys_before(far_future) == {("a", "r1", '["s"]')}
