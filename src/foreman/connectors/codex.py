@@ -36,6 +36,7 @@ import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from .base import REPO, SHELL, WEB, ConnectorError, Result, Task
 
@@ -154,16 +155,19 @@ class CodexConnector:
 
             cost = 0.0
             tokens = 0
+            errors: list[bytes] = []
 
             def consume(line: str) -> None:
                 nonlocal cost, tokens
+                if why := _failure(line):
+                    # Kept with stderr so "wrote no answer" can say why.
+                    errors.append(f"codex: {why}\n".encode())
                 c, t = _event(line, on_step, on_text)
                 # Assigned rather than summed: these are running totals, and
                 # adding them counts the same money once per event.
                 cost = max(cost, c)
                 tokens = max(tokens, t)
 
-            errors: list[bytes] = []
             try:
                 await asyncio.wait_for(
                     _run(proc, task.instructions.encode(), consume, errors),
@@ -188,7 +192,12 @@ class CodexConnector:
                 on_step(f"{tokens:,} tokens (unmetered: no cost is reported)")
 
             if not answer.is_file():
-                detail = stderr.decode(errors="replace").strip()[:400]
+                # The failure event first, if there was one: the stderr line
+                # is "Reading prompt from stdin..." every time.
+                text = stderr.decode(errors="replace")
+                lines = [ln for ln in text.splitlines() if ln.strip()]
+                named = [ln for ln in lines if ln.startswith("codex: ")]
+                detail = ("\n".join(named or lines)).strip()[:400]
                 raise ConnectorError(
                     f"codex wrote no answer (exit {proc.returncode}): "
                     f"{detail or 'no error output'}",
@@ -235,6 +244,17 @@ def strict(schema: dict) -> dict:
         out["items"] = strict(out["items"])
 
     if out.get("type") == "object" or "properties" in out:
+        if not isinstance(out.get("properties"), dict):
+            # A `dict[str, X]` field. The API refuses an object with no
+            # `properties` ("'schema.properties.refs.properties' is required
+            # for object schemas"), and it refused it after the prompt had
+            # been sent, with the reason on stdout where nothing read it —
+            # so the chat pane said "no error output" for a schema bug.
+            # Refusing here names the field before anything is spent.
+            raise ValueError(
+                "a dict-typed field cannot be expressed in a strict schema; "
+                "model it as a list of {key, value} objects instead"
+            )
         out["additionalProperties"] = False
         # Every property required. A field Foreman gave a default is still a
         # field the model must answer for; the default is what Foreman does
@@ -261,6 +281,7 @@ async def _run(proc, stdin: bytes, consume, errors: list[bytes]) -> None:
     error pipe fills stops writing to stdout and deadlocks, and the deadlock
     would look exactly like the silence this is fixing.
     """
+
     async def pump() -> None:
         while True:
             try:
@@ -288,6 +309,40 @@ async def _run(proc, stdin: bytes, consume, errors: list[bytes]) -> None:
     await proc.wait()
 
 
+def _failure(line: str) -> str | None:
+    """The reason a turn failed, if this event carries one.
+
+    `codex exec` reports an API refusal as `{"type":"error"}` and
+    `{"type":"turn.failed"}` on *stdout*, exits 1, and leaves stderr saying
+    only "Reading prompt from stdin...". The message is JSON inside JSON; the
+    innermost `message` is the sentence a person can act on.
+    """
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if str(event.get("type") or "") not in {"error", "turn.failed"}:
+        return None
+    message: Any = event.get("message") or event.get("error")
+    # Peel: a dict's `error` (then `message`), a string that parses as JSON;
+    # stop at the first string that does not. Bounded, since this is a
+    # vocabulary that moves.
+    for _ in range(8):
+        if isinstance(message, dict):
+            message = message.get("error") or message.get("message")
+        elif isinstance(message, str):
+            try:
+                message = json.loads(message)
+            except json.JSONDecodeError:
+                return message
+        else:
+            break
+    return str(message) if message else None
+
+
 def _event(line: str, on_step, on_text) -> tuple[float, int]:
     """Read one JSONL line for cost and progress.
 
@@ -310,11 +365,7 @@ def _event(line: str, on_step, on_text) -> tuple[float, int]:
     if isinstance(usage := event.get("usage"), dict):
         # turn.completed carries the run's totals.
         tokens = int(
-            sum(
-                v
-                for k, v in usage.items()
-                if isinstance(v, (int, float)) and k.endswith("tokens")
-            )
+            sum(v for k, v in usage.items() if isinstance(v, (int, float)) and k.endswith("tokens"))
         )
 
     kind = str(event.get("type") or event.get("event") or "")

@@ -149,6 +149,10 @@
   .plan-head { padding: 12px; border-top: 1px solid var(--border); }
   .plan-goal { font-weight: 600; }
   .plan-meta { color: var(--text-3); font-size: 12px; margin-top: 3px; }
+  .plan-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .plan-form input, .plan-form textarea { font: inherit; font-size: 0.85em; padding: 4px 6px;
+    border: 1px solid var(--border-firm); border-radius: 4px; background: var(--surface); color: inherit; }
+  .plan-form button { font: inherit; font-size: 0.85em; padding: 4px 10px; }
   .phase-bar { display: flex; gap: 14px; flex-wrap: wrap; padding: 0 12px 10px; }
   .phase-cell { font-size: 12px; }
   .phase-name { font-weight: 600; }
@@ -378,6 +382,7 @@
   .att-state { font-size: 0.72em; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; min-width: 4.5em; }
   .att-state.overdue { color: var(--high); } .att-state.soon { color: var(--medium); }
   .att-state.open { color: var(--text-3); } .att-state.kept { color: var(--ok, #2d7a3e); }
+  .att-state.dropped { color: var(--text-3); text-decoration: line-through; }
   .att-said form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
   .att-said form input, .att-said form select { font: inherit; font-size: 0.85em; padding: 4px 6px;
     border: 1px solid var(--border-firm); border-radius: 4px; background: var(--surface); color: inherit; }
@@ -838,6 +843,15 @@
   </section>
 
   <section id="panel-plans" role="tabpanel" hidden>
+    <div class="panel" style="margin-bottom:12px">
+      <form id="planForm" class="plan-form" autocomplete="off">
+        <input name="goal" placeholder="What is being built" required style="flex:1 1 20em">
+        <input name="subjects" placeholder="subjects, comma-separated (domain:a.test, …)" style="flex:1 1 20em">
+        <textarea name="phases" rows="3" placeholder="one phase per line:  name : gate : k=v, k=v&#10;e.g.  DNS moved : dns_resolves&#10;      Content live : serves : min_chars=400&#10;      Signed : confirmed : note=sign the contract" style="flex:1 1 100%"></textarea>
+        <span class="hint" id="planGates"></span>
+        <button type="submit">Start plan</button>
+      </form>
+    </div>
     <div class="panel scroll"><div id="planList"></div></div>
   </section>
 
@@ -1882,6 +1896,7 @@ function renderCheckpoint() {
 function renderSaid(said) {
   const rows = (said && said.rows) || [];
   const n = (st) => rows.filter((r) => r.state === st).length;
+  const ledger = `<button class="link-ish att-act" id="saidLedger">${state.saidLedger ? "back to this week" : "ledger"}</button>`;
   const sub = rows.length
     ? [n("overdue") && `${n("overdue")} overdue`, n("soon") && `${n("soon")} due this week`,
        n("open") && `${n("open")} later`, n("kept") && `${n("kept")} kept`].filter(Boolean).join(" · ")
@@ -1901,7 +1916,7 @@ function renderSaid(said) {
     `<option value="${esc(g.name)}" ${g.name === "confirmed" ? "selected" : ""}>${esc(g.name)} — ${esc(g.summary)}</option>`).join("");
   const nextWeek = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
   return `<div class="att-col att-said">
-    <div class="att-head"><span class="att-title">What you said</span><span class="att-sub">${esc(sub)}</span></div>
+    <div class="att-head"><span class="att-title">What you said</span><span class="att-sub">${esc(sub)}</span>${ledger}</div>
     ${rows.length ? rows.map(line).join("") : `<div class="att-empty">No commitments. Say one below; Foreman asks on the day after.</div>`}
     <form id="sayForm" autocomplete="off">
       <input name="said" placeholder="I will…" required>
@@ -1916,6 +1931,19 @@ function renderSaid(said) {
 }
 
 function wireSaid() {
+  const ledger = $("saidLedger");
+  if (ledger) ledger.addEventListener("click", async () => {
+    state.saidLedger = !state.saidLedger;
+    if (state.saidLedger) {
+      // Everything ever said — dropped and long-kept included. The default
+      // view is the conversation; this is the history it is judged against.
+      const rows = await fetchPart("/api/commitments?everything=true", []);
+      state.attention.said = { ...state.attention.said, rows };
+      renderAttention();
+    } else {
+      await refreshAttention();
+    }
+  });
   const form = $("sayForm");
   if (!form) return;
   form.addEventListener("submit", async (ev) => {
@@ -2629,7 +2657,9 @@ function renderPlans() {
     const subjects = Object.entries(plan.subjects || {});
     const head = `<div class="plan-head">
         <div class="plan-goal">${esc(plan.goal)}</div>
-        <div class="plan-meta">${subjects.length} subject(s) · ${esc(plan.status)} · started ${esc((plan.created_at || "").slice(0, 10))}</div>
+        <div class="plan-meta">${subjects.length} subject(s) · ${esc(plan.status)} · started ${esc((plan.created_at || "").slice(0, 10))}
+          · <button class="link-ish plan-status" data-id="${plan.id}" data-to="${plan.status === "superseded" ? "active" : "superseded"}">${
+            plan.status === "superseded" ? "bring back" : "supersede"}</button></div>
       </div>
       <div class="phase-bar">${(plan.summary || []).map((line) => {
         const counts = ["passed", "pending", "blocked", "unknown"]
@@ -2672,7 +2702,50 @@ function renderPlans() {
 
   list.querySelectorAll(".confirm-box").forEach((box) =>
     box.addEventListener("change", () => confirmStep(box)));
+  list.querySelectorAll(".plan-status").forEach((btn) => btn.addEventListener("click", async () => {
+    if (btn.dataset.to === "superseded" && !confirm("Supersede this plan? It is kept as the record of what was intended.")) return;
+    const res = await fetch(`/api/plans/${btn.dataset.id}/status`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: btn.dataset.to }),
+    });
+    if (!res.ok) { alert(`Could not change that: ${(await res.json()).detail}`); return; }
+    state.plans = await fetchPart("/api/plans", []);
+    renderPlans();
+  }));
   wirePlanToggle();
+  wirePlanForm();
+}
+
+// Starting a plan from the page, with the same shape `foreman plan-new` takes:
+// one phase per line, "name : gate : k=v, k=v". The gates are listed under the
+// form from the server, so the page never has to know which ones exist.
+let planFormWired = false;
+function wirePlanForm() {
+  const form = $("planForm");
+  if (!form || planFormWired) return;
+  planFormWired = true;
+  const gates = ((state.attention && state.attention.said && state.attention.said.gates) || []);
+  const hint = $("planGates");
+  if (hint && gates.length) hint.textContent = "gates: " + gates.map((g) => g.name).join(", ");
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    const phases = String(f.get("phases") || "").split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
+      const [name, gate, raw] = line.split(":").map((x) => (x || "").trim());
+      const params = {};
+      (raw || "").split(",").forEach((pair) => { const [k, v] = pair.split("="); if (k && v !== undefined) params[k.trim()] = v.trim(); });
+      return { name, gate, params };
+    });
+    const subjects = String(f.get("subjects") || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const res = await fetch("/api/plans", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal: f.get("goal"), subjects, phases }),
+    });
+    if (!res.ok) { alert(`Could not start that: ${(await res.json()).detail}`); return; }
+    form.reset();
+    state.plans = await fetchPart("/api/plans", []);
+    renderPlans();
+  });
 }
 
 // --- which projects are swept ----------------------------------------------

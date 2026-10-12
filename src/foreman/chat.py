@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field, WithJsonSchema
 
 from .actions import _ops, target_label
 from .config import Registry
@@ -75,7 +75,8 @@ somebody else opened, so delivery does not apply to it at all.
 `reply` is your answer, in markdown, a few sentences.
 
 `refs` is what it rests on — the finding, action and project ids you actually
-used. Leave a list empty rather than padding it.
+used, as a list of `{{"kind": "findings" | "actions" | "projects", "ids": [...]}}`.
+Leave it empty rather than padding it.
 
 `suggest` is usually empty. Offer an approval or rejection only when the state
 plainly supports it, with one sentence saying why.
@@ -156,11 +157,65 @@ class Memory(BaseModel):
     why: str = ""
 
 
+# Dict-typed fields, as the strict schema can carry them.
+#
+# The API behind `codex exec` refuses an object with no `properties` — a
+# `dict[str, X]` — and refused it after the prompt was sent, so the chat pane
+# failed on every question with the reason on a stream nothing read. On the
+# wire these are lists of pairs; in Python they stay the dicts every consumer
+# and test already uses, converted on the way in.
+
+
+def _pairs(value: Any, key: str, val: str) -> Any:
+    if isinstance(value, list):
+        return {
+            str(pair[key]): pair.get(val)
+            for pair in value
+            if isinstance(pair, dict) and key in pair
+        }
+    return value
+
+
+Refs = Annotated[
+    dict[str, list[Any]],
+    BeforeValidator(lambda v: _pairs(v, "kind", "ids")),
+    WithJsonSchema(
+        {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"},
+                    "ids": {
+                        "type": "array",
+                        "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+                    },
+                },
+            },
+        }
+    ),
+]
+
+Params = Annotated[
+    dict[str, str],
+    BeforeValidator(lambda v: _pairs(v, "key", "value")),
+    WithJsonSchema(
+        {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}, "value": {"type": "string"}},
+            },
+        }
+    ),
+]
+
+
 class DraftPhase(BaseModel):
     name: str
     gate: str
     # Gate arguments, and the op's if Foreman is to propose the work.
-    params: dict[str, str] = Field(default_factory=dict)
+    params: Params = Field(default_factory=dict)
 
 
 class DraftPlan(BaseModel):
@@ -179,7 +234,7 @@ class DraftPlan(BaseModel):
 
 class Reply(BaseModel):
     reply: str
-    refs: dict[str, list[Any]] = Field(default_factory=dict)
+    refs: Refs = Field(default_factory=dict)
     suggest: list[Suggestion] = Field(default_factory=list)
     remember: list[Memory] = Field(default_factory=list)
     plan: DraftPlan | None = None

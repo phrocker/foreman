@@ -60,9 +60,7 @@ def test_the_web_is_off_unless_the_task_asked_for_it(tmp_path):
     assert "tools.web_search=true" not in c._command(
         task(needs=frozenset({REPO})), schema, answer, None
     )
-    assert "tools.web_search=true" in c._command(
-        task(needs=frozenset({WEB})), schema, answer, None
-    )
+    assert "tools.web_search=true" in c._command(task(needs=frozenset({WEB})), schema, answer, None)
     assert "--search" not in c._command(task(needs=frozenset({WEB})), schema, answer, None)
 
 
@@ -329,9 +327,7 @@ def test_one_event_is_read_on_its_own() -> None:
     from foreman.connectors.codex import _event
 
     steps: list[str] = []
-    cost, tokens = _event(
-        '{"type":"item.command","command":"go test ./..."}', steps.append, None
-    )
+    cost, tokens = _event('{"type":"item.command","command":"go test ./..."}', steps.append, None)
     assert steps == ["go test ./..."]
     assert (cost, tokens) == (0.0, 0)
 
@@ -502,3 +498,36 @@ def test_a_web_search_is_a_step() -> None:
         None,
     )
     assert steps == ["web search: howard county septic fee"]
+
+
+# --- the failure codex reports on stdout --------------------------------------
+
+
+def test_a_dict_field_is_refused_before_anything_is_spent():
+    from foreman.connectors.codex import strict
+
+    with pytest.raises(ValueError, match="dict-typed"):
+        strict(
+            {
+                "type": "object",
+                "properties": {
+                    "refs": {"type": "object", "additionalProperties": {"type": "string"}}
+                },
+            }
+        )
+
+
+def test_the_innermost_message_of_a_failed_turn_is_the_error():
+    """The CLI reports an API refusal as JSON inside JSON on stdout, exits 1,
+    and leaves stderr saying "Reading prompt from stdin..."."""
+    from foreman.connectors.codex import _failure
+
+    inner = (
+        '{"type":"error","error":{"message":"Invalid schema for response_format",'
+        '"type":"invalid_request_error"}}'
+    )
+    line = json.dumps({"type": "turn.failed", "error": {"message": inner}})
+    assert _failure(line) == "Invalid schema for response_format"
+    assert _failure(json.dumps({"type": "error", "message": "plain"})) == "plain"
+    assert _failure(json.dumps({"type": "turn.completed"})) is None
+    assert _failure("not json") is None

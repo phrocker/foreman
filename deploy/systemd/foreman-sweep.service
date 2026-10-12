@@ -14,6 +14,9 @@ ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman collect
 # Repository history is its own feed with its own cursor; the checkpoint's
 # "what went quiet" reads it, so it is swept too.
 ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman history
+# Did the actions you approved hold up? Only the build can say, and it has
+# run since yesterday.
+ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman verify
 ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman check
 # A full sweep is about four minutes; this is the ceiling, not the expectation.
 TimeoutStartSec=30min

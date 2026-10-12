@@ -278,3 +278,47 @@ def test_a_superseded_plan_is_not_carried(world):
     store.set_plan_status(plan, "superseded")
 
     assert "the old shape" not in portfolio_state(store, registry)
+
+
+# --- the wire shape -----------------------------------------------------------
+#
+# The API behind `codex exec` refuses an object schema with no `properties`,
+# which is what a dict field is. The chat pane failed on every question for
+# that reason, with the message on a stream nothing read.
+
+
+def test_refs_arrive_as_pairs_and_are_read_as_the_dict_everything_uses():
+    reply = Reply.model_validate_json(
+        '{"reply": "x", "refs": [{"kind": "findings", "ids": [1, "2"]},'
+        ' {"kind": "projects", "ids": []}]}'
+    )
+    assert reply.refs == {"findings": [1, "2"], "projects": []}
+    # The dict shape is still accepted, so nothing that builds one in Python changes.
+    assert Reply(reply="x", refs={"findings": [1]}).refs == {"findings": [1]}
+
+
+def test_phase_params_arrive_as_pairs():
+    from foreman.chat import DraftPhase
+
+    phase = DraftPhase.model_validate(
+        {"name": "Live", "gate": "serves", "params": [{"key": "min_chars", "value": "400"}]}
+    )
+    assert phase.params == {"min_chars": "400"}
+
+
+def test_the_reply_schema_has_no_object_without_properties():
+    """Walk the schema codex is handed: every object names its properties."""
+    from foreman.connectors.codex import strict
+
+    def objects(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                yield node
+            for v in node.values():
+                yield from objects(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from objects(v)
+
+    schema = strict(Reply.model_json_schema())
+    assert all(isinstance(o.get("properties"), dict) for o in objects(schema))

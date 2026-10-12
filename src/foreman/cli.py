@@ -808,7 +808,7 @@ def commit(
     except ValueError as exc:
         raise typer.BadParameter(f"--due must be a date, YYYY-MM-DD: {due!r}") from exc
     reg = load_registry(registry)
-    if reg.get(project) is None:
+    if all(t.id != project for t in reg.projects):
         raise typer.BadParameter(f"no project {project!r}")
     params = dict(pair.split("=", 1) for pair in (param or []) if "=" in pair)
     with open_store(db, registry=registry) as store:

@@ -37,6 +37,7 @@ from .diff import project_drift
 from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
 from .fix import build_issue, deliver_research, fix_findings
 from .graph import ANSWERED_BY, MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
+from .history import ingest_all
 from .memory import briefing, describe
 from .models import Observation, utcnow
 from .next import next_steps
@@ -60,6 +61,7 @@ from .runner import (
     collect_project,
     propose_actions,
     reject_action,
+    verify_applied,
 )
 from .signals import read as read_signals
 from .skills import TrackRecord, merge_label, merge_rate, track_records
@@ -1048,6 +1050,58 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         finally:
             s.close()
 
+    @app.post("/api/plans")
+    def new_plan(payload: dict[str, Any]) -> dict[str, Any]:
+        """Start a plan from the page: goal, subjects, phases in order.
+
+        Same validation as `foreman plan-new`, same store calls. A phase is
+        {name, gate, params}; the gate must be one the plan machinery knows,
+        because a plan with a gate nothing can decide never finishes.
+        """
+        goal = str(payload.get("goal") or "").strip()
+        subjects = [str(x).strip() for x in (payload.get("subjects") or []) if str(x).strip()]
+        phases = payload.get("phases") or []
+        if not goal:
+            raise HTTPException(400, "a plan needs a goal")
+        if not phases:
+            raise HTTPException(400, "a plan with no phases has nothing to gate")
+        specs: list[tuple[str, str, dict[str, str]]] = []
+        for ph in phases:
+            name = str(ph.get("name") or "").strip()
+            gate = str(ph.get("gate") or "").strip()
+            params = ph.get("params") or {}
+            if not name:
+                raise HTTPException(400, "every phase needs a name")
+            if gate not in GATES:
+                raise HTTPException(400, f"unknown gate {gate!r} (have: {', '.join(GATES)})")
+            if not isinstance(params, dict):
+                raise HTTPException(400, f"phase {name!r}: params must be an object")
+            specs.append((name, gate, {str(k): str(v) for k, v in params.items()}))
+        s = store()
+        try:
+            plan_id = s.create_plan(goal, subjects)
+            for position, (name, gate, params) in enumerate(specs, start=1):
+                s.add_phase(plan_id, position, name, gate, params)
+        finally:
+            s.close()
+        return {"id": plan_id, "goal": goal, "subjects": subjects, "phases": len(specs)}
+
+    @app.post("/api/plans/{plan_id}/status")
+    def plan_status(plan_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Supersede a plan, or bring one back. Never deleted: a superseded
+        plan is the record of what was intended."""
+        status = str(payload.get("status") or "").strip()
+        if status not in {"active", "superseded"}:
+            raise HTTPException(400, "status must be 'active' or 'superseded'")
+        s = store()
+        try:
+            if s.plan(plan_id) is None:
+                raise HTTPException(404, f"no plan {plan_id}")
+            s.set_plan_status(plan_id, status)
+        finally:
+            s.close()
+        return {"id": plan_id, "status": status}
+
     @app.get("/api/connectors")
     def connectors() -> list[dict[str, Any]]:
         """Which backends can run an agent, and whether they are up.
@@ -1666,7 +1720,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     BLIND = {
         "dependabot_unavailable": "dependency alerts cannot be read",
         "dependabot_not_configured": "nothing opens dependency updates",
-        "cloud_surface_partly_read": "part of the cloud account was unreadable",
+        "cloud_surface_partly_read": "enabled cloud APIs nothing here inspects",
     }
 
     def _consequence(rule: str, severity: str) -> tuple[str, str]:
@@ -1882,7 +1936,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         gate = str(payload.get("gate") or "confirmed").strip()
         if not (project and said):
             raise HTTPException(400, "need a project and what you said")
-        if registry.get(project) is None:
+        if all(t.id != project for t in registry.projects):
             raise HTTPException(400, f"no project {project!r}")
         if gate not in GATES:
             raise HTTPException(400, f"unknown gate {gate!r}")
@@ -2409,8 +2463,16 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 s = store()
                 try:
-                    await collect_all(load_registry(registry_path), s, project=project, log=note)
-                    check_all(load_registry(registry_path), s, project=project, log=note)
+                    reg = load_registry(registry_path)
+                    await collect_all(reg, s, project=project, log=note)
+                    # The same sweep the timer runs, in the same order: the
+                    # button must not be a lesser sweep, or the checkpoint's
+                    # "quiet" would depend on which one ran last.
+                    note("history: reading repository events")
+                    await ingest_all(reg, s, project=project, log=note)
+                    note("verify: asking each project's checks about applied actions")
+                    await verify_applied(reg, s, project=project, log=note)
+                    check_all(reg, s, project=project, log=note)
                 finally:
                     s.close()
             except Exception as exc:  # noqa: BLE001 — surfaced in the UI, not swallowed
