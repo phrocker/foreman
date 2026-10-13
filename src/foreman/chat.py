@@ -544,6 +544,7 @@ async def ask(
         # what makes the chat pane work on any backend, including one with no
         # tools at all.
         needs=frozenset(),
+        hints={"prefer": getattr(registry, "chat_connector", "") or ""},
         timeout_s=TIMEOUT_S,
         model=model,
         # The answer is `reply`; stream that as it is written.

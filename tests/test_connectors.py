@@ -618,3 +618,27 @@ def test_stderr_is_drained_while_stdout_is_read():
     drain = stream.index("create_task(proc.stderr.read())")
     loop = stream.index("await proc.stdout.readline()")
     assert drain < loop, "stderr must be draining before the stdout loop blocks on it"
+
+
+def test_a_task_may_prefer_a_backend_without_requiring_it():
+    """ "Ask Foreman" should be answered by the model the operator works with,
+    not whichever runs cheapest — unless that one is down."""
+    from pydantic import BaseModel
+
+    from foreman.connectors.base import Task, choose
+
+    class Out(BaseModel):
+        x: str = ""
+
+    class Fake:
+        def __init__(self, name, up=True):
+            self.name, self.up, self.capabilities = name, up, frozenset()
+
+        def available(self):
+            return self.up
+
+    task = Task(instructions="q", schema=Out, hints={"prefer": "claude-code"})
+    assert choose([Fake("codex"), Fake("claude-code")], task).name == "claude-code"
+    assert choose([Fake("codex"), Fake("claude-code", up=False)], task).name == "codex"
+    plain = Task(instructions="q", schema=Out)
+    assert choose([Fake("codex"), Fake("claude-code")], plain).name == "codex"

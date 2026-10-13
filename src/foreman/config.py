@@ -310,6 +310,11 @@ class Registry(BaseModel):
     connectors: list[ConnectorConfig] = Field(
         default_factory=lambda: [ConnectorConfig(kind="claude-code")]
     )
+    # Which backend answers "Ask Foreman". A preference, not a requirement:
+    # if it is down or absent the connector order above applies. Claude Code
+    # by default, so the chat is answered by the model the operator works
+    # with rather than whichever runs cheapest for unattended tasks.
+    chat_connector: str = "claude-code"
 
     @property
     def active(self) -> list[Project]:

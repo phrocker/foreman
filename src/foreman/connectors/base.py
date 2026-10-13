@@ -179,7 +179,14 @@ def choose(connectors: list[Connector], task: Task) -> Connector:
     than returning None: a caller that forgets to check would otherwise turn a
     missing backend into a silently empty report.
     """
-    for connector in connectors:
+    # A task may name the backend it would rather have ("prefer" in hints).
+    # It is a preference, not a requirement: when that backend is down or
+    # cannot serve the task, the configured order applies as before. The chat
+    # pane uses it, because a question asked of Foreman should be answered by
+    # the same model the operator works with, not whichever runs cheapest.
+    preferred = task.hints.get("prefer", "")
+    ordered = sorted(connectors, key=lambda c: c.name != preferred) if preferred else connectors
+    for connector in ordered:
         if can_serve(connector, task) and connector.available():
             return connector
     wanted = ", ".join(sorted(task.needs)) or "nothing in particular"
