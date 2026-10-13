@@ -220,6 +220,11 @@ def score(prior_value: float, neighbours: list[dict[str, Any]]) -> dict[str, Any
 # --- the sweep step -------------------------------------------------------------
 
 
+def _ms(iso: str) -> float:
+    when = _parse(iso)
+    return when.timestamp() if when else 0.0
+
+
 def _digest(text: str) -> str:
     import hashlib
 
@@ -282,7 +287,15 @@ def refresh(
     #    recovered from the API when the open-time sweep never saw them.
     since = (now - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
     fetched = 0
-    for ev in store.events(kind="pr", since=since, limit=5000):
+    # Judgeable first. The log is newest-first, and the forty newest merged
+    # changes are all inside the fortnight — fetched, embedded, and unable to
+    # earn a label until next week. The ones old enough to be judged are the
+    # ones a label can come from today, so they go to the front; among them,
+    # newest first, because that is what open changes resemble.
+    cutoff = (now - timedelta(days=JUDGE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
+    events = store.events(kind="pr", since=since, limit=5000)
+    events.sort(key=lambda e: (str(e.get("at") or "") >= cutoff, -_ms(str(e.get("at") or ""))))
+    for ev in events:
         fields = ev.get("fields")
         if isinstance(fields, str):
             try:
