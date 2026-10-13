@@ -193,8 +193,10 @@ def _capped(rows: list[dict[str, Any]], limit: int = PER_PROJECT) -> list[dict[s
     return sorted(out, key=lambda r: rank.get(str(r.get("grade")), 3))
 
 
-def _risky(rated: dict[str, dict[str, Any]], level: str = "high") -> list[dict[str, Any]]:
-    """Open pull requests the last sweep rated at `level`, as decisions.
+def _risky(
+    rated: dict[str, dict[str, Any]], levels: tuple[str, ...] = ("high", "medium")
+) -> list[dict[str, Any]]:
+    """Open pull requests the last sweep rated at one of `levels`, worst first.
 
     A high-risk change nobody has looked at closely is waiting on exactly one
     decision — spend the review or don't — and that decision is the
@@ -202,19 +204,24 @@ def _risky(rated: dict[str, dict[str, Any]], level: str = "high") -> list[dict[s
     open pull requests on purpose, but the five rated high are the five that
     should not be hidden with them.
     """
+    grade = {"high": "critical", "medium": "serious", "low": "warning"}
     rows = []
     for subject, risk in rated.items():
-        if risk.get("level") != level:
+        level = str(risk.get("level") or "")
+        if level not in levels:
             continue
         slug, _, number = subject.removeprefix("pull:").partition("#")
         rows.append(
             {
+                "subject": subject,
                 "project": risk.get("project") or slug.split("/")[-1],
                 "title": f"#{number} {risk.get('title') or ''}".strip(),
-                "why": f"risk {level} · {risk.get('basis') or ''}"
-                + (f" · touches {', '.join(risk['buckets'])}" if risk.get("buckets") else ""),
+                "why": risk.get("basis") or "",
+                "touches": list(risk.get("buckets") or []),
+                "neighbours": list(risk.get("neighbours") or []),
                 "where": risk.get("url") or "",
-                "grade": "serious" if level == "high" else "warning",
+                "level": level,
+                "grade": grade.get(level, "warning"),
                 "score": float(risk.get("score") or 0),
             }
         )
@@ -1908,14 +1915,22 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         "where": p.get("url") or "",
                     }
                 )
-        # And the changes the last sweep rated high: review them or say no.
-        blocked.extend(_risky(rated))
+        # The changes the last sweep rated: their own zone, because a row that
+        # says "risk high" in the middle of a sentence is a row nobody sees.
+        levels = {"high": 0, "medium": 0, "low": 0}
+        for risk in rated.values():
+            levels[str(risk.get("level"))] = levels.get(str(risk.get("level")), 0) + 1
 
         return {
             "fire": _capped(fire),
             "blind": blind,
             "blocked": _capped(blocked),
             "noisy": _noisy(findings),
+            "risk": {
+                "rows": _capped(_risky(rated)),
+                "counts": levels,
+                "rated": len(rated),
+            },
             # The third question, and the one no collector can ask: what did
             # you say you would do. Uncapped — a promise is yours, and there
             # is no noisy neighbour to be fair to.

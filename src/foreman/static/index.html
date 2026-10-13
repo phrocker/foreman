@@ -420,6 +420,15 @@
   .att-what { flex: 1 1 auto; min-width: 0; }
   .att-why { color: var(--text-3); font-size: 0.86em; }
   .att-empty { color: var(--text-3); font-size: 0.88em; padding: 6px 0; }
+  .att-risk .att-row { align-items: center; }
+  .risk-meter { display: inline-block; width: 64px; height: 8px; border-radius: 4px; background: var(--border-firm);
+    overflow: hidden; vertical-align: middle; flex: 0 0 64px; }
+  .risk-meter i { display: block; height: 100%; background: var(--medium); }
+  .risk-meter.high i { background: var(--high); }
+  .risk-level { font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; min-width: 4.6em; }
+  .risk-level.high { color: var(--high); } .risk-level.medium { color: var(--medium); }
+  .risk-why { color: var(--text-3); font-size: 0.82em; margin: 2px 0 0 0; }
+  .risk-go { font: inherit; font-size: 0.8em; padding: 2px 8px; margin-left: auto; }
   .att-noisy { margin-top: 10px; border-top: 1px dashed var(--border-firm); padding-top: 8px;
     color: var(--text-2); font-size: 0.86em; }
 
@@ -1881,8 +1890,45 @@ function renderAttention() {
       ${d.blocked.length ? d.blocked.map(row).join("")
         : `<div class="att-empty">Nothing is blocked on a decision from you.</div>`}
     </div>
-  </div>${renderSaid(d.said)}`;
+  </div>${renderRisk(d.risk)}${renderSaid(d.said)}`;
   wireSaid();
+  wireRisk();
+}
+
+// --- risky changes --------------------------------------------------------------
+//
+// What the last sweep thought each open change deserved, as its own zone: a
+// meter, the level, what it touches, and the merged changes it resembles with
+// what happened to them. The review button is here because this is where the
+// decision is made; the Work tab is where the rest of the pull request lives.
+
+function renderRisk(risk) {
+  if (!risk) return "";
+  const rows = risk.rows || [];
+  const c = risk.counts || {};
+  const sub = risk.rated
+    ? `${c.high || 0} high · ${c.medium || 0} medium · ${c.low || 0} low · ${risk.rated} open changes rated`
+    : "nothing rated yet — a sweep embeds open changes and labels merged ones";
+  const line = (r) => `<div class="att-row">
+      <span class="risk-meter ${esc(r.level)}" title="${Number(r.score).toFixed(2)}"><i style="width:${Math.round(r.score * 100)}%"></i></span>
+      <span class="risk-level ${esc(r.level)}">${esc(r.level)}</span>
+      <span class="att-proj">${esc(r.project)}</span>
+      <span class="att-what"><a href="${esc(r.where)}" target="_blank" rel="noopener">${esc(r.title)}</a>
+        <div class="risk-why">${r.touches.length ? `touches ${esc(r.touches.join(", "))} · ` : ""}${esc(r.why)}${
+          (r.neighbours || []).length ? ` · like ` + r.neighbours.map((n) =>
+            `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(String(n.key).replace("pull:", ""))}</a> <span class="risk-${esc(n.label)}">${esc(n.label)}</span>`).join(", ") : ""}</div>
+      </span>
+      <button class="risk-go adv-review" data-subject="${esc(r.subject)}" title="Four agents read the diff; what they find is posted to the pull request. Costs money; nothing merges.">Review</button>
+    </div>`;
+  return `<div class="att-col att-risk">
+    <div class="att-head"><span class="att-title">Risky changes</span><span class="att-sub">${esc(sub)}</span></div>
+    ${rows.length ? rows.map(line).join("") : `<div class="att-empty">No open change is rated above low.</div>`}
+  </div>`;
+}
+
+function wireRisk() {
+  document.querySelectorAll(".att-risk .adv-review").forEach((b) =>
+    b.addEventListener("click", () => reviewPull(b.dataset.subject, b)));
 }
 
 // --- this week ----------------------------------------------------------------

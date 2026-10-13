@@ -147,9 +147,10 @@ def test_systemds_wall_clock_form_becomes_an_instant(monkeypatch):
     assert out == expect
 
 
-def test_a_high_risk_change_is_a_decision_waiting_on_you():
-    """The Work tab hides a stewarded project's hundred open changes on
-    purpose; the five rated high are the five that must not hide with them."""
+def test_rated_changes_are_their_own_zone_worst_first():
+    """A row that says "risk high" in the middle of a sentence is a row nobody
+    sees. These carry the level, the score and the neighbours for a zone of
+    their own; low stays on the Work tab."""
     rated = {
         "pull:apache/accumulo#1": {
             "level": "high",
@@ -169,15 +170,21 @@ def test_a_high_risk_change_is_a_decision_waiting_on_you():
             "url": "u2",
         },
         "pull:o/r#3": {
-            "level": "high",
-            "score": 0.7,
+            "level": "medium",
+            "score": 0.5,
             "basis": "2 of 3 similar merged changes needed a fix",
             "project": "mfa",
             "title": "Billing",
             "url": "u3",
+            "neighbours": [
+                {"key": "pull:o/r#9", "label": "trouble", "similarity": 0.8, "url": "u9"}
+            ],
         },
     }
     rows = _risky(rated)
-    assert [r["title"] for r in rows] == ["#1 Rework login", "#3 Billing"]
-    assert rows[0]["grade"] == "serious" and "touches auth" in rows[0]["why"]
-    assert rows[1]["where"] == "u3"
+    assert [(r["title"], r["level"], r["grade"]) for r in rows] == [
+        ("#1 Rework login", "high", "critical"),
+        ("#3 Billing", "medium", "serious"),
+    ]
+    assert rows[0]["touches"] == ["auth"] and rows[0]["subject"] == "pull:apache/accumulo#1"
+    assert rows[1]["neighbours"][0]["label"] == "trouble"
