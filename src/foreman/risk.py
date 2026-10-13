@@ -52,7 +52,10 @@ FETCH_PER_SWEEP = 40
 # What a path says about the change. Order matters only for the label shown;
 # every bucket a path matches counts.
 BUCKETS: dict[str, re.Pattern[str]] = {
-    "auth": re.compile(r"auth|login|session|jwt|oauth|password|passwd|token|permission|rbac", re.I),
+    # auth(?!or): an "authors" file is not an authentication change.
+    "auth": re.compile(
+        r"auth(?!or)|login|session|jwt|oauth|password|passwd|token|permission|rbac", re.I
+    ),
     "payments": re.compile(r"pay|billing|stripe|plaid|invoice|checkout|subscription", re.I),
     "secrets": re.compile(r"\.env|secret|credential|keyring|vault", re.I),
     "data": re.compile(r"migration|alembic|schema|models?/|\.sql$|database", re.I),
@@ -465,6 +468,9 @@ def risks(store: Any) -> dict[str, dict[str, Any]]:
             **r["meta"]["risk"],
             "buckets": r["meta"].get("buckets", []),
             "scored_at": r["meta"].get("scored_at"),
+            "project": r["meta"].get("project"),
+            "title": r["meta"].get("title"),
+            "url": r["meta"].get("url"),
         }
         for r in store.vectors(SPACE)
         if r["meta"].get("state") == "open" and isinstance(r["meta"].get("risk"), dict)

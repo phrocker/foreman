@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from foreman.web import STALE_AFTER, _capped, _noisy, _stale, _sweep_schedule
+from foreman.web import STALE_AFTER, _capped, _noisy, _risky, _stale, _sweep_schedule
 
 
 def _row(project, grade="serious", title="x"):
@@ -145,3 +145,39 @@ def test_systemds_wall_clock_form_becomes_an_instant(monkeypatch):
     # The local wall-clock reading, re-expressed in UTC: same instant either way.
     expect = datetime(2026, 10, 13, 6, 1, 14).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert out == expect
+
+
+def test_a_high_risk_change_is_a_decision_waiting_on_you():
+    """The Work tab hides a stewarded project's hundred open changes on
+    purpose; the five rated high are the five that must not hide with them."""
+    rated = {
+        "pull:apache/accumulo#1": {
+            "level": "high",
+            "score": 0.9,
+            "basis": "prior only",
+            "buckets": ["auth"],
+            "project": "accumulo",
+            "title": "Rework login",
+            "url": "u1",
+        },
+        "pull:apache/accumulo#2": {
+            "level": "low",
+            "score": 0.1,
+            "basis": "x",
+            "project": "accumulo",
+            "title": "Typo",
+            "url": "u2",
+        },
+        "pull:o/r#3": {
+            "level": "high",
+            "score": 0.7,
+            "basis": "2 of 3 similar merged changes needed a fix",
+            "project": "mfa",
+            "title": "Billing",
+            "url": "u3",
+        },
+    }
+    rows = _risky(rated)
+    assert [r["title"] for r in rows] == ["#1 Rework login", "#3 Billing"]
+    assert rows[0]["grade"] == "serious" and "touches auth" in rows[0]["why"]
+    assert rows[1]["where"] == "u3"

@@ -54,6 +54,7 @@ from .research import research as run_research
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
 from .revise import _git, address_review, offloaded
 from .risk import refresh as refresh_risk
+from .risk import risks
 from .runner import (
     apply_action,
     apply_eligible,
@@ -190,6 +191,35 @@ def _capped(rows: list[dict[str, Any]], limit: int = PER_PROJECT) -> list[dict[s
     # which is fair in the wrong dimension.
     rank = {"critical": 0, "serious": 1, "warning": 2}
     return sorted(out, key=lambda r: rank.get(str(r.get("grade")), 3))
+
+
+def _risky(rated: dict[str, dict[str, Any]], level: str = "high") -> list[dict[str, Any]]:
+    """Open pull requests the last sweep rated at `level`, as decisions.
+
+    A high-risk change nobody has looked at closely is waiting on exactly one
+    decision — spend the review or don't — and that decision is the
+    operator's. Stewarded projects included: the Work tab hides their hundred
+    open pull requests on purpose, but the five rated high are the five that
+    should not be hidden with them.
+    """
+    rows = []
+    for subject, risk in rated.items():
+        if risk.get("level") != level:
+            continue
+        slug, _, number = subject.removeprefix("pull:").partition("#")
+        rows.append(
+            {
+                "project": risk.get("project") or slug.split("/")[-1],
+                "title": f"#{number} {risk.get('title') or ''}".strip(),
+                "why": f"risk {level} · {risk.get('basis') or ''}"
+                + (f" · touches {', '.join(risk['buckets'])}" if risk.get("buckets") else ""),
+                "where": risk.get("url") or "",
+                "grade": "serious" if level == "high" else "warning",
+                "score": float(risk.get("score") or 0),
+            }
+        )
+    rows.sort(key=lambda r: -r["score"])
+    return rows
 
 
 def _noisy(findings: list[dict[str, Any]], floor: int = 20) -> list[dict[str, Any]]:
@@ -1760,6 +1790,10 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # it is ticked rather than the next morning.
             settle(s)
             said = what_you_said(s)
+            try:
+                rated = risks(s)
+            except Exception:  # noqa: BLE001 — no vectors yet is not a reason to blank the board
+                rated = {}
         finally:
             s.close()
 
@@ -1874,6 +1908,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         "where": p.get("url") or "",
                     }
                 )
+        # And the changes the last sweep rated high: review them or say no.
+        blocked.extend(_risky(rated))
 
         return {
             "fire": _capped(fire),

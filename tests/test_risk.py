@@ -26,6 +26,11 @@ def test_paths_say_what_a_change_touches():
     assert set(found) == {"auth", "infra", "docs", "tests"}
 
 
+def test_an_authors_file_is_not_an_authentication_change():
+    assert "auth" not in buckets(["AUTHORS", "docs/authors.md"])
+    assert "auth" in buckets(["server/security/handler/KerberosAuthenticator.java"])
+
+
 def test_docs_only_has_a_ceiling_and_auth_has_a_floor():
     assert prior(["docs"], 1, 10) <= 0.1
     assert prior(["auth"], 1, 10) >= 0.5
