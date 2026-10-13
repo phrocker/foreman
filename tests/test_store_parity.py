@@ -1308,3 +1308,32 @@ def test_an_edge_written_with_an_unpadded_id_lands_on_the_entity(store):
     # And the neighbour comes back in the one spelling, however it was named.
     assert store.neighbors([node("finding", fid)], [REMEMBERS]) == [node("memory", 7)]
     assert store.neighbors([f"finding|{fid}"], [REMEMBERS]) == [node("memory", 7)]
+
+
+# --- vectors -----------------------------------------------------------------
+
+
+def test_a_vector_round_trips_with_its_metadata(store):
+    store.put_vector("pull", "pull:o/r#1", [0.1, 0.2, 0.3], {"label": "clean", "n": "1"})
+    store.put_vector("pull", "pull:o/r#1", [0.3, 0.2, 0.1], {"label": "trouble"})  # replaced
+    (row,) = store.vectors("pull")
+    assert row["key"] == "pull:o/r#1"
+    assert [round(x, 5) for x in row["vector"]] == [0.3, 0.2, 0.1]
+    assert row["meta"] == {"label": "trouble"}
+    assert row["updated_at"]
+
+
+def test_nearest_is_cosine_best_first_in_both_stores(store):
+    store.put_vector("pull", "same", [1.0, 0.0, 0.0], {"label": "trouble"})
+    store.put_vector("pull", "close", [0.9, 0.1, 0.0], {"label": "clean"})
+    store.put_vector("pull", "far", [0.0, 0.0, 1.0], {})
+    store.put_vector("other", "elsewhere", [1.0, 0.0, 0.0], {})  # another space: unseen
+
+    out = store.nearest("pull", [1.0, 0.0, 0.0], k=2)
+
+    assert [r["key"] for r in out] == ["same", "close"]
+    assert out[0]["score"] == pytest.approx(1.0, abs=1e-5)
+    assert out[1]["score"] == pytest.approx(0.9 / (0.81 + 0.01) ** 0.5, abs=1e-4)
+    assert out[0]["meta"] == {"label": "trouble"}
+    assert store.nearest("pull", [1.0, 0.0, 0.0], k=10)[-1]["key"] == "far"
+    assert store.nearest("empty", [1.0, 0.0, 0.0]) == []

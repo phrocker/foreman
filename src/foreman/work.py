@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .risk import risks
 from .store import Store
 
 # What a pull request is waiting on, most actionable first. The order is the
@@ -85,6 +86,12 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
     """
     targets = [registry.get(project)] if project else registry.active
     rows: list[dict[str, Any]] = []
+    # What the last sweep thought each one deserved. Advice, shown beside the
+    # review button; absent until a sweep has embedded the pull request.
+    try:
+        rated = risks(store)
+    except Exception:  # noqa: BLE001 — a missing vectors table must not blank the board
+        rated = {}
     for target in targets:
         if target.github is None:
             continue
@@ -148,6 +155,7 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
                         )
                     ),
                     "created_at": facts.get("created_at") or "",
+                    "risk": rated.get(subject),
                 }
             )
     rows.sort(key=lambda r: (r["blocking"] is not None, r["blocking"] or "", -r["number"]))

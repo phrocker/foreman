@@ -53,6 +53,7 @@ from .research import DEFAULT_CEILING_USD as RESEARCH_CEILING_USD
 from .research import research as run_research
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
 from .revise import _git, address_review, offloaded
+from .risk import refresh as refresh_risk
 from .runner import (
     apply_action,
     apply_eligible,
@@ -2470,6 +2471,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     # "quiet" would depend on which one ran last.
                     note("history: reading repository events")
                     await ingest_all(reg, s, project=project, log=note)
+                    note("risk: rating open pull requests against what merged ones needed")
+                    await asyncio.to_thread(refresh_risk, s, reg, note)
                     note("verify: asking each project's checks about applied actions")
                     await verify_applied(reg, s, project=project, log=note)
                     check_all(reg, s, project=project, log=note)

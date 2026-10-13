@@ -21,6 +21,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from . import vectors as vec
 from .graph import (
     HAS_PHASE,
     SUPERSEDES,
@@ -183,6 +184,13 @@ class Store(Protocol):
     def commitment(self, commitment_id: int) -> Record | None: ...
     def keep_commitment(self, commitment_id: int, kept_at: str, evidence: str) -> None: ...
     def set_commitment_status(self, commitment_id: int, status: str) -> None: ...
+
+    # --- vectors ---
+    def put_vector(
+        self, space: str, key: str, vector: Sequence[float], meta: dict[str, str]
+    ) -> None: ...
+    def vectors(self, space: str) -> list[Record]: ...
+    def nearest(self, space: str, vector: Sequence[float], k: int = 10) -> list[Record]: ...
 
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
@@ -454,6 +462,18 @@ CREATE TABLE IF NOT EXISTS commitments (
     evidence   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments (status, due);
+
+-- Embeddings, one per (space, key), with whatever the embedder's caller wants
+-- to carry beside it. The vector is the same big-endian float32 bytes shoal
+-- scores server-side, so the two stores answer nearest() alike.
+CREATE TABLE IF NOT EXISTS vectors (
+    space      TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    vector     BLOB NOT NULL,
+    meta       TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (space, key)
+);
 
 -- Relationships between entities, written when the facts are so they can be
 -- walked rather than rediscovered. Node ids are "<kind>|<key>"; the shoal
@@ -1400,6 +1420,47 @@ class SqliteStore:
     def set_commitment_status(self, commitment_id: int, status: str) -> None:
         self._db.execute("UPDATE commitments SET status = ? WHERE id = ?", (status, commitment_id))
         self._db.commit()
+
+    # --- vectors ----------------------------------------------------------
+
+    def put_vector(
+        self, space: str, key: str, vector: Sequence[float], meta: dict[str, str]
+    ) -> None:
+        self._db.execute(
+            "INSERT INTO vectors (space, key, vector, meta, updated_at) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(space, key) DO UPDATE SET vector = excluded.vector,"
+            " meta = excluded.meta, updated_at = excluded.updated_at",
+            (space, key, vec.pack(vector), json.dumps(meta or {}, sort_keys=True), utcnow()),
+        )
+        self._db.commit()
+
+    def vectors(self, space: str) -> list[Record]:
+        rows = self._db.execute(
+            "SELECT key, vector, meta, updated_at FROM vectors WHERE space = ? ORDER BY key",
+            (space,),
+        ).fetchall()
+        return [
+            {
+                "key": r["key"],
+                "vector": vec.unpack(r["vector"]),
+                "meta": json.loads(r["meta"] or "{}"),
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    def nearest(self, space: str, vector: Sequence[float], k: int = 10) -> list[Record]:
+        """The k most similar keys in a space, best first, with cosine scores.
+
+        Brute force, which is what shoal does too until an IVF index has been
+        trained; the point of having it here is parity, not speed.
+        """
+        scored = [
+            {"key": r["key"], "score": vec.cosine(vector, r["vector"]), "meta": r["meta"]}
+            for r in self.vectors(space)
+        ]
+        scored.sort(key=lambda r: (-r["score"], r["key"]))
+        return scored[:k]
 
     # --- graph ------------------------------------------------------------
 

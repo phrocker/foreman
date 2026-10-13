@@ -155,7 +155,27 @@ class Pulls:
         ]
         out.extend(await self._checks(slug, pull, subject, ob))
         out.extend(await self._review(slug, number, subject, ob))
+        out.extend(await self._files(slug, number, subject, ob))
         return out
+
+    async def _files(self, slug: str, number: int, subject: str, ob) -> list[Observation]:
+        """What the change touches. One call; the list is capped because a
+        vendored-tree bump can be ten thousand paths and nothing reads past the
+        first few hundred."""
+        try:
+            files = await gh_api(f"repos/{slug}/pulls/{number}/files?per_page=100", paginate=True)
+        except GitHubError as exc:
+            return [ob(subject, "files_error", str(exc))]
+        paths = [str(f.get("filename") or "") for f in files or [] if isinstance(f, dict)]
+        paths = [p for p in paths if p][:300]
+        additions = sum(int(f.get("additions") or 0) for f in files or [] if isinstance(f, dict))
+        deletions = sum(int(f.get("deletions") or 0) for f in files or [] if isinstance(f, dict))
+        return [
+            ob(subject, "files", json.dumps(paths)),
+            ob(subject, "changed_files", str(len(files or []))),
+            ob(subject, "additions", str(additions)),
+            ob(subject, "deletions", str(deletions)),
+        ]
 
     # Resolution lives only in GraphQL. REST returns every comment ever left, so
     # a pull request whose objections have all been answered counted the same as

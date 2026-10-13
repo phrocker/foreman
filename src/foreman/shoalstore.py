@@ -64,6 +64,7 @@ from typing import Any
 
 import grpc
 
+from . import vectors as vec
 from .graph import (
     EDGE_CF,
     HAS_PHASE,
@@ -230,10 +231,28 @@ class ShoalStore:
         )
         try:
             self._create_table(stub, request)
+            # Vectors live in their own table, created declaring the one
+            # embedding space its files will ever hold. shoal refuses a
+            # raw-vector query against files whose space is unknown — which
+            # every file of the main table is, and must stay, since it holds
+            # no vectors — so the declaration is the thing that makes
+            # nearest() possible at all.
+            self._create_table(
+                stub,
+                pb.CreateTableRequest(
+                    table=self.vectors_table,
+                    workload=pb.TABLE_WORKLOAD_OPERATIONAL,
+                    default_embedding=f"has_embeddings:{vec.EMBEDDING_SPACE}",
+                ),
+            )
         except grpc.RpcError:
             channel.close()
             raise
         self._channel, self._rpc = channel, stub
+
+    @property
+    def vectors_table(self) -> str:
+        return f"{self.table}_vectors"
 
     def _create_table(self, stub: rpc.ShoalEmbedStub, request: pb.CreateTableRequest) -> None:
         """Create the table, tolerating only the two things that are not errors.
@@ -289,8 +308,10 @@ class ShoalStore:
             return 0
         return self._stub.Write(pb.WriteRequest(table=self.table, mutations=mutations)).written
 
-    def _cells(self, prefix: str, as_of: str | None = None) -> list[pb.Cell]:
-        request = pb.ScanRequest(table=self.table, row_prefix=prefix)
+    def _cells(
+        self, prefix: str, as_of: str | None = None, table: str | None = None
+    ) -> list[pb.Cell]:
+        request = pb.ScanRequest(table=table or self.table, row_prefix=prefix)
         if as_of:
             request.as_of = _ms(as_of)
         return [cell for resp in self._stub.Scan(request) for cell in resp.cells]
@@ -1175,6 +1196,89 @@ class ShoalStore:
         self._write(
             [self._put(_rid("commitment", _pad(commitment_id)), "commitment", {"status": status})]
         )
+
+    # --- vectors -------------------------------------------------------------
+    #
+    # Row `vec:<space>|<key>`: the embedding under shoal's own vector column
+    # family (so shoal-ivf-train can index the table as it is), the caller's
+    # metadata beside it as ordinary cells.
+
+    def put_vector(
+        self, space: str, key: str, vector: Sequence[float], meta: dict[str, str]
+    ) -> None:
+        row = f"vec:{space}|{key}".encode()
+        self._stub.Write(
+            pb.WriteRequest(
+                table=self.vectors_table,
+                mutations=[
+                    pb.Mutation(
+                        row=row,
+                        entries=[
+                            pb.Entry(
+                                column_family=vec.EMBEDDING_CF.encode(),
+                                column_qualifier=vec.EMBEDDING_CQ.encode(),
+                                value=vec.pack(vector),
+                            ),
+                            pb.Entry(
+                                column_family=b"meta",
+                                column_qualifier=b"json",
+                                value=json.dumps(meta or {}, sort_keys=True).encode(),
+                            ),
+                            pb.Entry(
+                                column_family=b"meta",
+                                column_qualifier=b"updated_at",
+                                value=utcnow().encode(),
+                            ),
+                        ],
+                    )
+                ],
+            )
+        )
+
+    def vectors(self, space: str) -> list[Record]:
+        prefix = f"vec:{space}|"
+        rows: dict[str, dict[str, Any]] = {}
+        for cell in self._cells(prefix, table=self.vectors_table):
+            key = cell.row.decode().removeprefix(prefix)
+            rec = rows.setdefault(key, {"key": key, "vector": [], "meta": {}, "updated_at": None})
+            if cell.column_family == vec.EMBEDDING_CF.encode():
+                rec["vector"] = vec.unpack(cell.value)
+            elif cell.column_qualifier == b"json":
+                rec["meta"] = json.loads(cell.value.decode() or "{}")
+            elif cell.column_qualifier == b"updated_at":
+                rec["updated_at"] = cell.value.decode() or None
+        return [rows[k] for k in sorted(rows)]
+
+    def nearest(self, space: str, vector: Sequence[float], k: int = 10) -> list[Record]:
+        """Server-side k-NN: shoal scores every embedding cell under the prefix
+        and returns the k best with the value replaced by the score."""
+        prefix = f"vec:{space}|"
+        request = pb.ScanRequest(
+            table=self.vectors_table,
+            row_prefix=prefix,
+            vector_search=pb.VectorSearch(
+                query=vec.pack(vector),
+                top_k=max(1, k),
+                embedding_cf=vec.EMBEDDING_CF.encode(),
+                metric="cosine",
+                embedding_space=vec.EMBEDDING_SPACE,
+            ),
+        )
+        # ScanV2, not Scan: the V2 path is the one that checks the query's
+        # embedding space against the files', and a server without it must
+        # fail closed rather than compare vectors from different models.
+        scored = [
+            (cell.row.decode().removeprefix(prefix), vec.unpack(cell.value)[0])
+            for resp in self._stub.ScanV2(request)
+            for cell in resp.cells
+        ]
+        if not scored:
+            return []
+        meta = {r["key"]: r["meta"] for r in self.vectors(space)}
+        out = [{"key": key, "score": score, "meta": meta.get(key, {})} for key, score in scored]
+        # Best first; ties by key, the same order the sqlite twin produces.
+        out.sort(key=lambda r: (-r["score"], r["key"]))
+        return out[:k]
 
     # --- graph -------------------------------------------------------------
 

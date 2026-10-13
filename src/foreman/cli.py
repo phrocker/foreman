@@ -33,6 +33,7 @@ from .plans import GATES, plan_progress
 from .precision import label as precision_label
 from .precision import rank, rule_scores
 from .report import write_report
+from .risk import refresh as refresh_risk
 from .runner import (
     apply_action,
     apply_eligible,
@@ -896,6 +897,45 @@ def checkpoint_cmd(
         )
     for line in narrate(cp):
         console.print(line)
+
+
+@app.command()
+def risk(
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Rate open pull requests by what similar merged ones turned out to need.
+
+    Embeds locally (Ollama, nomic-embed-text); labels merged pull requests
+    from what happened after them; scores open ones. Spends nothing.
+    """
+    reg = load_registry(registry)
+    with open_store(db, registry=registry) as store:
+        counts = refresh_risk(store, reg, log=lambda m: console.print(f"  {m}"))
+        rated = sorted(
+            (
+                (r["meta"]["risk"]["score"], r["key"], r["meta"]["risk"])
+                for r in store.vectors("pull")
+                if r["meta"].get("state") == "open" and isinstance(r["meta"].get("risk"), dict)
+            ),
+            reverse=True,
+        )
+    if not rated:
+        console.print("[dim]Nothing rated. Sweep first, and make sure Ollama is running.[/]")
+        return
+    table = Table(box=None, pad_edge=False)
+    for column in ("risk", "level", "pull request", "basis"):
+        table.add_column(column)
+    for value, key, detail in rated:
+        style = {"high": "red", "medium": "yellow"}.get(detail["level"], "")
+        table.add_row(
+            f"{value:.2f}",
+            f"[{style}]{detail['level']}[/]" if style else detail["level"],
+            key.removeprefix("pull:"),
+            _clip(detail["basis"], 70),
+        )
+    console.print(table)
+    console.print(f"[dim]{counts['embedded']} embedded · {counts['labelled']} labelled[/]")
 
 
 @app.command()

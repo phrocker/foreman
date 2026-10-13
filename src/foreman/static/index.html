@@ -383,6 +383,11 @@
   .att-state.overdue { color: var(--high); } .att-state.soon { color: var(--medium); }
   .att-state.open { color: var(--text-3); } .att-state.kept { color: var(--ok, #2d7a3e); }
   .att-state.dropped { color: var(--text-3); text-decoration: line-through; }
+  .chip.risk-high { color: var(--high); border-color: var(--high); }
+  .chip.risk-medium { color: var(--medium); border-color: var(--medium); }
+  .chip.risk-low { color: var(--text-3); }
+  .risk-line { font-size: 0.82em; }
+  .risk-trouble { color: var(--high); } .risk-clean { color: var(--low); } .risk-unknown { color: var(--text-3); }
   .att-said form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
   .att-said form input, .att-said form select { font: inherit; font-size: 0.85em; padding: 4px 6px;
     border: 1px solid var(--border-firm); border-radius: 4px; background: var(--surface); color: inherit; }
@@ -1700,7 +1705,9 @@ function renderWork() {
         <span class="work-title">${esc(r.title)}</span>
         ${r.foreman ? '<span class="chip">foreman</span>' : ""}
         ${r.draft ? '<span class="chip">draft</span>' : ""}
+        ${riskChip(r.risk)}
       </div>
+      ${riskLine(r.risk)}
       <div class="work-meta">
         ${esc(r.project)} · ${esc(r.author)} · <code>${esc(r.branch)}</code> → <code>${esc(r.base)}</code>
         · checks ${esc(r.checks || "unknown")}${r.checks_failing ? ` (${r.checks_failing} failing)` : ""}
@@ -1728,6 +1735,23 @@ function renderWork() {
     refresh.dataset.wired = "1";
     refresh.addEventListener("click", refreshPulls);
   }
+}
+
+// What the last sweep thought a pull request deserved. Advice beside the
+// review button, with the three merged changes it most resembles and what
+// happened to them — so the number can be argued with rather than trusted.
+function riskChip(risk) {
+  if (!risk) return "";
+  return `<span class="chip risk-${esc(risk.level)}" title="${esc(risk.basis)}">risk ${esc(risk.level)} · ${Number(risk.score).toFixed(2)}</span>`;
+}
+
+function riskLine(risk) {
+  if (!risk) return "";
+  const near = (risk.neighbours || []).map((n) =>
+    `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(String(n.key).replace("pull:", ""))}</a>
+     <span class="risk-${esc(n.label)}">${esc(n.label)}</span> (${Number(n.similarity).toFixed(2)})`).join(" · ");
+  const touches = (risk.buckets || []).length ? `touches ${esc(risk.buckets.join(", "))} · ` : "";
+  return `<div class="work-meta risk-line">${touches}${esc(risk.basis)}${near ? ` · like ${near}` : ""}</div>`;
 }
 
 /** Dispatch an agent at one pull request's review comments.
