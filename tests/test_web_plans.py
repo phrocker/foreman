@@ -102,3 +102,25 @@ def test_a_commitment_from_the_page_is_validated_like_the_command(tmp_path):
     assert [r["state"] for r in client.get("/api/commitments?everything=true").json()] == [
         "dropped"
     ]
+
+
+def test_subjects_can_be_added_to_a_plan_from_the_page(tmp_path):
+    client = _client(tmp_path)
+    plan_id = client.post(
+        "/api/plans",
+        json={
+            "goal": "x",
+            "subjects": ["domain:a.test"],
+            "phases": [{"name": "p", "gate": "confirmed"}],
+        },
+    ).json()["id"]
+    res = client.post(
+        f"/api/plans/{plan_id}/subjects", json={"subjects": ["domain:b.test", " domain:a.test "]}
+    )
+    assert res.status_code == 200 and res.json()["added"] == ["domain:b.test"]
+    assert sorted(client.get("/api/plans").json()[0]["subjects"]) == [
+        "domain:a.test",
+        "domain:b.test",
+    ]
+    assert client.post(f"/api/plans/{plan_id}/subjects", json={"subjects": []}).status_code == 400
+    assert client.post("/api/plans/999/subjects", json={"subjects": ["x"]}).status_code == 404

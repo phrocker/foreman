@@ -2729,7 +2729,8 @@ function renderPlans() {
         <div class="plan-goal">${esc(plan.goal)}</div>
         <div class="plan-meta">${subjects.length} subject(s) · ${esc(plan.status)} · started ${esc((plan.created_at || "").slice(0, 10))}
           · <button class="link-ish plan-status" data-id="${plan.id}" data-to="${plan.status === "superseded" ? "active" : "superseded"}">${
-            plan.status === "superseded" ? "bring back" : "supersede"}</button></div>
+            plan.status === "superseded" ? "bring back" : "supersede"}</button>
+          ${plan.status !== "superseded" ? `· <button class="link-ish plan-add" data-id="${plan.id}">add subjects</button>` : ""}</div>
       </div>
       <div class="phase-bar">${(plan.summary || []).map((line) => {
         const counts = ["passed", "pending", "blocked", "unknown"]
@@ -2772,6 +2773,17 @@ function renderPlans() {
 
   list.querySelectorAll(".confirm-box").forEach((box) =>
     box.addEventListener("change", () => confirmStep(box)));
+  list.querySelectorAll(".plan-add").forEach((btn) => btn.addEventListener("click", async () => {
+    const raw = prompt("Subjects to put through this plan, comma-separated (domain:a.test, …):");
+    if (!raw) return;
+    const subjects = raw.split(",").map((x) => x.trim()).filter(Boolean);
+    const res = await fetch(`/api/plans/${btn.dataset.id}/subjects`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subjects }),
+    });
+    if (!res.ok) { alert(`Could not add those: ${(await res.json()).detail}`); return; }
+    state.plans = await fetchPart("/api/plans", []);
+    renderPlans();
+  }));
   list.querySelectorAll(".plan-status").forEach((btn) => btn.addEventListener("click", async () => {
     if (btn.dataset.to === "superseded" && !confirm("Supersede this plan? It is kept as the record of what was intended.")) return;
     const res = await fetch(`/api/plans/${btn.dataset.id}/status`, {

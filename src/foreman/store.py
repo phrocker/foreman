@@ -175,6 +175,7 @@ class Store(Protocol):
     def phases(self, plan_id: int) -> list[Record]: ...
     def set_plan_status(self, plan_id: int, status: str) -> None: ...
     def update_phase(self, phase_id: int, params: dict[str, str]) -> None: ...
+    def add_plan_subjects(self, plan_id: int, subjects: Sequence[str]) -> list[str]: ...
 
     # --- commitments ---
     def commit(
@@ -1349,6 +1350,27 @@ class SqliteStore:
             (json.dumps(params or {}, sort_keys=True), phase_id),
         )
         self._db.commit()
+
+    def add_plan_subjects(self, plan_id: int, subjects: Sequence[str]) -> list[str]:
+        """Put more subjects through an existing plan. Returns the ones added.
+
+        Twelve domains bought on a Tuesday are not a new plan; they are twelve
+        more journeys through the same phases. Rebuilding the plan to add
+        them is what superseding was being misused for.
+        """
+        row = self.plan(plan_id)
+        if row is None:
+            raise KeyError(f"no plan {plan_id}")
+        have = json.loads(row["subjects"] or "[]")
+        added = [s for s in subjects if s and s not in have]
+        if not added:
+            return []
+        self._db.execute(
+            "UPDATE plans SET subjects = ? WHERE id = ?", (json.dumps(have + added), plan_id)
+        )
+        self._db.commit()
+        self.relate(plan_edges(plan_id, added))
+        return added
 
     def plans(self, status: str | None = None) -> list[Record]:
         sql = "SELECT * FROM plans"

@@ -1337,3 +1337,20 @@ def test_nearest_is_cosine_best_first_in_both_stores(store):
     assert out[0]["meta"] == {"label": "trouble"}
     assert store.nearest("pull", [1.0, 0.0, 0.0], k=10)[-1]["key"] == "far"
     assert store.nearest("empty", [1.0, 0.0, 0.0]) == []
+
+
+def test_subjects_can_join_a_plan_after_it_started(store):
+    """Twelve domains bought on a Tuesday are twelve more journeys through
+    the same phases, not a new plan."""
+    plan_id = store.create_plan("stand up lead gen", ["domain:a.test"])
+    added = store.add_plan_subjects(plan_id, ["domain:b.test", "domain:a.test", "domain:c.test"])
+    assert added == ["domain:b.test", "domain:c.test"]
+    assert json.loads(store.plan(plan_id)["subjects"]) == [
+        "domain:a.test",
+        "domain:b.test",
+        "domain:c.test",
+    ]
+    assert store.neighbors(["subject|domain:c.test"], [PLANNED_IN]) == [node("plan", plan_id)]
+    assert store.add_plan_subjects(plan_id, ["domain:b.test"]) == []
+    with pytest.raises(KeyError):
+        store.add_plan_subjects(999, ["domain:z.test"])

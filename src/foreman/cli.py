@@ -938,6 +938,25 @@ def risk(
     console.print(f"[dim]{counts['embedded']} embedded · {counts['labelled']} labelled[/]")
 
 
+@app.command(name="plan-add")
+def plan_add(
+    plan_id: int = typer.Argument(..., help="Which plan."),
+    subject: list[str] = typer.Argument(..., help="Subjects to put through it."),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Put more subjects through an existing plan."""
+    with open_store(db) as store:
+        try:
+            added = store.add_plan_subjects(plan_id, subject)
+        except KeyError:
+            console.print(f"[red]no plan {plan_id}[/]")
+            raise typer.Exit(1) from None
+    console.print(
+        f"plan {plan_id}: {len(added)} subject(s) added"
+        + (f" — {', '.join(added)}" if added else " (all already there)")
+    )
+
+
 @app.command()
 def decide(
     finding_id: int = typer.Argument(..., help="Which finding."),

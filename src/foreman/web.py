@@ -1124,6 +1124,22 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             s.close()
         return {"id": plan_id, "goal": goal, "subjects": subjects, "phases": len(specs)}
 
+    @app.post("/api/plans/{plan_id}/subjects")
+    def plan_subjects(plan_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Put more subjects through an existing plan."""
+        subjects = [str(x).strip() for x in (payload.get("subjects") or []) if str(x).strip()]
+        if not subjects:
+            raise HTTPException(400, "name at least one subject")
+        s = store()
+        try:
+            try:
+                added = s.add_plan_subjects(plan_id, subjects)
+            except KeyError:
+                raise HTTPException(404, f"no plan {plan_id}") from None
+        finally:
+            s.close()
+        return {"id": plan_id, "added": added}
+
     @app.post("/api/plans/{plan_id}/status")
     def plan_status(plan_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         """Supersede a plan, or bring one back. Never deleted: a superseded

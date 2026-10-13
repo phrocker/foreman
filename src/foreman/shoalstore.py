@@ -1110,6 +1110,20 @@ class ShoalStore:
             ]
         )
 
+    def add_plan_subjects(self, plan_id: int, subjects: Sequence[str]) -> list[str]:
+        row = self.plan(plan_id)
+        if row is None:
+            raise KeyError(f"no plan {plan_id}")
+        have = json.loads(row.get("subjects") or "[]")
+        added = [s for s in subjects if s and s not in have]
+        if not added:
+            return []
+        self._write(
+            [self._put(_rid("plan", _pad(plan_id)), "plan", {"subjects": json.dumps(have + added)})]
+        )
+        self.relate(plan_edges(plan_id, added))
+        return added
+
     def plans(self, status: str | None = None) -> list[Record]:
         rows = [
             r
