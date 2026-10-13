@@ -25,7 +25,7 @@ from . import secrets
 from .actions import Stale, _ops, effect_of, landed_at, target_label
 from .actions.sagform import automatable, policy_allows
 from .adversary import DEFAULT_CEILING_USD as REVIEW_CEILING_USD
-from .adversary import LENSES, diff_of, post_drafts, review_change, summarise
+from .adversary import LENSES, diff_from_github, diff_of, post_drafts, review_change, summarise
 from .budget import Budget
 from .chat import ChatError, ask
 from .checkpoint import checkpoint, narrate
@@ -1818,6 +1818,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 rated = risks(s)
             except Exception:  # noqa: BLE001 — no vectors yet is not a reason to blank the board
                 rated = {}
+            drafted: dict[str, dict[str, Any]] = {}
+            for d in s.drafts():
+                row_ = drafted.setdefault(
+                    str(d["subject"]),
+                    {"draft": 0, "deferred": 0, "posted": 0, "project": d.get("project")},
+                )
+                row_[str(d.get("status"))] = row_.get(str(d.get("status")), 0) + 1
         finally:
             s.close()
 
@@ -1932,6 +1939,23 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         "where": p.get("url") or "",
                     }
                 )
+        # Review comments drafted and not yet posted are decisions: post them,
+        # defer them, or dismiss them — each one, by hand, under your name.
+        for subject, counts in sorted(drafted.items()):
+            waiting = int(counts.get("draft") or 0)
+            if not waiting:
+                continue
+            slug, _, number = subject.removeprefix("pull:").partition("#")
+            blocked.append(
+                {
+                    "project": counts.get("project") or slug.split("/")[-1],
+                    "title": f"#{number} {waiting} review comment(s) drafted",
+                    "why": "read, edit, then post or defer each — none is on the pull request yet",
+                    "where": "",
+                    "open": {"tab": "work", "project": counts.get("project"), "subject": subject},
+                    "grade": "warning",
+                }
+            )
         # The changes the last sweep rated: their own zone, because a row that
         # says "risk high" in the middle of a sentence is a row nobody sees.
         levels = {"high": 0, "medium": 0, "low": 0}
@@ -1944,7 +1968,9 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "blocked": _capped(blocked),
             "noisy": _noisy(findings),
             "risk": {
-                "rows": _capped(_risky(rated)),
+                "rows": [
+                    {**r, "drafts": drafted.get(r["subject"])} for r in _capped(_risky(rated))
+                ],
                 "counts": levels,
                 "rated": len(rated),
             },
@@ -2321,12 +2347,18 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 st = store()
                 try:
                     project, facts = await facts_for_pull(st, subject, note)
-                    if project.repo is None or not project.repo.exists():
-                        note("no local checkout, so there is no diff to read")
-                        return
-                    branch, base = str(facts.get("branch")), str(facts.get("base"))
-                    _git(project.repo, "fetch", "origin", branch, check=False)
-                    diff = diff_of(project.repo, f"origin/{base}", f"origin/{branch}")
+                    if project.repo is not None and project.repo.exists():
+                        branch, base = str(facts.get("branch")), str(facts.get("base"))
+                        _git(project.repo, "fetch", "origin", branch, check=False)
+                        diff = diff_of(project.repo, f"origin/{base}", f"origin/{branch}")
+                    else:
+                        # No checkout — a stewarded project, read and never
+                        # written. GitHub has the diff; it used to stop here,
+                        # and the slot stayed "running" forever because the
+                        # early return skipped finish().
+                        slug, _, number = subject.removeprefix("pull:").partition("#")
+                        note(f"no local checkout; reading the diff from GitHub for {slug}#{number}")
+                        diff = await asyncio.to_thread(diff_from_github, slug, number)
                     note(f"reading {len(diff)} characters of diff from {len(LENSES)} angles")
                     # Nothing is posted here (post_to=""). The objections are
                     # kept as drafts; the operator reads, edits and posts them

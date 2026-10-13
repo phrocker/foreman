@@ -1857,7 +1857,8 @@ function renderAttention() {
       ${r.grade ? `<span class="att-grade ${esc(r.grade)}">${esc(r.grade)}</span>` : ""}
       <span class="att-proj">${esc(r.project || "—")}</span>
       <span class="att-what">${
-        r.where ? `<a href="${esc(r.where)}" target="_blank" rel="noopener">${esc(r.title)}</a>`
+        r.open ? `<button class="link-ish att-open" data-project="${esc(r.open.project || "")}" data-subject="${esc(r.open.subject || "")}">${esc(r.title)}</button>`
+        : r.where ? `<a href="${esc(r.where)}" target="_blank" rel="noopener">${esc(r.title)}</a>`
                 : esc(r.title)
       }${r.why ? ` <span class="att-why">— ${esc(r.why)}</span>` : ""}</span>
     </div>`;
@@ -1905,6 +1906,26 @@ function renderAttention() {
   </div>${renderRisk(d.risk)}${renderSaid(d.said)}`;
   wireSaid();
   wireRisk();
+  el.querySelectorAll(".att-open").forEach((b) =>
+    b.addEventListener("click", () => openDrafts(b.dataset.project, b.dataset.subject)));
+}
+
+// Take the operator to one pull request's drafts: the Work tab, filtered to
+// its project (a stewarded project's rows are hidden otherwise), with the
+// panel open. This is the answer to "I clicked Review — where did it go".
+async function openDrafts(project, subject) {
+  if (project) {
+    state.project = project;
+    const sel = $("projectFilter");
+    if (sel) sel.value = project;
+  }
+  state.pulls = await fetchPart(`/api/pulls${project ? `?project=${encodeURIComponent(project)}` : ""}`, []);
+  await loadDrafts(subject);
+  state.openDrafts = subject;
+  showTab("work");
+  renderWork();
+  const panel = document.querySelector(`.drafts-list[data-subject="${CSS.escape(subject)}"]`);
+  if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // --- risky changes --------------------------------------------------------------
@@ -1930,7 +1951,9 @@ function renderRisk(risk) {
           (r.neighbours || []).length ? ` · like ` + r.neighbours.map((n) =>
             `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(String(n.key).replace("pull:", ""))}</a> <span class="risk-${esc(n.label)}">${esc(n.label)}</span>`).join(", ") : ""}</div>
       </span>
-      <button class="risk-go adv-review" data-subject="${esc(r.subject)}" title="Four agents read the diff; what they find is posted to the pull request. Costs money; nothing merges.">Review</button>
+      ${r.drafts && (r.drafts.draft || r.drafts.deferred)
+        ? `<button class="risk-go att-open" data-project="${esc(r.project)}" data-subject="${esc(r.subject)}">${r.drafts.draft || 0} to review${r.drafts.deferred ? ` · ${r.drafts.deferred} deferred` : ""}</button>`
+        : `<button class="risk-go adv-review" data-subject="${esc(r.subject)}" title="Four agents read the diff. What they find is kept here as drafts for you to edit, post or defer. Costs money; nothing merges.">Review</button>`}
     </div>`;
   return `<div class="att-col att-risk">
     <div class="att-head"><span class="att-title">Risky changes</span><span class="att-sub">${esc(sub)}</span></div>
@@ -1941,6 +1964,8 @@ function renderRisk(risk) {
 function wireRisk() {
   document.querySelectorAll(".att-risk .adv-review").forEach((b) =>
     b.addEventListener("click", () => reviewPull(b.dataset.subject, b)));
+  document.querySelectorAll(".att-risk .att-open").forEach((b) =>
+    b.addEventListener("click", () => openDrafts(b.dataset.project, b.dataset.subject)));
 }
 
 // --- this week ----------------------------------------------------------------
@@ -2517,6 +2542,14 @@ async function reviewPull(subject, button) {
   }
   showTab("activity");
   watchActivity();
+  // When the review lands, the risk row flips from Review to "N to review".
+  const tick = setInterval(async () => {
+    const jobs = await fetchPart("/api/activity", null);
+    const mine = ((jobs && jobs.jobs) || []).find((j) => j.kind === "review" && j.target === subject);
+    if (!mine || mine.running) return;
+    clearInterval(tick);
+    await refreshAttention();
+  }, 5000);
 }
 
 // --- drift -----------------------------------------------------------------

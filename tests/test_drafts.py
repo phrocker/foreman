@@ -107,3 +107,24 @@ def test_edit_defer_dismiss_and_post_from_the_page(tmp_path, monkeypatch):
     assert client.post(f"/api/drafts/{ids[0]}", json={"body": "x"}).status_code == 409
     assert client.post("/api/drafts/post", json={"ids": [ids[0]]}).status_code == 409
     assert client.post("/api/drafts/post", json={"ids": []}).status_code == 400
+
+
+def test_a_project_without_a_checkout_reads_the_diff_from_github(monkeypatch):
+    """A stewarded project is read, never written, so there is no clone — and
+    its pull requests are the ones worth a second opinion before somebody
+    else merges them."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from foreman.adversary import diff_from_github
+
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert diff_from_github("apache/accumulo", 6486).startswith("diff --git")
+    assert seen["cmd"][:3] == ["gh", "api", "repos/apache/accumulo/pulls/6486"]
+    assert "Accept: application/vnd.github.diff" in seen["cmd"]

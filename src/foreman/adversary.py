@@ -581,6 +581,31 @@ def summarise(findings: Sequence[Finding], reviewed: bool = True) -> str:
     return ", ".join(f"{k}: {v}" for k, v in sorted(by_lens.items()))
 
 
+def diff_from_github(slug: str, number: str | int) -> str:
+    """The pull request's diff from GitHub, for a project with no checkout.
+
+    A stewarded project is read, never written, so there is no clone to run
+    git in — and its pull requests are exactly the ones worth a second
+    opinion before somebody else merges them. `gh` sends the operator's
+    token; the diff media type returns the text rather than JSON.
+    """
+    proc = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{slug}/pulls/{number}",
+            "-H",
+            "Accept: application/vnd.github.diff",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise GitHubError(proc.stderr.strip()[:300] or "gh api: diff not readable")
+    return proc.stdout
+
+
 def diff_of(repo: Any, base: str, branch: str) -> str:
     """The change a pull request proposes, as its own repository sees it."""
     from .revise import _git
