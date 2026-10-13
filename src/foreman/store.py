@@ -111,6 +111,12 @@ class Store(Protocol):
     def finding(self, finding_id: int) -> Record | None: ...
     def open_findings(self, project: str | None = None) -> list[Record]: ...
     def finding_keys_before(self, since: str) -> set[tuple[str, str, str]]: ...
+
+    # --- review drafts ---
+    def record_drafts(self, drafts: Sequence[dict[str, Any]]) -> list[int]: ...
+    def drafts(self, subject: str | None = None, status: str | None = None) -> list[Record]: ...
+    def draft(self, draft_id: int) -> Record | None: ...
+    def update_draft(self, draft_id: int, **fields: Any) -> None: ...
     def set_finding_outcome(self, finding_id: int, outcome: str | None) -> None: ...
     def dismissals(self, project: str | None = None) -> list[Record]: ...
     def rule_precision(self) -> list[Record]: ...
@@ -299,6 +305,26 @@ CREATE TABLE IF NOT EXISTS findings (
     source      TEXT NOT NULL DEFAULT 'rule'
 );
 CREATE INDEX IF NOT EXISTS idx_find_open ON findings (project, resolved_at);
+
+-- What the reviewers said, kept here for the operator to edit, post, defer or
+-- dismiss. Nothing reaches the pull request until a person posts it: the
+-- review goes out under their name, so it is theirs to read first.
+CREATE TABLE IF NOT EXISTS drafts (
+    id          INTEGER PRIMARY KEY,
+    project     TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    finding_id  INTEGER,
+    lens        TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    path        TEXT NOT NULL DEFAULT '',
+    line        INTEGER,
+    body        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'draft',  -- draft | deferred | dismissed | posted
+    created_at  TEXT NOT NULL,
+    posted_at   TEXT,
+    posted_url  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_subject ON drafts (subject, status);
 
 -- The decision ledger. Every action Foreman proposed, what you decided, and
 -- whether it worked. This is the evidence behind "you have approved this exact
@@ -1189,6 +1215,54 @@ class SqliteStore:
             ORDER BY high DESC, medium DESC, low DESC, r.project
             """)
         )
+
+    # --- review drafts ----------------------------------------------------
+
+    DRAFT_FIELDS = ("body", "status", "posted_at", "posted_url", "finding_id")
+
+    def record_drafts(self, drafts: Sequence[dict[str, Any]]) -> list[int]:
+        ids: list[int] = []
+        now = utcnow()
+        for d in drafts:
+            cur = self._db.execute(
+                "INSERT INTO drafts (project, subject, finding_id, lens, severity, path, line,"
+                " body, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)",
+                (
+                    d["project"],
+                    d["subject"],
+                    d.get("finding_id"),
+                    d["lens"],
+                    d.get("severity") or "medium",
+                    d.get("path") or "",
+                    d.get("line"),
+                    d["body"],
+                    now,
+                ),
+            )
+            ids.append(int(cur.lastrowid))
+        self._db.commit()
+        return ids
+
+    def drafts(self, subject: str | None = None, status: str | None = None) -> list[Record]:
+        sql, args = "SELECT * FROM drafts WHERE 1 = 1", []
+        if subject:
+            sql += " AND subject = ?"
+            args.append(subject)
+        if status:
+            sql += " AND status = ?"
+            args.append(status)
+        return [dict(r) for r in self._db.execute(sql + " ORDER BY id", args).fetchall()]
+
+    def draft(self, draft_id: int) -> Record | None:
+        return _one(self._db.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone())
+
+    def update_draft(self, draft_id: int, **fields: Any) -> None:
+        keep = {k: v for k, v in fields.items() if k in self.DRAFT_FIELDS}
+        if not keep:
+            return
+        sets = ", ".join(f"{k} = ?" for k in keep)
+        self._db.execute(f"UPDATE drafts SET {sets} WHERE id = ?", (*keep.values(), draft_id))
+        self._db.commit()
 
     def open_findings(self, project: str | None = None) -> list[Record]:
         sql = "SELECT * FROM findings WHERE resolved_at IS NULL"

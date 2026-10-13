@@ -25,10 +25,11 @@ from . import secrets
 from .actions import Stale, _ops, effect_of, landed_at, target_label
 from .actions.sagform import automatable, policy_allows
 from .adversary import DEFAULT_CEILING_USD as REVIEW_CEILING_USD
-from .adversary import LENSES, diff_of, review_change, summarise
+from .adversary import LENSES, diff_of, post_drafts, review_change, summarise
 from .budget import Budget
 from .chat import ChatError, ask
 from .checkpoint import checkpoint, narrate
+from .collectors.github import GitHubError
 from .commitments import from_row, keep_by_hand, parse_due, settle, what_you_said
 from .config import find_registry, load_registry
 from .connectors import build as build_connectors
@@ -2327,6 +2328,9 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     _git(project.repo, "fetch", "origin", branch, check=False)
                     diff = diff_of(project.repo, f"origin/{base}", f"origin/{branch}")
                     note(f"reading {len(diff)} characters of diff from {len(LENSES)} angles")
+                    # Nothing is posted here (post_to=""). The objections are
+                    # kept as drafts; the operator reads, edits and posts them
+                    # under their own name, which is why it is their click.
                     found = await review_change(
                         project,
                         st,
@@ -2337,7 +2341,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         # is read. A queue of comments in another tool is a
                         # queue nobody opens — and posting is what closes the
                         # loop, since `revise` reads exactly this endpoint.
-                        post_to=subject,
+                        post_to="",
                         budget=Budget(REVIEW_CEILING_USD),
                         connectors=backends(),
                         log=note,
@@ -2356,6 +2360,83 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         asyncio.create_task(work())
         return slot.as_dict()
+
+    @app.get("/api/drafts")
+    def list_drafts(subject: str | None = Query(None)) -> list[dict[str, Any]]:
+        """What the reviewers said about a pull request, as drafts: edit,
+        post, defer or dismiss each. Nothing reaches GitHub until posted."""
+        s = store()
+        try:
+            return s.drafts(subject=subject)
+        finally:
+            s.close()
+
+    @app.post("/api/drafts/post")
+    async def post_chosen(payload: dict[str, Any]) -> dict[str, Any]:
+        """Post the chosen drafts to the pull request as one review, under the
+        operator's own GitHub identity (the gh CLI's). Their click, their name."""
+        ids = [int(x) for x in (payload.get("ids") or [])]
+        if not ids:
+            raise HTTPException(400, "choose at least one draft")
+        s = store()
+        try:
+            chosen = [d for i in ids if (d := s.draft(i)) is not None]
+            if not chosen:
+                raise HTTPException(404, "no such drafts")
+            if any(d.get("status") == "posted" for d in chosen):
+                raise HTTPException(409, "some of those are already posted")
+            subjects = {str(d["subject"]) for d in chosen}
+            if len(subjects) != 1:
+                raise HTTPException(400, "one pull request at a time")
+            subject = subjects.pop()
+            slug, _, number = subject.removeprefix("pull:").partition("#")
+            try:
+                url = await asyncio.to_thread(post_drafts, slug, number, chosen)
+            except GitHubError as exc:
+                raise HTTPException(502, f"GitHub refused the review: {exc}") from exc
+            now = utcnow()
+            for d in chosen:
+                s.update_draft(int(d["id"]), status="posted", posted_at=now, posted_url=url)
+                if d.get("finding_id"):
+                    s.set_finding_outcome(int(d["finding_id"]), "acted")
+            return {"posted": len(chosen), "url": url, "subject": subject}
+        finally:
+            s.close()
+
+    @app.post("/api/drafts/{draft_id}")
+    def change_draft(draft_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Edit a draft's words, or set it aside.
+
+        `status` may be draft (back in the queue), deferred (kept, not now) or
+        dismissed (wrong — and the finding behind it is dismissed too, which
+        is what the reviewer's precision is measured by).
+        """
+        s = store()
+        try:
+            row = s.draft(draft_id)
+            if row is None:
+                raise HTTPException(404, f"no draft {draft_id}")
+            if row.get("status") == "posted":
+                raise HTTPException(409, "already posted; it is on the pull request now")
+            fields: dict[str, Any] = {}
+            if "body" in payload:
+                body = str(payload.get("body") or "").strip()
+                if not body:
+                    raise HTTPException(400, "a draft needs words")
+                fields["body"] = body
+            if "status" in payload:
+                status = str(payload.get("status") or "")
+                if status not in {"draft", "deferred", "dismissed"}:
+                    raise HTTPException(400, "status must be draft, deferred or dismissed")
+                fields["status"] = status
+                if row.get("finding_id"):
+                    s.set_finding_outcome(
+                        int(row["finding_id"]), "dismissed" if status == "dismissed" else None
+                    )
+            s.update_draft(draft_id, **fields)
+            return s.draft(draft_id) or {}
+        finally:
+            s.close()
 
     @app.get("/api/next")
     def what_next(project: str | None = Query(None)) -> list[dict[str, Any]]:

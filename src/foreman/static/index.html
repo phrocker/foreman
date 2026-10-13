@@ -387,6 +387,15 @@
   .chip.risk-medium { color: var(--medium); border-color: var(--medium); }
   .chip.risk-low { color: var(--text-3); }
   .risk-line { font-size: 0.82em; }
+  .drafts { margin-top: 8px; }
+  .drafts-bar { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
+  .draft { border: 1px solid var(--border-firm); border-radius: var(--radius); padding: 8px 10px; margin: 6px 0; background: var(--surface); }
+  .draft.deferred { opacity: 0.7; }
+  .draft-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 0.85em; }
+  .draft-body { width: 100%; box-sizing: border-box; font: inherit; font-size: 0.9em; margin: 6px 0; padding: 6px;
+    border: 1px solid var(--border-firm); border-radius: 4px; background: var(--surface); color: inherit; }
+  .draft-act { display: flex; gap: 6px; }
+  .draft-act button { font: inherit; font-size: 0.8em; padding: 2px 8px; }
   .risk-trouble { color: var(--high); } .risk-clean { color: var(--low); } .risk-unknown { color: var(--text-3); }
   .att-said form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
   .att-said form input, .att-said form select { font: inherit; font-size: 0.85em; padding: 4px 6px;
@@ -1717,6 +1726,7 @@ function renderWork() {
         ${riskChip(r.risk)}
       </div>
       ${riskLine(r.risk)}
+      ${draftsPanel(r)}
       <div class="work-meta">
         ${esc(r.project)} · ${esc(r.author)} · <code>${esc(r.branch)}</code> → <code>${esc(r.base)}</code>
         · checks ${esc(r.checks || "unknown")}${r.checks_failing ? ` (${r.checks_failing} failing)` : ""}
@@ -1737,6 +1747,7 @@ function renderWork() {
 
   list.querySelectorAll(".revise").forEach((b) =>
     b.addEventListener("click", () => startRevision(b.dataset.subject, b)));
+  wireDrafts(list);
   list.querySelectorAll(".adv-review").forEach((b) =>
     b.addEventListener("click", () => reviewPull(b.dataset.subject, b)));
   const refresh = $("refreshPulls");
@@ -1954,6 +1965,105 @@ function renderCheckpoint() {
     <ul class="cp-lines">${lines || "<li>Nothing to say yet.</li>"}</ul>
     <div class="cp-grid">${cells}</div>
   </div>`;
+}
+
+// --- review drafts ----------------------------------------------------------
+//
+// What four reviewers said about a pull request, kept here until a person has
+// read it. Each draft can be edited, posted, deferred or dismissed; chosen
+// ones go out as one review under the operator's own GitHub identity. A
+// dismissal also dismisses the finding behind it — that is the reviewer's
+// precision being measured.
+
+function draftsPanel(r) {
+  const c = r.drafts;
+  if (!c || !(c.draft || c.deferred || c.posted)) return "";
+  const open = r.subject === state.openDrafts;
+  const parts = [c.draft && `${c.draft} to review`, c.deferred && `${c.deferred} deferred`, c.posted && `${c.posted} posted`].filter(Boolean).join(" · ");
+  return `<div class="drafts">
+    <button class="link-ish drafts-toggle" data-subject="${esc(r.subject)}">${open ? "Hide" : "Review comments"}: ${esc(parts)}</button>
+    <div class="drafts-list" data-subject="${esc(r.subject)}" ${open ? "" : "hidden"}>${open ? renderDraftRows(state.drafts[r.subject] || []) : ""}</div>
+  </div>`;
+}
+
+function renderDraftRows(rows) {
+  const live = rows.filter((d) => d.status !== "posted" && d.status !== "dismissed");
+  const posted = rows.filter((d) => d.status === "posted");
+  if (!live.length && !posted.length) return '<div class="empty">Nothing drafted.</div>';
+  const row = (d) => `<div class="draft ${esc(d.status)}" data-id="${d.id}">
+      <div class="draft-head">
+        <input type="checkbox" class="draft-pick" data-id="${d.id}" ${d.status === "draft" ? "checked" : ""}>
+        <span class="chip">${esc(d.lens)}</span>
+        <span class="att-grade ${d.severity === "high" ? "critical" : d.severity === "medium" ? "serious" : "warning"}">${esc(d.severity)}</span>
+        ${d.path ? `<code>${esc(d.path)}${d.line ? ":" + d.line : ""}</code>` : "<span class='hint'>no line — goes in the review body</span>"}
+        ${d.status === "deferred" ? '<span class="chip">deferred</span>' : ""}
+      </div>
+      <textarea class="draft-body" data-id="${d.id}" rows="3">${esc(d.body)}</textarea>
+      <div class="draft-act">
+        <button class="draft-save" data-id="${d.id}">Save edit</button>
+        <button class="draft-defer" data-id="${d.id}">${d.status === "deferred" ? "Back to queue" : "Defer"}</button>
+        <button class="draft-dismiss" data-id="${d.id}">Dismiss</button>
+      </div>
+    </div>`;
+  const done = posted.length ? `<div class="hint">${posted.length} already posted${posted[0].posted_url ? ` — <a href="${esc(posted[0].posted_url)}" target="_blank" rel="noopener">the review</a>` : ""}</div>` : "";
+  return `<div class="drafts-bar">
+      <button class="primary draft-post">Post checked as one review</button>
+      <span class="hint">Goes out under your GitHub identity, as a comment-only review. Uncheck what you are not ready to say.</span>
+    </div>${live.map(row).join("")}${done}`;
+}
+
+async function loadDrafts(subject) {
+  state.drafts = state.drafts || {};
+  state.drafts[subject] = await fetchPart(`/api/drafts?subject=${encodeURIComponent(subject)}`, []);
+}
+
+function wireDrafts(list) {
+  list.querySelectorAll(".drafts-toggle").forEach((b) => b.addEventListener("click", async () => {
+    const subject = b.dataset.subject;
+    if (state.openDrafts === subject) { state.openDrafts = null; renderWork(); return; }
+    await loadDrafts(subject);
+    state.openDrafts = subject;
+    renderWork();
+  }));
+  const panel = list.querySelector(".drafts-list:not([hidden])");
+  if (!panel) return;
+  const subject = panel.dataset.subject;
+  const change = async (id, payload) => {
+    const res = await fetch(`/api/drafts/${id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) { alert(`Could not change that: ${(await res.json()).detail}`); return; }
+    await loadDrafts(subject);
+    state.pulls = await fetchPart("/api/pulls", []);
+    renderWork();
+  };
+  panel.querySelectorAll(".draft-save").forEach((b) => b.addEventListener("click", () =>
+    change(b.dataset.id, { body: panel.querySelector(`.draft-body[data-id="${b.dataset.id}"]`).value })));
+  panel.querySelectorAll(".draft-defer").forEach((b) => b.addEventListener("click", () => {
+    const d = (state.drafts[subject] || []).find((x) => String(x.id) === b.dataset.id);
+    change(b.dataset.id, { status: d && d.status === "deferred" ? "draft" : "deferred" });
+  }));
+  panel.querySelectorAll(".draft-dismiss").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm("Dismiss this comment? The finding behind it is dismissed too, which counts against the reviewer.")) return;
+    change(b.dataset.id, { status: "dismissed" });
+  }));
+  const post = panel.querySelector(".draft-post");
+  if (post) post.addEventListener("click", async () => {
+    // Save any edits first, so what is posted is what is on screen.
+    for (const ta of panel.querySelectorAll(".draft-body")) {
+      const d = (state.drafts[subject] || []).find((x) => String(x.id) === ta.dataset.id);
+      if (d && d.body !== ta.value) {
+        await fetch(`/api/drafts/${ta.dataset.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: ta.value }) });
+      }
+    }
+    const ids = [...panel.querySelectorAll(".draft-pick:checked")].map((c) => Number(c.dataset.id));
+    if (!ids.length) { alert("Nothing checked."); return; }
+    if (!confirm(`Post ${ids.length} comment(s) to ${subject.replace("pull:", "")} as one review, under your GitHub identity?`)) return;
+    post.disabled = true;
+    const res = await fetch("/api/drafts/post", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
+    if (!res.ok) { alert(`Could not post: ${(await res.json()).detail}`); post.disabled = false; return; }
+    await loadDrafts(subject);
+    state.pulls = await fetchPart("/api/pulls", []);
+    renderWork();
+  });
 }
 
 // --- what you said ----------------------------------------------------------
@@ -2391,11 +2501,9 @@ async function reviewPull(subject, button) {
     "Each reads the diff from one angle — does it work, did it do more than it " +
     "was asked, does it actually fix the thing, what else does it touch — " +
     "without seeing the others' answers.\n\n" +
-    "What they find is posted to the pull request as a review, and kept here as " +
-    "findings you can dismiss. Nothing is blocking — the review never requests " +
-    "changes.\n\n" +
-    "Once posted, the Address-comments button appears on this row: an agent can " +
-    "be sent to answer them."
+    "What they find is kept here as drafts. Nothing is posted: you read each one, " +
+    "edit it, and post, defer or dismiss it yourself — the review goes out under " +
+    "your name, so it is yours to read first."
   )) return;
   button.disabled = true;
   const res = await fetch(`/api/pulls/review?subject=${encodeURIComponent(subject)}`,

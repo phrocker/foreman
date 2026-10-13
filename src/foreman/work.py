@@ -92,6 +92,14 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
         rated = risks(store)
     except Exception:  # noqa: BLE001 — a missing vectors table must not blank the board
         rated = {}
+    # Review comments drafted and not yet posted, per pull request.
+    drafted: dict[str, dict[str, int]] = {}
+    try:
+        for d in store.drafts():
+            counts = drafted.setdefault(str(d["subject"]), {"draft": 0, "deferred": 0, "posted": 0})
+            counts[str(d.get("status"))] = counts.get(str(d.get("status")), 0) + 1
+    except Exception:  # noqa: BLE001 — same reason
+        drafted = {}
     for target in targets:
         if target.github is None:
             continue
@@ -156,6 +164,7 @@ def open_pulls(store: Store, registry: Any, project: str | None = None) -> list[
                     ),
                     "created_at": facts.get("created_at") or "",
                     "risk": rated.get(subject),
+                    "drafts": drafted.get(subject),
                 }
             )
     rows.sort(key=lambda r: (r["blocking"] is not None, r["blocking"] or "", -r["number"]))

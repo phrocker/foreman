@@ -1354,3 +1354,57 @@ def test_subjects_can_join_a_plan_after_it_started(store):
     assert store.add_plan_subjects(plan_id, ["domain:b.test"]) == []
     with pytest.raises(KeyError):
         store.add_plan_subjects(999, ["domain:z.test"])
+
+
+# --- review drafts -----------------------------------------------------------
+
+
+def test_drafts_are_kept_until_a_person_posts_defers_or_dismisses_them(store):
+    ids = store.record_drafts(
+        [
+            {
+                "project": "a",
+                "subject": "pull:o/r#1",
+                "finding_id": 7,
+                "lens": "correct",
+                "severity": "high",
+                "path": "x.py",
+                "line": 12,
+                "body": "breaks",
+            },
+            {
+                "project": "a",
+                "subject": "pull:o/r#1",
+                "lens": "scope",
+                "severity": "medium",
+                "body": "does more than asked",
+            },
+            {
+                "project": "a",
+                "subject": "pull:o/r#2",
+                "lens": "scope",
+                "severity": "low",
+                "body": "other pr",
+            },
+        ]
+    )
+    assert len(ids) == 3 and ids == sorted(ids)
+    mine = store.drafts(subject="pull:o/r#1")
+    assert [d["lens"] for d in mine] == ["correct", "scope"]
+    assert mine[0]["line"] == 12 and mine[0]["finding_id"] == 7 and mine[0]["status"] == "draft"
+    assert mine[1]["line"] is None and mine[1]["path"] == ""
+
+    store.update_draft(
+        ids[0],
+        body="breaks on empty input",
+        status="posted",
+        posted_url="u",
+        posted_at="2026-10-13T12:00:00",
+    )
+    store.update_draft(ids[1], status="deferred")
+    store.update_draft(ids[1], nonsense="ignored")
+    assert store.draft(ids[0])["body"] == "breaks on empty input"
+    assert store.draft(ids[0])["posted_url"] == "u"
+    assert [d["id"] for d in store.drafts(status="deferred")] == [ids[1]]
+    assert [d["id"] for d in store.drafts(subject="pull:o/r#1", status="posted")] == [ids[0]]
+    assert store.draft(ids[2] + 1) is None

@@ -261,6 +261,59 @@ async def _one(
     return (lens, result.value, result.cost_usd, None)
 
 
+def _where(objection: Objection) -> str:
+    return f" ({objection.path})" if objection.path else ""
+
+
+def review_payload(drafts: Sequence[dict[str, Any]], anchored: bool = True) -> dict[str, Any]:
+    """The GitHub review one person is about to post, from the drafts they
+    chose — their words, edited or not, under their name.
+
+    Anchored where a line was given and in the body where it was not. A
+    review is rejected whole if one comment names a line not in the diff, so
+    `anchored=False` is the fallback that folds everything into the body.
+    """
+    mark = {"high": "**Blocking.**", "medium": "**Worth changing.**"}
+    inline = [
+        {
+            "path": d["path"],
+            "line": int(d["line"]),
+            "body": f"{mark.get(str(d.get('severity')).lower(), 'Minor.')} {d['body']}",
+        }
+        for d in drafts
+        if anchored and d.get("path") and d.get("line")
+    ]
+    placed = {id(d) for d in drafts if anchored and d.get("path") and d.get("line")}
+    body = [f"{len(drafts)} comment(s) from a four-angle read of this diff."]
+    loose = [d for d in drafts if id(d) not in placed]
+    if loose:
+        body.append("")
+        for d in loose:
+            where = (
+                f"`{d['path']}" + (f":{d['line']}" if d.get("line") else "") + "` — "
+                if d.get("path")
+                else ""
+            )
+            body.append(f"- {where}{d['body']}")
+    body.append("")
+    body.append("_Nothing here is blocking._")
+    payload: dict[str, Any] = {"event": "COMMENT", "body": "\n".join(body)}
+    if inline:
+        payload["comments"] = inline
+    return payload
+
+
+def post_drafts(slug: str, number: str | int, drafts: Sequence[dict[str, Any]]) -> str:
+    """Post chosen drafts as one review. Falls back to an unanchored body if
+    GitHub rejects a line, so one bad anchor cannot cost the rest."""
+    try:
+        return _post(slug, number, review_payload(drafts, anchored=True))
+    except GitHubError:
+        if not any(d.get("path") and d.get("line") for d in drafts):
+            raise
+        return _post(slug, number, review_payload(drafts, anchored=False))
+
+
 def _comment(lens: Lens, objection: Objection) -> str:
     """One objection, written the way a reviewer would leave it."""
     mark = {"high": "**Blocking.**", "medium": "**Worth changing.**"}.get(
@@ -462,6 +515,30 @@ async def review_change(
 
         if findings:
             store.record_findings(run_id, findings, source="agent:review")
+            # And kept as drafts, which is what the operator edits, posts,
+            # defers or dismisses. The finding is the record for precision;
+            # the draft is the comment, with the line a Finding drops.
+            by_summary = {
+                str(f["summary"]): int(f["id"])
+                for f in store.open_findings(project.id)
+                if str(f.get("source") or "").startswith("agent:review")
+                and subject in json.loads(f.get("subjects") or "[]")
+            }
+            store.record_drafts(
+                [
+                    {
+                        "project": project.id,
+                        "subject": subject,
+                        "finding_id": by_summary.get(f"{o.what[:160]}{_where(o)}"),
+                        "lens": lens.key,
+                        "severity": str(o.severity).lower(),
+                        "path": o.path,
+                        "line": o.line,
+                        "body": o.what,
+                    }
+                    for lens, o in raised
+                ]
+            )
 
         # Posted last, and only after the findings are stored. A review that
         # reached GitHub and then failed to record would be advice with no

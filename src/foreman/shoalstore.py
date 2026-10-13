@@ -153,6 +153,20 @@ FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "plan": ("goal", "status", "created_at", "subjects"),
     "phase": ("plan_id", "position", "name", "gate", "params"),
+    "draft": (
+        "project",
+        "subject",
+        "finding_id",
+        "lens",
+        "severity",
+        "path",
+        "line",
+        "body",
+        "status",
+        "created_at",
+        "posted_at",
+        "posted_url",
+    ),
     "commitment": (
         "project",
         "subject",
@@ -643,6 +657,66 @@ class ShoalStore:
     def finding(self, finding_id: int) -> Record | None:
         found = self._entities(f"ent:finding|{_pad(finding_id)}")
         return next(iter(found.values()), None)
+
+    # --- review drafts -------------------------------------------------------
+
+    DRAFT_FIELDS = ("body", "status", "posted_at", "posted_url", "finding_id")
+
+    def record_drafts(self, drafts: Sequence[dict[str, Any]]) -> list[int]:
+        ids: list[int] = []
+        now = utcnow()
+        for d in drafts:
+            draft_id = self._next_id("draft")
+            self._write(
+                [
+                    self._put(
+                        _rid("draft", _pad(draft_id)),
+                        "draft",
+                        {
+                            "project": d["project"],
+                            "subject": d["subject"],
+                            "finding_id": d.get("finding_id"),
+                            "lens": d["lens"],
+                            "severity": d.get("severity") or "medium",
+                            "path": d.get("path") or "",
+                            "line": d.get("line"),
+                            "body": d["body"],
+                            "status": "draft",
+                            "created_at": now,
+                        },
+                    )
+                ]
+            )
+            ids.append(draft_id)
+        return ids
+
+    def _draft_row(self, r: Record) -> Record:
+        out = dict(r)
+        # An empty cell reads back as None; the sqlite twin keeps the ''.
+        out["path"] = out.get("path") or ""
+        out["line"] = int(out["line"]) if out.get("line") else None
+        out["finding_id"] = int(out["finding_id"]) if out.get("finding_id") else None
+        return out
+
+    def drafts(self, subject: str | None = None, status: str | None = None) -> list[Record]:
+        rows = [
+            self._draft_row(r)
+            for r in self._entities("ent:draft|").values()
+            if (not subject or r.get("subject") == subject)
+            and (not status or r.get("status") == status)
+        ]
+        rows.sort(key=lambda r: int(r["id"]))
+        return rows
+
+    def draft(self, draft_id: int) -> Record | None:
+        rows = self._entities(f"ent:draft|{_pad(draft_id)}")
+        row = next(iter(rows.values()), None)
+        return self._draft_row(row) if row else None
+
+    def update_draft(self, draft_id: int, **fields: Any) -> None:
+        keep = {k: v for k, v in fields.items() if k in self.DRAFT_FIELDS}
+        if keep:
+            self._write([self._put(_rid("draft", _pad(draft_id)), "draft", keep)])
 
     def open_findings(self, project: str | None = None) -> list[Record]:
         rows = [
