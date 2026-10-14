@@ -315,6 +315,10 @@ class Registry(BaseModel):
     # by default, so the chat is answered by the model the operator works
     # with rather than whichever runs cheapest for unattended tasks.
     chat_connector: str = "claude-code"
+    # Where clones of projects Foreman does not own are kept, for reading —
+    # a stewarded project's pull requests are reviewed from here. Fetched,
+    # never pushed. Default ~/.foreman/scratch, or $FOREMAN_SCRATCH.
+    scratch: Path | None = None
 
     @property
     def active(self) -> list[Project]:

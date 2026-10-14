@@ -53,7 +53,7 @@ from .research import COUNTY_FACETS, subjects_for
 from .research import DEFAULT_CEILING_USD as RESEARCH_CEILING_USD
 from .research import research as run_research
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
-from .revise import _git, address_review, offloaded
+from .revise import _git, address_review, offloaded, worktree
 from .risk import refresh as refresh_risk
 from .risk import risks
 from .runner import (
@@ -66,6 +66,7 @@ from .runner import (
     reject_action,
     verify_applied,
 )
+from .scratch import ScratchError, fetch_pull, scratch_clone
 from .signals import read as read_signals
 from .skills import TrackRecord, merge_label, merge_rate, track_records
 from .skills import label as skill_label
@@ -2339,6 +2340,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         pattern-matches, and the correctness pass and the scope pass disagree
         usefully only when neither has read the other's answer.
         """
+        registry = load_registry(registry_path)
         slot = start("review", subject)
         note = note_to(slot)
 
@@ -2347,37 +2349,54 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 st = store()
                 try:
                     project, facts = await facts_for_pull(st, subject, note)
+                    base = str(facts.get("base") or "main")
+                    slug, _, number = subject.removeprefix("pull:").partition("#")
+                    repo_dir: Path | None = None
+                    tree = None
                     if project.repo is not None and project.repo.exists():
-                        branch, base = str(facts.get("branch")), str(facts.get("base"))
+                        branch = str(facts.get("branch"))
                         _git(project.repo, "fetch", "origin", branch, check=False)
                         diff = diff_of(project.repo, f"origin/{base}", f"origin/{branch}")
                     else:
                         # No checkout — a stewarded project, read and never
-                        # written. GitHub has the diff; it used to stop here,
-                        # and the slot stayed "running" forever because the
-                        # early return skipped finish().
-                        slug, _, number = subject.removeprefix("pull:").partition("#")
-                        note(f"no local checkout; reading the diff from GitHub for {slug}#{number}")
-                        diff = await asyncio.to_thread(diff_from_github, slug, number)
+                        # written. A scratch clone under Foreman's own
+                        # directory gives the reviewers the files around the
+                        # change, which a diff alone hides; the clone is
+                        # fetched, never pushed, and read through a throwaway
+                        # worktree. If it cannot be made, the diff from GitHub
+                        # is the fallback, and the reviewers are told so.
+                        try:
+                            clone = await asyncio.to_thread(
+                                scratch_clone, slug, registry.scratch, None, note
+                            )
+                            ref = await asyncio.to_thread(fetch_pull, clone, number, base)
+                            diff = diff_of(clone, f"origin/{base}", ref)
+                            tree = worktree(clone, ref)
+                            repo_dir = tree.__enter__()
+                            note(f"reviewers read {slug}#{number} from a scratch checkout")
+                        except (ScratchError, OSError) as exc:
+                            note(f"scratch clone unavailable ({exc}); reading the diff from GitHub")
+                            diff = await asyncio.to_thread(diff_from_github, slug, number)
                     note(f"reading {len(diff)} characters of diff from {len(LENSES)} angles")
-                    # Nothing is posted here (post_to=""). The objections are
-                    # kept as drafts; the operator reads, edits and posts them
-                    # under their own name, which is why it is their click.
-                    found = await review_change(
-                        project,
-                        st,
-                        subject,
-                        facts.get("title") or subject,
-                        diff,
-                        # Posted to the pull request, which is where the change
-                        # is read. A queue of comments in another tool is a
-                        # queue nobody opens — and posting is what closes the
-                        # loop, since `revise` reads exactly this endpoint.
-                        post_to="",
-                        budget=Budget(REVIEW_CEILING_USD),
-                        connectors=backends(),
-                        log=note,
-                    )
+                    try:
+                        # Nothing is posted here (post_to=""). The objections
+                        # are kept as drafts; the operator reads, edits and
+                        # posts them under their own name — their click.
+                        found = await review_change(
+                            project,
+                            st,
+                            subject,
+                            facts.get("title") or subject,
+                            diff,
+                            post_to="",
+                            budget=Budget(REVIEW_CEILING_USD),
+                            connectors=backends(),
+                            repo_dir=repo_dir,
+                            log=note,
+                        )
+                    finally:
+                        if tree is not None:
+                            tree.__exit__(None, None, None)
                     note(summarise(found, reviewed=bool(diff.strip())))
                     if found:
                         # The pull request now carries comments, so its own row

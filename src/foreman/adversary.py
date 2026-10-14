@@ -31,6 +31,7 @@ import json
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -225,6 +226,7 @@ async def _one(
     timeout_s: int,
     model: str | None,
     repo: bool,
+    repo_dir: Path | None = None,
 ) -> tuple[Lens, Critique | None, float, str | None]:
     task = Task(
         instructions=PROMPT.format(
@@ -246,7 +248,7 @@ async def _one(
         # it is reviewing, and nothing here needs to run anything.
         needs=frozenset({REPO}) if repo else frozenset(),
         timeout_s=timeout_s,
-        read_dirs=(project.repo,) if repo and project.repo else (),
+        read_dirs=(repo_dir,) if repo and repo_dir else (),
         model=model,
     )
     connector = choose(connectors, task)
@@ -415,6 +417,9 @@ async def review_change(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     connectors: list[Connector] | None = None,
     model: str | None = None,
+    # Where the reviewers may read. The project's own checkout by default; a
+    # scratch clone's throwaway worktree for a project Foreman does not own.
+    repo_dir: Path | None = None,
     log=lambda _: None,
 ) -> list[Finding]:
     """Read one change from several angles at once and record what came back.
@@ -443,7 +448,8 @@ async def review_change(
     if len(passes) > 1:
         log(f"{subject}: {len(diff)} chars, reviewed in {len(passes)} passes on file boundaries")
 
-    repo = bool(project.repo and project.repo.exists())
+    repo_dir = repo_dir or project.repo
+    repo = bool(repo_dir and repo_dir.exists())
     # The reviewers get it too. A scope reviewer that has not been told the
     # repository is written in Go cannot notice that this diff is not — which
     # is exactly what happened on #10, where seventeen objections were raised
@@ -470,6 +476,7 @@ async def review_change(
                     timeout_s=timeout_s,
                     model=model,
                     repo=repo,
+                    repo_dir=repo_dir,
                 )
                 for part in passes
                 for lens in lenses
