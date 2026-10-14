@@ -1322,6 +1322,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 question,
                 payload.get("conversation_id"),
                 connectors=build_connectors(registry.connectors),
+                session=bool(payload.get("session", True)),
             )
         except ChatError as exc:
             raise HTTPException(502, str(exc)) from None
@@ -1373,6 +1374,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         payload.get("conversation_id"),
                         connectors=build_connectors(registry.connectors),
                         on_text=on_text,
+                        session=bool(payload.get("session", True)),
                     )
                     await queue.put(
                         (

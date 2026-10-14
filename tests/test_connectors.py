@@ -642,3 +642,26 @@ def test_a_task_may_prefer_a_backend_without_requiring_it():
     assert choose([Fake("codex"), Fake("claude-code", up=False)], task).name == "codex"
     plain = Task(instructions="q", schema=Out)
     assert choose([Fake("codex"), Fake("claude-code")], plain).name == "codex"
+
+
+def test_the_chat_can_continue_the_operators_own_session_as_a_fork():
+    """ "Ask Foreman" reaches the session the operator works in — forked, never
+    resumed in place, because two writers on one transcript corrupt it."""
+    from pydantic import BaseModel
+
+    from foreman.connectors.base import Task
+    from foreman.connectors.claudecode import ClaudeCodeConnector
+
+    class Out(BaseModel):
+        x: str = ""
+
+    c = ClaudeCodeConnector()
+    pinned = c._command(
+        Task(instructions="q", schema=Out, hints={"resume": "abc-123", "cwd": "/w"})
+    )
+    assert pinned[pinned.index("--resume") + 1] == "abc-123" and "--fork-session" in pinned
+    assert c._cwd(Task(instructions="q", schema=Out, hints={"cwd": "/w"})) == "/w"
+    latest = c._command(Task(instructions="q", schema=Out, hints={"continue": "true"}))
+    assert "--continue" in latest and "--fork-session" in latest
+    plain = c._command(Task(instructions="q", schema=Out))
+    assert "--resume" not in plain and "--continue" not in plain and "--fork-session" not in plain

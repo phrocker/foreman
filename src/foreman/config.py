@@ -315,6 +315,13 @@ class Registry(BaseModel):
     # by default, so the chat is answered by the model the operator works
     # with rather than whichever runs cheapest for unattended tasks.
     chat_connector: str = "claude-code"
+    # The Claude Code session "Ask Foreman" continues (as a fork, never in
+    # place). `chat_session_dir` names the working directory whose most
+    # recent session is continued — the terminal the operator works in;
+    # `chat_session_id` pins one session instead. Unset: a fresh session
+    # that knows only the state Foreman hands it.
+    chat_session_dir: Path | None = None
+    chat_session_id: str | None = None
     # Where clones of projects Foreman does not own are kept, for reading —
     # a stewarded project's pull requests are reviewed from here. Fetched,
     # never pushed. Default ~/.foreman/scratch, or $FOREMAN_SCRATCH.

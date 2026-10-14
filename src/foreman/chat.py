@@ -353,6 +353,20 @@ def portfolio_state(store: Store, registry: Registry) -> str:
         touches = target_label(row["verb"], json.loads(row["params"]), json.loads(row["files"]))
         lines.append(f"- #{row['id']} {row['project']} {row['verb']} on {touches} — {record}")
 
+    # Approved and applied, and no sweep has read the world back since. The
+    # question "was the DNS set" was answered "no" ten minutes after twelve
+    # records were written, because the board only knew what the last sweep
+    # knew and the pending list had just emptied.
+    applied = store.unverified_actions()
+    if applied:
+        lines.append(f"\n### Applied, not yet verified by a sweep ({len(applied)})")
+        for row in applied[-30:]:
+            touches = target_label(row["verb"], json.loads(row["params"]), json.loads(row["files"]))
+            when = str(row.get("applied_at") or "")[:16]
+            lines.append(
+                f"- #{row['id']} {row['project']} {row['verb']} on {touches}, applied {when}"
+            )
+
     precision = store.rule_precision()
     if precision:
         lines.append("\n### Rule precision (acted on vs dismissed)")
@@ -513,6 +527,25 @@ def _history(store: Store, conversation_id: int, limit: int = 12) -> str:
     return "\n".join(f"{t['role']}: {t['content']}" for t in turns)
 
 
+def _session_hints(registry: Registry, session: bool = True) -> dict[str, str]:
+    """Which backend answers, and which conversation it continues.
+
+    `session=False` asks a fresh session that knows only the state handed to
+    it — a tenth of the cost of forking the operator's own, which carries
+    everything that session has seen.
+    """
+    hints = {"prefer": getattr(registry, "chat_connector", "") or ""}
+    if not session:
+        return hints
+    if sid := getattr(registry, "chat_session_id", None):
+        hints["resume"] = str(sid)
+    if home := getattr(registry, "chat_session_dir", None):
+        hints["cwd"] = str(home)
+        if "resume" not in hints:
+            hints["continue"] = "true"
+    return hints
+
+
 async def ask(
     store: Store,
     registry: Registry,
@@ -521,6 +554,7 @@ async def ask(
     model: str | None = None,
     connectors: list[Connector] | None = None,
     on_text: Callable[[str], None] | None = None,
+    session: bool = True,
 ) -> tuple[int, Reply, float]:
     """Put a question to Foreman. Returns (conversation id, reply, USD spent)."""
     if connectors is None:
@@ -544,7 +578,7 @@ async def ask(
         # what makes the chat pane work on any backend, including one with no
         # tools at all.
         needs=frozenset(),
-        hints={"prefer": getattr(registry, "chat_connector", "") or ""},
+        hints=_session_hints(registry, session),
         timeout_s=TIMEOUT_S,
         model=model,
         # The answer is `reply`; stream that as it is written.

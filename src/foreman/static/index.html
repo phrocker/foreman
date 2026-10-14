@@ -610,6 +610,8 @@
   #chatClose { margin-left: auto; }
   .chat-form { display: flex; gap: 8px; padding: 12px 16px 6px; border-top: 1px solid var(--border); }
   .chat-form input { flex: 1; min-width: 0; }
+  .chat-session { display: block; cursor: pointer; }
+  .chat-session input { margin-right: 6px; }
   .chat-foot { padding: 0 16px 14px; color: var(--text-3); font-size: 12px; }
   #chatLog { flex: 1; overflow-y: auto; }
   /* Earlier conversations. They were always stored — fifteen of them before
@@ -719,6 +721,8 @@
     <input type="search" id="chatInput" placeholder="What needs me today?" autocomplete="off">
     <button class="primary" id="chatSend" type="submit">Ask</button>
   </form>
+  <label class="chat-foot chat-session"><input type="checkbox" id="chatSession" checked>
+    Ask my own Claude Code session (knows this week's work; ~$10 and ~40s a question). Unticked: a fresh session with the board's state, ~$1.</label>
   <div class="chat-foot">Read-only. It can suggest an approval; only you can grant one.</div>
 </aside>
 
@@ -3563,7 +3567,8 @@ $("chatForm").addEventListener("submit", async (e) => {
     const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, conversation_id: conversationId }),
+      body: JSON.stringify({ message, conversation_id: conversationId,
+                             session: !$("chatSession") || $("chatSession").checked }),
     });
     if (!res.ok) throw new Error(`failed with ${res.status}`);
 

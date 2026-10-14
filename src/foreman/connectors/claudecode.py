@@ -84,7 +84,25 @@ class ClaudeCodeConnector:
             cmd += ["--add-dir", str(directory)]
         if task.model:
             cmd += ["--model", task.model]
+        # Continue an existing conversation as a fork of it. The chat pane
+        # uses this so "Ask Foreman" reaches the session the operator is
+        # actually working in — the one that knows what was built this week
+        # and why — rather than a stranger holding a printout of the state.
+        # Forked, never resumed in place: two writers on one transcript is
+        # how a session gets corrupted, and the operator's is the one that
+        # must not be.
+        if session := task.hints.get("resume", ""):
+            cmd += ["--resume", session, "--fork-session"]
+        elif task.hints.get("continue") == "true":
+            cmd += ["--continue", "--fork-session"]
         return cmd
+
+    def _cwd(self, task: Task) -> str | None:
+        # Sessions are kept per working directory, so continuing one means
+        # starting where it lives.
+        if task.hints.get("cwd"):
+            return task.hints["cwd"]
+        return str(task.read_dirs[0]) if task.read_dirs else None
 
     async def run(
         self,
@@ -96,7 +114,7 @@ class ClaudeCodeConnector:
         watching = on_text is not None or on_item is not None or on_step is not None
         proc = await asyncio.create_subprocess_exec(
             *self._command(task, streaming=watching),
-            cwd=str(task.read_dirs[0]) if task.read_dirs else None,
+            cwd=self._cwd(task),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             # The result envelope carries the whole structured answer on one
