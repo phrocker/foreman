@@ -211,6 +211,62 @@ def export_yaml(
     return head + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100)
 
 
+# --- drift ----------------------------------------------------------------------
+
+# What an export carries per fact, and so what a checked-in file can be behind on.
+EXPORTED = (
+    "topic",
+    "scope",
+    "trades",
+    "statement",
+    "publisher",
+    "title",
+    "url",
+    "dated",
+    "gathered_on",
+    "expires",
+    "method",
+    "source_sha",
+)
+
+
+def drift(store: Any, project: str, subject: str, path: Path) -> list[str]:
+    """How the checked-in facts file differs from what the store would export.
+
+    The store is the record and the file is its export, so a difference means
+    the export is behind: a fact corrected in the store that the pages are
+    still citing the old way, or a fact gathered that no page can cite yet.
+    One line per fact, in the file's words — what to re-export, not a diff."""
+    live = {
+        str(r["fid"]): {k: str(r.get(k) or "") for k in EXPORTED}
+        for r in store.facts(project=project, subject=subject)
+        if r.get("status") != "retired"
+    }
+    if not path.exists():
+        return [f"{fid}: not in the file" for fid in sorted(live)] if live else []
+    try:
+        _, doc = load_yaml(path)
+    except (OSError, ValueError) as exc:
+        return [f"the file does not read as a facts file: {exc}"]
+    filed = {
+        row["fid"]: {k: row[k] for k in EXPORTED}
+        for f in doc["facts"]
+        if isinstance(f, dict) and f.get("id")
+        for row in [_row(project, subject, f)]
+    }
+    out = []
+    for fid in sorted(set(live) | set(filed)):
+        if fid not in filed:
+            out.append(f"{fid}: in the store, not in the file")
+        elif fid not in live:
+            out.append(f"{fid}: in the file, retired or gone from the store")
+        else:
+            changed = [k for k in EXPORTED if live[fid][k] != filed[fid][k]]
+            if changed:
+                out.append(f"{fid}: {', '.join(changed)} differ")
+    return out
+
+
 # --- verify ---------------------------------------------------------------------
 
 
@@ -306,6 +362,15 @@ def verify(
                 out.append(ob(f"fact:{fid}:expires", r.get("expires") or ""))
                 out.append(ob(f"fact:{fid}:topic", r.get("topic") or ""))
                 out.append(ob(f"fact:{fid}:status", status))
+            # Is the file the pages read still what the store would now
+            # export? After the updates above, so a fingerprint stamped just
+            # now counts: the file is behind on it.
+            repo = getattr(target, "repo", None)
+            if repo is not None:
+                path = Path(repo) / FACTS_DIR / subject.removeprefix("county:") / FACTS_FILE
+                behind = drift(store, target.id, subject, path)
+                out.append(ob("export_drift", str(len(behind))))
+                out.append(ob("export_drift_detail", "\n".join(behind[:40])))
         store.record(run_id, out)
         store.finish_run(run_id, ok=True)
         log(
@@ -317,16 +382,24 @@ def verify(
 
 
 def summary(store: Any, project: str) -> list[dict[str, Any]]:
-    """Per county: how many facts, and how many stand in each status."""
+    """Per county: how many facts, how many stand in each status, and how far
+    the checked-in export is behind the store (from the last verify)."""
     out: dict[str, dict[str, Any]] = {}
     for r in store.facts(project=project):
+        if r.get("status") == "retired":
+            continue
         s = out.setdefault(
-            str(r["subject"]), {"subject": r["subject"], "total": 0, "by_status": {}}
+            str(r["subject"]),
+            {"project": project, "subject": r["subject"], "total": 0, "by_status": {}},
         )
         s["total"] += 1
         s["by_status"][r.get("status") or "unverified"] = (
             s["by_status"].get(r.get("status") or "unverified", 0) + 1
         )
+    for ob in store.latest_observations(project):
+        if ob.get("collector") == COLLECTOR and ob.get("key") == "export_drift":
+            if str(ob.get("subject")) in out:
+                out[str(ob["subject"])]["export_behind"] = int(ob.get("value") or 0)
     return [out[k] for k in sorted(out)]
 
 

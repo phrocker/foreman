@@ -9,7 +9,10 @@ teaches the right thing:
   and the figure on the site may now be the old one;
 - the fact expired — its own shelf life ran out, whatever the source did,
   because a fee schedule written for one fiscal year is an assumption in
-  the next.
+  the next;
+- the export is behind — the store holds a fact the checked-in facts.yaml
+  does not, or holds it differently, so the pages are citing a record that
+  has moved on without them.
 
 All medium. None of these is the site being wrong; each is the site being
 unverified, which the content brief treats as the same failure and the
@@ -93,6 +96,21 @@ def evaluate(pages: Pages, add: Add, today: str | None = None) -> None:
                 "re-stamp `source_sha` in facts.yaml and dismiss this — if it moved, the pages "
                 "citing it are quoting last year's county.\n\n"
                 + "\n".join(f"- {m}" for m in moved),
+            )
+        behind = int(facts.get("export_drift") or 0)
+        if behind:
+            add(
+                "county_facts_export_behind",
+                Severity.MEDIUM,
+                f"{county}: the checked-in facts.yaml is behind the store "
+                f"({behind} fact(s) differ)",
+                [subject],
+                "The store is the record and the file is its export. Re-export it — "
+                "`foreman facts-export --county <slug> --write`, or Export on the project "
+                "panel — and open a pull request so the pages cite what the store holds.\n\n"
+                + "\n".join(
+                    f"- {d}" for d in str(facts.get("export_drift_detail") or "").splitlines()
+                ),
             )
         if expired:
             add(

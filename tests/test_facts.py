@@ -145,6 +145,52 @@ def test_verify_updates_each_fact_and_records_what_the_rules_need(store, tmp_pat
     assert "codes.state (404" in findings["county_fact_source_unreachable"].detail
 
 
+def test_an_export_behind_the_store_is_a_finding_and_a_fresh_one_is_not(store, tmp_path):
+    repo = _repo(tmp_path)
+    F.import_repo(store, "p", repo)
+    registry = SimpleNamespace(active=[SimpleNamespace(id="p", repo=repo)])
+    fetch = lambda urls: {u: ("200", "sha") for u in urls}  # noqa: E731
+    project = Project(id="p", github={"owner": "o", "repo": "r"})
+
+    # Freshly imported: the file is what the store would export, but for the
+    # fingerprints verify stamps — and a stamp is a store-side change the file
+    # is now behind on, which is the point.
+    path = repo / "content" / "counties" / "fairfax-va" / "facts.yaml"
+    F.verify(store, registry, fetch=fetch, today="2026-10-16")
+    path.write_text(F.export_yaml(store, "p", "county:fairfax-va"))
+    F.verify(store, registry, fetch=fetch, today="2026-10-16")
+    findings = {f.rule for f in evaluate_rules(project, store.latest_observations("p"))}
+    assert "county_facts_export_behind" not in findings
+
+    # A correction in the store, a new fact, and a retirement all leave the
+    # file behind, each named by fact.
+    rows = {r["fid"]: r for r in store.facts(project="p")}
+    store.update_fact(int(rows["fees.schedule"]["id"]), statement="Fees are set by Appendix R.")
+    store.update_fact(int(rows["codes.state"]["id"]), status="retired")
+    store.upsert_fact(
+        {
+            "project": "p",
+            "subject": "county:fairfax-va",
+            "fid": "timing.targets",
+            "topic": "timing",
+            "statement": "Two days.",
+            "url": "https://county.test/permits",
+        }
+    )
+    F.verify(store, registry, fetch=fetch, today="2026-10-16")
+    found = {f.rule: f for f in evaluate_rules(project, store.latest_observations("p"))}
+    behind = found["county_facts_export_behind"]
+    assert "3 fact(s) differ" in behind.summary
+    assert "fees.schedule: statement differ" in behind.detail
+    assert "timing.targets: in the store, not in the file" in behind.detail
+    assert "codes.state: in the file, retired or gone from the store" in behind.detail
+    assert F.drift(store, "p", "county:fairfax-va", tmp_path / "nowhere.yaml") == [
+        "fees.schedule: not in the file",
+        "permits.portal: not in the file",
+        "timing.targets: not in the file",
+    ]
+
+
 def test_status_of_each_outcome():
     row = {"expires": "2099-01-01", "source_sha": "a"}
     assert F.status_of(row, "200", "a", "2026-10-16") == "verified"
@@ -161,8 +207,18 @@ def test_status_of_each_outcome():
 def test_summary_counts_each_county_by_status(store, tmp_path):
     F.import_repo(store, "p", _repo(tmp_path))
     (s,) = F.summary(store, "p")
-    assert s["subject"] == "county:fairfax-va" and s["total"] == 3
+    assert s["subject"] == "county:fairfax-va" and s["total"] == 3 and s["project"] == "p"
     assert s["by_status"] == {"unverified": 3}
+    assert "export_behind" not in s  # nothing verified yet, so nothing known
+
+    # After a verify against a checkout whose file is behind, the summary says
+    # by how much — the project panel's one number for "re-export this".
+    rows = {r["fid"]: r for r in store.facts(project="p")}
+    store.update_fact(int(rows["fees.schedule"]["id"]), statement="Fees are set by Appendix R.")
+    registry = SimpleNamespace(active=[SimpleNamespace(id="p", repo=tmp_path)])
+    F.verify(store, registry, fetch=lambda urls: {u: ("200", "sha") for u in urls})
+    (s,) = F.summary(store, "p")
+    assert s["export_behind"] == 2  # the statement, and the fingerprint verify stamped
 
 
 def test_the_content_domain_has_no_collector_of_its_own():

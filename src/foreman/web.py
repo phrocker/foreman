@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
 from . import secrets
 from .actions import Stale, _ops, effect_of, landed_at, target_label
@@ -2131,9 +2131,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             s.close()
 
     @app.get("/api/facts/export")
-    def facts_export(project: str = Query(...), subject: str = Query(...)) -> dict[str, Any]:
+    def facts_export(
+        project: str = Query(...), subject: str = Query(...), format: str = Query("json")
+    ) -> Any:
         """A county's facts as the yaml a repository carries — the export of
-        the record, for a person to put in a pull request."""
+        the record, for a person to put in a pull request. `format=yaml`
+        returns the file itself, which is what the Export link opens."""
         s = store()
         try:
             rows = s.facts(project=project, subject=subject)
@@ -2142,6 +2145,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             s.close()
         if not rows:
             raise HTTPException(404, f"no facts for {subject}")
+        if format == "yaml":
+            return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
         return {"subject": subject, "facts": len(rows), "yaml": text}
 
     @app.get("/api/coverage")

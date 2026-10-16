@@ -2324,7 +2324,9 @@ function factsRow(facts) {
   const cells = facts.map((f) => {
     const by = Object.entries(f.by_status).sort().map(([st, n]) =>
       `<span class="${cls[st] || ""}">${n} ${esc(st)}</span>`).join(" · ");
-    return `<span class="cov-host" title="${esc(f.subject)}"><span class="cov-dot"></span>${esc(String(f.subject).replace("county:", ""))} · ${f.total} facts · ${by}</span>`;
+    const behind = f.export_behind ? ` · <span class="sev-medium">export ${f.export_behind} behind</span>` : "";
+    const link = f.project ? ` · <a href="/api/facts/export?project=${encodeURIComponent(f.project)}&subject=${encodeURIComponent(f.subject)}&format=yaml" target="_blank" rel="noopener" title="The store's export of this county's facts, as facts.yaml">export</a>` : "";
+    return `<span class="cov-host" title="${esc(f.subject)}"><span class="cov-dot"></span>${esc(String(f.subject).replace("county:", ""))} · ${f.total} facts · ${by}${behind}${link}</span>`;
   }).join("");
   return `<div class="pstate-row">
       <span class="pstate-label">County facts</span>
