@@ -471,9 +471,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         pull request that answered one and the board had nothing to say about
         it, which is a fair reason to ask whether the tool is working.
         """
+        # One scan, not one walk per finding: 279 walks at thirty
+        # milliseconds each was eight seconds of the page's load.
+        answered = s.edges(ANSWERED_BY, "finding")
         for row in rows:
-            answered = s.neighbors([node("finding", int(row["id"]))], [ANSWERED_BY])
-            row["answered_by"] = [key_of(n) for n in answered]
+            row["answered_by"] = [
+                key_of(n) for n in answered.get(node("finding", int(row["id"])), [])
+            ]
 
     @app.get("/api/findings")
     def findings(
@@ -488,8 +492,9 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # agent: a problem on six projects is a portfolio decision, one on
             # a single project is a chore. Portfolio-wide even when the view is
             # filtered, because that is the whole point of knowing it.
+            seen_on = s.edges(SEEN_ON, "rule")
             elsewhere = {
-                rule: {key_of(p) for p in s.neighbors([node("rule", rule)], [SEEN_ON])}
+                rule: {key_of(p) for p in seen_on.get(node("rule", rule), [])}
                 for rule in {r["rule"] for r in rows}
             }
         finally:

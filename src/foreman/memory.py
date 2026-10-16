@@ -75,15 +75,19 @@ def recall(store: Store, project_id: str) -> list[Record]:
 def describe(store: Store, rows: Sequence[Record]) -> list[Record]:
     """Memories decorated with what the graph knows about each of them.
 
-    One walk per memory rather than one big union, because each row needs its
-    own answer and a portfolio holds tens of these, not millions. If that stops
-    being true, the fix is a batched expand, not a cache.
+    Batched: one edge scan per relationship, then a dictionary lookup per
+    row. The walk-per-memory version this replaces cost seventy round trips
+    to describe twenty-four memories.
     """
+    # Three scans for the lot, not three walks per memory.
+    supersedes = store.edges(SUPERSEDES, "memory")
+    formed_in = store.edges(FORMED_IN, "memory")
+    about = store.edges(ABOUT, "memory")
     replaced: dict[int, list[int]] = {}
     for row in rows:
         memory_id = int(row["id"])
         replaced[memory_id] = sorted(
-            int(key_of(n)) for n in store.neighbors([node("memory", memory_id)], [SUPERSEDES])
+            int(key_of(n)) for n in supersedes.get(node("memory", memory_id), [])
         )
     # Which memory replaced this one, read off the same edges from the other
     # end. Stored once, in the direction the replacement was written.
@@ -92,12 +96,12 @@ def describe(store: Store, rows: Sequence[Record]) -> list[Record]:
     out = []
     for row in rows:
         memory_id = int(row["id"])
-        conversations = store.neighbors([node("memory", memory_id)], [FORMED_IN])
+        conversations = formed_in.get(node("memory", memory_id), [])
         out.append(
             {
                 **row,
                 "id": memory_id,
-                "about": store.neighbors([node("memory", memory_id)], [ABOUT]),
+                "about": about.get(node("memory", memory_id), []),
                 "conversation": int(key_of(conversations[0])) if conversations else None,
                 "replaces": replaced[memory_id],
                 "replaced_by": replaced_by.get(memory_id),

@@ -1033,13 +1033,26 @@ let stale = [];
 
 async function load() {
   stale = [];
-  const [attention, checkpoint, overview, findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports, declared, pulls, activity, signals, issues,
-         subjects, next] =
-    await Promise.all([
+  // Two waves. The first is the top of the page — the two questions, the
+  // week, the headline — and it paints the moment its own answers arrive.
+  // Waiting for all twenty-one fetches before painting anything made the
+  // slowest tab's query the price of reading "what's on fire".
+  const [attention, checkpoint, overview, declared] = await Promise.all([
     fetchPart("/api/attention", null),
     fetchPart("/api/checkpoint", null),
     fetchPart("/api/overview", null),
+    fetchPart("/api/projects", []),
+  ]);
+  Object.assign(state, { attention, checkpoint, overview, declared });
+  for (const [name, render] of [
+    ["attention", renderAttention], ["checkpoint", renderCheckpoint], ["overview", renderOverview],
+  ]) {
+    try { render(); } catch (err) { console.error(`render ${name}`, err); }
+  }
+  const [findings, actions, drift, precision, history, connectors, skills, memories,
+         settings, plans, reports, pulls, activity, signals, issues,
+         subjects, next] =
+    await Promise.all([
     fetchPart("/api/findings", []),
     fetchPart("/api/actions", []),
     fetchPart("/api/drift", []),
@@ -1051,7 +1064,6 @@ async function load() {
     fetchPart("/api/settings", null),
     fetchPart("/api/plans", []),
     fetchPart("/api/reports", []),
-    fetchPart("/api/projects", []),
     fetchPart("/api/pulls", []),
     fetchPart("/api/activity", null),
     fetchPart("/api/signals", []),
@@ -1060,8 +1072,8 @@ async function load() {
     fetchPart("/api/next", []),
   ]);
   Object.assign(state, {
-    attention, checkpoint, overview, findings, actions, drift, precision, history,
-    connectors, skills, memories, settings, plans, reports, declared, pulls, activity,
+    findings, actions, drift, precision, history,
+    connectors, skills, memories, settings, plans, reports, pulls, activity,
     signals, issues, subjects, next,
   });
   renderStale();

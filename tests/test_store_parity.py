@@ -23,6 +23,7 @@ import pytest
 
 from foreman.graph import (
     ABOUT,
+    ANSWERED_BY,
     AUDITED,
     CONCERNS,
     COVERS,
@@ -1408,3 +1409,44 @@ def test_drafts_are_kept_until_a_person_posts_defers_or_dismisses_them(store):
     assert [d["id"] for d in store.drafts(status="deferred")] == [ids[1]]
     assert [d["id"] for d in store.drafts(subject="pull:o/r#1", status="posted")] == [ids[0]]
     assert store.draft(ids[2] + 1) is None
+
+
+def test_every_edge_of_one_relationship_comes_back_in_one_read(store):
+    """The findings page asked 279 times which pull request answered a
+    finding, one walk each. One read, keyed by source, is the same answer."""
+    store.relate(
+        [
+            ("finding|1", ANSWERED_BY, "pull|o/r#1"),
+            ("finding|1", ANSWERED_BY, "pull|o/r#2"),
+            ("finding|2", ANSWERED_BY, "pull|o/r#3"),
+            ("finding|2", CONCERNS, "subject|x"),
+            ("rule|r", SEEN_ON, "project|a"),
+        ]
+    )
+    out = store.edges(ANSWERED_BY, "finding")
+    assert out == {
+        node("finding", 1): ["pull|o/r#1", "pull|o/r#2"],
+        node("finding", 2): ["pull|o/r#3"],
+    }
+    assert store.edges(SEEN_ON, "rule") == {"rule|r": ["project|a"]}
+    assert store.edges(ANSWERED_BY, "rule") == {}
+
+
+def test_a_handle_remembers_a_read_until_it_writes(store):
+    """A page is one handle asking the same question 150 times; the sweep is
+    one handle writing between every read. Both must be right."""
+    run = store.start_run("a", "crawl")
+    store.record(
+        run,
+        [Observation(project="a", collector="crawl", subject="s", key="k", value="1")],
+    )
+    assert [o["value"] for o in store.latest_observations("a")] == ["1"]
+    store.record(
+        run,
+        [Observation(project="a", collector="crawl", subject="s", key="k", value="2")],
+    )
+    assert [o["value"] for o in store.latest_observations("a")] == ["2"]
+    store.relate([("finding|9", ANSWERED_BY, "pull|p")])
+    assert store.neighbors(["finding|9"], [ANSWERED_BY]) == ["pull|p"]
+    store.relate([("finding|9", ANSWERED_BY, "pull|q")])
+    assert store.neighbors(["finding|9"], [ANSWERED_BY]) == ["pull|p", "pull|q"]

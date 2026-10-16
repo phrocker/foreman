@@ -213,7 +213,11 @@ def _tally(rows: Iterable[Mapping[str, Any]], skill: str) -> tuple[int, int]:
     return acted, decided
 
 
-def _slices(store: Store, grouped: Mapping[str, list[tuple[str, float]]]) -> tuple[Slice, ...]:
+def _slices(
+    store: Store,
+    grouped: Mapping[str, list[tuple[str, float]]],
+    yielded: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[Slice, ...]:
     """Roll up runs grouped by project or by backend, counting yield per group.
 
     One traversal per group rather than one per run: yield is a per-run
@@ -223,7 +227,11 @@ def _slices(store: Store, grouped: Mapping[str, list[tuple[str, float]]]) -> tup
     """
     out = []
     for key, members in sorted(grouped.items()):
-        found = store.neighbors([run for run, _ in members], [YIELDED])
+        found = (
+            {f for run, _ in members for f in yielded.get(run, [])}
+            if yielded is not None
+            else store.neighbors([run for run, _ in members], [YIELDED])
+        )
         out.append(
             Slice(
                 key=key,
@@ -236,7 +244,11 @@ def _slices(store: Store, grouped: Mapping[str, list[tuple[str, float]]]) -> tup
 
 
 def track_record(
-    store: Store, skill: str, precision_rows: Sequence[Mapping[str, Any]] | None = None
+    store: Store,
+    skill: str,
+    precision_rows: Sequence[Mapping[str, Any]] | None = None,
+    ran: Mapping[str, Sequence[str]] | None = None,
+    yielded: Mapping[str, Sequence[str]] | None = None,
 ) -> TrackRecord:
     """Assemble one skill's record by walking out from its node.
 
@@ -245,7 +257,11 @@ def track_record(
     should not need a preamble.
     """
     rows = store.rule_precision() if precision_rows is None else precision_rows
-    run_nodes = store.neighbors([node("skill", skill)], [RAN])
+    run_nodes = (
+        list(ran.get(node("skill", skill), []))
+        if ran is not None
+        else store.neighbors([node("skill", skill)], [RAN])
+    )
     records = {int(row["id"]): row for row in store.runs([int(key_of(n)) for n in run_nodes])}
 
     by_project: dict[str, list[tuple[str, float]]] = {}
@@ -271,11 +287,15 @@ def track_record(
         runs=len(records),
         failed=failed,
         cost_usd=cost,
-        findings=len(store.neighbors(run_nodes, [YIELDED])),
+        findings=(
+            len({f for r in run_nodes for f in yielded.get(r, [])})
+            if yielded is not None
+            else len(store.neighbors(run_nodes, [YIELDED]))
+        ),
         acted=acted,
         decided=decided,
-        projects=_slices(store, by_project),
-        connectors=_slices(store, by_connector),
+        projects=_slices(store, by_project, yielded),
+        connectors=_slices(store, by_connector, yielded),
     )
 
 
@@ -288,6 +308,8 @@ def track_records(store: Store) -> list[TrackRecord]:
     sometimes useful.
     """
     rows = store.rule_precision()
-    records = [track_record(store, key_of(n), rows) for n in store.nodes("skill")]
+    ran = store.edges(RAN, "skill")
+    yielded = store.edges(YIELDED, "run")
+    records = [track_record(store, key_of(n), rows, ran, yielded) for n in store.nodes("skill")]
     records.sort(key=lambda r: (-r.cost_usd, r.skill))
     return records

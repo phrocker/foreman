@@ -202,6 +202,7 @@ class Store(Protocol):
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
     def nodes(self, kind: str) -> list[str]: ...
+    def edges(self, relationship: str, kind: str) -> dict[str, list[str]]: ...
     def neighbors(
         self,
         sources: Sequence[str],
@@ -1570,6 +1571,18 @@ class SqliteStore:
         )
         self._db.commit()
         return len(rows)
+
+    def edges(self, relationship: str, kind: str) -> dict[str, list[str]]:
+        """Every `relationship` edge out of every `kind` node: source -> targets."""
+        rows = self._db.execute(
+            "SELECT source, target FROM edges WHERE relationship = ? AND source LIKE ?"
+            " ORDER BY source, target",
+            (relationship, f"{kind}|%"),
+        ).fetchall()
+        out: dict[str, list[str]] = {}
+        for r in rows:
+            out.setdefault(str(r["source"]), []).append(str(r["target"]))
+        return out
 
     def nodes(self, kind: str) -> list[str]:
         """Every node of this kind the graph knows about, sorted.

@@ -217,6 +217,13 @@ class ShoalStore:
         self.table = table
         self._channel: grpc.Channel | None = None
         self._rpc: rpc.ShoalEmbedStub | None = None
+        # Reads remembered for the life of this handle, forgotten on any
+        # write through it. A page is built from one handle and asked the
+        # store the same question 150 times — recent_runs() per project per
+        # collector, each a full scan of every run — and the answer had not
+        # changed between the first and the hundred-and-fiftieth. The sweep
+        # writes constantly, so its reads are re-fetched as they always were.
+        self._memo: dict[tuple, Any] = {}
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -320,15 +327,24 @@ class ShoalStore:
     def _write(self, mutations: list[pb.Mutation]) -> int:
         if not mutations:
             return 0
+        self._forget()
         return self._stub.Write(pb.WriteRequest(table=self.table, mutations=mutations)).written
+
+    def _forget(self) -> None:
+        self._memo.clear()
 
     def _cells(
         self, prefix: str, as_of: str | None = None, table: str | None = None
     ) -> list[pb.Cell]:
+        key = ("cells", prefix, as_of, table)
+        if key in self._memo:
+            return self._memo[key]
         request = pb.ScanRequest(table=table or self.table, row_prefix=prefix)
         if as_of:
             request.as_of = _ms(as_of)
-        return [cell for resp in self._stub.Scan(request) for cell in resp.cells]
+        cells = [cell for resp in self._stub.Scan(request) for cell in resp.cells]
+        self._memo[key] = cells
+        return cells
 
     def _entities(self, prefix: str, as_of: str | None = None) -> dict[str, Record]:
         """Rows under `prefix`, each collapsed into a field dict of stable shape."""
@@ -393,6 +409,7 @@ class ShoalStore:
                 ],
                 conditions=[condition],
             )
+            self._forget()
             response = self._stub.ConditionalWrite(
                 pb.WriteRequest(table=self.table, mutations=[mutation])
             )
@@ -447,13 +464,17 @@ class ShoalStore:
 
     def runs(self, run_ids: Sequence[int]) -> list[Record]:
         """The run records behind a set of run node ids, oldest first."""
+        # One scan of every run, then a lookup per id. A scan per id was a
+        # round trip per run: /api/next asked for a hundred and fifty of them.
+        wanted = sorted({int(value) for value in run_ids})
+        if not wanted:
+            return []
+        every = self._entities("ent:run|")
         out: list[Record] = []
-        for run_id in sorted({int(value) for value in run_ids}):
-            found = self._entities(f"ent:run|{_pad(run_id)}")
-            record = next(iter(found.values()), None)
-            if record is None:
-                continue
-            out.append(self._typed_run(record))
+        for run_id in wanted:
+            record = every.get(f"ent:run|{_pad(run_id)}")
+            if record is not None:
+                out.append(self._typed_run(record))
         return out
 
     @staticmethod
@@ -1295,6 +1316,7 @@ class ShoalStore:
         self, space: str, key: str, vector: Sequence[float], meta: dict[str, str]
     ) -> None:
         row = f"vec:{space}|{key}".encode()
+        self._forget()
         self._stub.Write(
             pb.WriteRequest(
                 table=self.vectors_table,
@@ -1393,6 +1415,24 @@ class ShoalStore:
         self._write([pb.Mutation(row=row, entries=e) for row, e in by_row.items()])
         return count
 
+    def edges(self, relationship: str, kind: str) -> dict[str, list[str]]:
+        """Every `relationship` edge out of every `kind` node: source -> targets.
+
+        One scan where neighbors() per node was one round trip each — the
+        findings page asked 279 times which pull request answered a finding,
+        at thirty milliseconds a question.
+        """
+        want = f"{relationship}{SEP}".encode()
+        out: dict[str, list[str]] = {}
+        for cell in self._cells(f"ent:{kind}|"):
+            if cell.column_family != EDGE_CF.encode() or not cell.column_qualifier.startswith(want):
+                continue
+            source = canonical(cell.row.decode().removeprefix("ent:"))
+            out.setdefault(source, []).append(cell.column_qualifier[len(want) :].decode())
+        for targets in out.values():
+            targets.sort()
+        return out
+
     def nodes(self, kind: str) -> list[str]:
         """Every node of this kind the graph knows about, sorted.
 
@@ -1423,6 +1463,9 @@ class ShoalStore:
         """
         if not sources or hops < 1:
             return []
+        key = ("neighbors", tuple(sources), tuple(relationships or ()), hops)
+        if key in self._memo:
+            return list(self._memo[key])
         request = pb.ScanRequest(
             table=self.table,
             edge_expand=pb.EdgeExpand(
@@ -1440,7 +1483,9 @@ class ShoalStore:
             for resp in self._stub.Scan(request)
             for cell in resp.cells
         }
-        return sorted(reached - {canonical(s) for s in sources})
+        out = sorted(reached - {canonical(s) for s in sources})
+        self._memo[key] = out
+        return list(out)
 
     # --- history -----------------------------------------------------------
 
