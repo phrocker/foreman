@@ -153,6 +153,25 @@ FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "plan": ("goal", "status", "created_at", "subjects"),
     "phase": ("plan_id", "position", "name", "gate", "params"),
+    "fact": (
+        "project",
+        "subject",
+        "fid",
+        "topic",
+        "scope",
+        "trades",
+        "statement",
+        "publisher",
+        "title",
+        "url",
+        "dated",
+        "gathered_on",
+        "expires",
+        "method",
+        "source_sha",
+        "verified_on",
+        "status",
+    ),
     "draft": (
         "project",
         "subject",
@@ -1305,6 +1324,69 @@ class ShoalStore:
         self._write(
             [self._put(_rid("commitment", _pad(commitment_id)), "commitment", {"status": status})]
         )
+
+    # --- facts ---------------------------------------------------------------
+
+    FACT_FIELDS = (
+        "topic",
+        "scope",
+        "trades",
+        "statement",
+        "publisher",
+        "title",
+        "url",
+        "dated",
+        "gathered_on",
+        "expires",
+        "method",
+        "source_sha",
+        "verified_on",
+        "status",
+    )
+
+    def _fact_rows(self) -> dict[str, Record]:
+        return self._entities("ent:fact|")
+
+    def upsert_fact(self, fact: dict[str, Any]) -> int:
+        key = (str(fact["project"]), str(fact["subject"]), str(fact["fid"]))
+        existing = next(
+            (
+                r
+                for r in self._fact_rows().values()
+                if (str(r.get("project")), str(r.get("subject")), str(r.get("fid"))) == key
+            ),
+            None,
+        )
+        fact_id = int(existing["id"]) if existing else self._next_id("fact")
+        fields = {c: fact.get(c) for c in self.FACT_FIELDS}
+        fields["status"] = fact.get("status") or "unverified"
+        fields.update({"project": key[0], "subject": key[1], "fid": key[2]})
+        self._write([self._put(_rid("fact", _pad(fact_id)), "fact", fields)])
+        return fact_id
+
+    def facts(self, project: str | None = None, subject: str | None = None) -> list[Record]:
+        rows = [
+            self._typed_fact(r)
+            for r in self._fact_rows().values()
+            if (not project or r.get("project") == project)
+            and (not subject or r.get("subject") == subject)
+        ]
+        rows.sort(key=lambda r: (str(r.get("subject")), str(r.get("fid"))))
+        return rows
+
+    @staticmethod
+    def _typed_fact(r: Record) -> Record:
+        # Empty cells read back as None; the sqlite twin keeps ''.
+        out = dict(r)
+        for c in ShoalStore.FACT_FIELDS:
+            if c != "verified_on" and out.get(c) is None:
+                out[c] = ""
+        return out
+
+    def update_fact(self, fact_id: int, **fields: Any) -> None:
+        keep = {k: v for k, v in fields.items() if k in self.FACT_FIELDS}
+        if keep:
+            self._write([self._put(_rid("fact", _pad(fact_id)), "fact", keep)])
 
     # --- vectors -------------------------------------------------------------
     #

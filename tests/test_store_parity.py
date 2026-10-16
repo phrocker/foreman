@@ -1450,3 +1450,46 @@ def test_a_handle_remembers_a_read_until_it_writes(store):
     assert store.neighbors(["finding|9"], [ANSWERED_BY]) == ["pull|p"]
     store.relate([("finding|9", ANSWERED_BY, "pull|q")])
     assert store.neighbors(["finding|9"], [ANSWERED_BY]) == ["pull|p", "pull|q"]
+
+
+# --- facts -------------------------------------------------------------------
+
+
+def test_a_fact_is_one_row_per_county_and_id_and_keeps_what_verification_learned(store):
+    fid = store.upsert_fact(
+        {
+            "project": "p",
+            "subject": "county:fairfax-va",
+            "fid": "fees.schedule",
+            "topic": "fees",
+            "statement": "Fees are set by Appendix Q.",
+            "publisher": "LDS",
+            "title": "Fee schedule",
+            "url": "https://county.test/fees.pdf",
+            "dated": "2026-07-01",
+            "gathered_on": "2026-09-22",
+            "expires": "2027-07-01",
+            "method": "read_off_pdf",
+            "source_sha": "",
+        }
+    )
+    (row,) = store.facts(project="p")
+    assert row["id"] == fid and row["status"] == "unverified" and row["verified_on"] is None
+    assert row["trades"] == "" and row["scope"] == ""
+    store.update_fact(fid, status="verified", verified_on="2026-10-16T12:00:00", source_sha="abc")
+    store.update_fact(fid, nonsense="ignored")
+    again = store.upsert_fact(
+        {
+            "project": "p",
+            "subject": "county:fairfax-va",
+            "fid": "fees.schedule",
+            "statement": "Fees are set by Appendix Q.",
+            "status": "verified",
+            "source_sha": "abc",
+        }
+    )
+    assert again == fid
+    rows = store.facts(project="p", subject="county:fairfax-va")
+    assert len(rows) == 1 and rows[0]["source_sha"] == "abc" and rows[0]["status"] == "verified"
+    assert store.facts(project="p", subject="county:nowhere") == []
+    assert store.facts(project="q") == []

@@ -106,7 +106,10 @@ def _registry() -> dict[str, Domain]:
             name="content",
             summary="Whether the county facts a site cites are still the facts",
             surfaces=("github",),
-            collectors=("countyfacts",),
+            # No collector: the facts live in the store, and `facts.verify`
+            # (a sweep step, like risk) re-fetches their sources and records
+            # what it saw under the countyfacts collector name.
+            collectors=(),
             evaluate=content_rules.evaluate,
         ),
         Domain(

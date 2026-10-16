@@ -35,6 +35,9 @@ from .config import find_registry, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import project_drift
+from .facts import export_yaml, import_repo
+from .facts import summary as facts_summary
+from .facts import verify as verify_facts
 from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
 from .fix import build_issue, deliver_research, fix_findings
 from .graph import ANSWERED_BY, MEMORY_ABOUT, SEEN_ON, key_of, kind_of, node
@@ -1734,6 +1737,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         }
                     )
             known = briefing(s, project_id)
+            county_facts = facts_summary(s, project_id)
         finally:
             s.close()
 
@@ -1748,6 +1752,10 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             "fixable": project.fixable,
             "deliver": project.deliver,
             "findings": counts,
+            # What the store knows about each county this project serves, and
+            # whether each fact still stands. The repository's facts.yaml is
+            # an export of this, never the other way round.
+            "facts": county_facts,
             "plans": plans,
             "issues": issues,
             "pulls": pulls,
@@ -2092,6 +2100,46 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             return {"id": commitment_id, "status": "dropped"}
         finally:
             s.close()
+
+    @app.get("/api/facts")
+    def list_facts(
+        project: str = Query(...), subject: str | None = Query(None)
+    ) -> list[dict[str, Any]]:
+        """The county facts the store holds for a project: statement, source,
+        dates, and whether the last verification found the source as it was."""
+        s = store()
+        try:
+            return s.facts(project=project, subject=subject)
+        finally:
+            s.close()
+
+    @app.post("/api/facts/import")
+    def facts_import(project: str = Query(...)) -> dict[str, Any]:
+        """Read the checkout's content/counties/*/facts.yaml into the store —
+        the bootstrap for material gathered before the store held it."""
+        registry = load_registry(registry_path)
+        target = registry.get(project)
+        if target.repo is None or not target.repo.exists():
+            raise HTTPException(400, f"{project} has no local checkout to read")
+        s = store()
+        try:
+            return {"imported": import_repo(s, project, target.repo)}
+        finally:
+            s.close()
+
+    @app.get("/api/facts/export")
+    def facts_export(project: str = Query(...), subject: str = Query(...)) -> dict[str, Any]:
+        """A county's facts as the yaml a repository carries — the export of
+        the record, for a person to put in a pull request."""
+        s = store()
+        try:
+            rows = s.facts(project=project, subject=subject)
+            text = export_yaml(s, project, subject)
+        finally:
+            s.close()
+        if not rows:
+            raise HTTPException(404, f"no facts for {subject}")
+        return {"subject": subject, "facts": len(rows), "yaml": text}
 
     @app.get("/api/coverage")
     def coverage(project: str | None = Query(None)) -> list[dict[str, Any]]:
@@ -2680,6 +2728,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     # "quiet" would depend on which one ran last.
                     note("history: reading repository events")
                     await ingest_all(reg, s, project=project, log=note)
+                    note("facts: re-fetching every cited county source")
+                    await asyncio.to_thread(verify_facts, s, reg, note)
                     note("risk: rating open pull requests against what merged ones needed")
                     await asyncio.to_thread(refresh_risk, s, reg, note)
                     note("verify: asking each project's checks about applied actions")

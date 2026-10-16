@@ -2296,7 +2296,7 @@ async function renderProjectState() {
         <span class="pstate-label">In flight</span>
         <span>${d.issues.length} open issue(s) · ${d.pulls.length} open pull request(s)</span>
       </div>
-      ${coverageRow(cov)}
+      ${coverageRow(cov) + factsRow(d.facts)}
     </div>`;
 }
 
@@ -2308,6 +2308,22 @@ async function renderProjectState() {
  *  healthy site. Now the hosts are on the page and a cold one is visible from
  *  across the room.
  */
+// The county facts a project's pages rest on, and whether they still stand.
+// From the store, not the repository: the file in the repo is an export.
+function factsRow(facts) {
+  if (!facts || !facts.length) return "";
+  const cls = { verified: "sev-low", changed: "sev-high", unreachable: "sev-high", expired: "sev-high", unverifiable: "sev-medium", unverified: "" };
+  const cells = facts.map((f) => {
+    const by = Object.entries(f.by_status).sort().map(([st, n]) =>
+      `<span class="${cls[st] || ""}">${n} ${esc(st)}</span>`).join(" · ");
+    return `<span class="cov-host" title="${esc(f.subject)}"><span class="cov-dot"></span>${esc(String(f.subject).replace("county:", ""))} · ${f.total} facts · ${by}</span>`;
+  }).join("");
+  return `<div class="pstate-row">
+      <span class="pstate-label">County facts</span>
+      <span class="cov-grid">${cells}</span>
+    </div>`;
+}
+
 function coverageRow(cov) {
   // Shown for any declared web surface, not only a plural one. A single host
   // nobody has ever crawled is the same blind spot as twenty-one of them, and

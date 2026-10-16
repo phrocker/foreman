@@ -24,6 +24,9 @@ from .config import DEFAULT_REGISTRY, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import Kind, project_drift
+from .facts import export_yaml, header_of, import_repo
+from .facts import summary as facts_summary
+from .facts import verify as verify_facts
 from .graph import relink as relink_findings
 from .history import ingest_all
 from .memory import about_nodes, describe, label
@@ -955,6 +958,97 @@ def plan_add(
         f"plan {plan_id}: {len(added)} subject(s) added"
         + (f" — {', '.join(added)}" if added else " (all already there)")
     )
+
+
+@app.command(name="facts-import")
+def facts_import(
+    project: str = typer.Option(..., "--project", "-P"),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Read every content/counties/<slug>/facts.yaml in the project's checkout into the store."""
+    reg = load_registry(registry)
+    target = reg.get(project)
+    if target.repo is None or not target.repo.exists():
+        raise typer.BadParameter(f"{project} has no local checkout to read")
+    with open_store(db, registry=registry) as store:
+        results = import_repo(store, project, target.repo)
+    if not results:
+        console.print("[dim]No facts files under content/counties.[/]")
+        return
+    for r in results:
+        console.print(f"{r['county']}: {r['added']} added, {r['updated']} updated")
+
+
+@app.command(name="facts-export")
+def facts_export(
+    project: str = typer.Option(..., "--project", "-P"),
+    county: str = typer.Option(..., "--county", help="County slug, e.g. fairfax-va."),
+    write: bool = typer.Option(False, "--write", help="Write into the checkout instead of stdout."),
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """A county's facts as the yaml a repository carries — the store's export."""
+    reg = load_registry(registry)
+    target = reg.get(project)
+    path = (
+        target.repo / "content" / "counties" / county / "facts.yaml"
+        if target.repo is not None
+        else None
+    )
+    header = header_of(path) if path is not None and path.exists() else {}
+    with open_store(db, registry=registry) as store:
+        rows = store.facts(project=project, subject=f"county:{county}")
+        text = export_yaml(store, project, f"county:{county}", **header)
+    if not rows:
+        console.print(f"[red]no facts for {county} in {project}[/]")
+        raise typer.Exit(1)
+    if write:
+        if path is None:
+            raise typer.BadParameter(f"{project} has no local checkout to write to")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        console.print(f"wrote {path} ({len(rows)} facts)")
+    else:
+        console.print(text, markup=False, highlight=False)
+
+
+@app.command(name="facts-verify")
+def facts_verify(
+    registry: Path = typer.Option(None, "--registry", "-r"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """Re-fetch every fact's cited source and record whether it is still the fact."""
+    reg = load_registry(registry)
+    with open_store(db, registry=registry) as store:
+        counts = verify_facts(store, reg, log=lambda m: console.print(f"  {m}"))
+    console.print(
+        f"[bold]{counts['facts']}[/] fact(s) over {counts['fetched']} source(s): "
+        f"{counts['changed']} changed, {counts['unreachable']} unreachable, "
+        f"{counts['expired']} expired"
+    )
+
+
+@app.command(name="facts")
+def facts_cmd(
+    project: str = typer.Option(..., "--project", "-P"),
+    county: str = typer.Option(None, "--county"),
+    db: Path = typer.Option(None, "--db"),
+) -> None:
+    """What the store knows about each county, and what stands in which status."""
+    with open_store(db) as store:
+        if county:
+            rows = store.facts(project=project, subject=f"county:{county}")
+            table = Table(box=None, pad_edge=False)
+            for column in ("status", "id", "expires", "statement"):
+                table.add_column(column)
+            for r in rows:
+                table.add_row(r["status"], r["fid"], r["expires"], _clip(r["statement"], 70))
+            console.print(table)
+            return
+        for s in facts_summary(store, project):
+            by = " · ".join(f"{n} {st}" for st, n in sorted(s["by_status"].items()))
+            console.print(f"{s['subject']}: {s['total']} facts — {by}")
 
 
 @app.command()

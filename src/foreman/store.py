@@ -199,6 +199,11 @@ class Store(Protocol):
     def vectors(self, space: str) -> list[Record]: ...
     def nearest(self, space: str, vector: Sequence[float], k: int = 10) -> list[Record]: ...
 
+    # --- facts ---
+    def upsert_fact(self, fact: dict[str, Any]) -> int: ...
+    def facts(self, project: str | None = None, subject: str | None = None) -> list[Record]: ...
+    def update_fact(self, fact_id: int, **fields: Any) -> None: ...
+
     # --- graph ---
     def relate(self, edges: Iterable[tuple[str, str, str]]) -> int: ...
     def nodes(self, kind: str) -> list[str]: ...
@@ -326,6 +331,33 @@ CREATE TABLE IF NOT EXISTS drafts (
     posted_url  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_drafts_subject ON drafts (subject, status);
+
+-- A fact with provenance: what a county page may say, the source it rests
+-- on, when it was gathered, when it stops being current, and what the cited
+-- page looked like when the fact was last verified. The store is the record;
+-- the facts.yaml a repository carries is an export of it.
+CREATE TABLE IF NOT EXISTS facts (
+    id          INTEGER PRIMARY KEY,
+    project     TEXT NOT NULL,
+    subject     TEXT NOT NULL,             -- county:<slug>
+    fid         TEXT NOT NULL,             -- fees.schedule
+    topic       TEXT NOT NULL DEFAULT '',
+    scope       TEXT NOT NULL DEFAULT '',  -- '' | state
+    trades      TEXT NOT NULL DEFAULT '',  -- comma-separated, '' = all
+    statement   TEXT NOT NULL,
+    publisher   TEXT NOT NULL DEFAULT '',
+    title       TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    dated       TEXT NOT NULL DEFAULT '',
+    gathered_on TEXT NOT NULL DEFAULT '',
+    expires     TEXT NOT NULL DEFAULT '',
+    method      TEXT NOT NULL DEFAULT '',
+    source_sha  TEXT NOT NULL DEFAULT '',
+    verified_on TEXT,
+    -- unverified | verified | changed | unreachable | unverifiable | expired | retired
+    status      TEXT NOT NULL DEFAULT 'unverified',
+    UNIQUE (project, subject, fid)
+);
 
 -- The decision ledger. Every action Foreman proposed, what you decided, and
 -- whether it worked. This is the evidence behind "you have approved this exact
@@ -1516,6 +1548,65 @@ class SqliteStore:
 
     def set_commitment_status(self, commitment_id: int, status: str) -> None:
         self._db.execute("UPDATE commitments SET status = ? WHERE id = ?", (status, commitment_id))
+        self._db.commit()
+
+    # --- facts ------------------------------------------------------------
+
+    FACT_FIELDS = (
+        "topic",
+        "scope",
+        "trades",
+        "statement",
+        "publisher",
+        "title",
+        "url",
+        "dated",
+        "gathered_on",
+        "expires",
+        "method",
+        "source_sha",
+        "verified_on",
+        "status",
+    )
+
+    def upsert_fact(self, fact: dict[str, Any]) -> int:
+        """Record a fact, or replace the one with the same (project, subject, fid)."""
+        cols = ("project", "subject", "fid", *self.FACT_FIELDS)
+        values = [
+            fact.get(c) if fact.get(c) is not None else ("" if c != "verified_on" else None)
+            for c in cols
+        ]
+        if not fact.get("status"):
+            values[cols.index("status")] = "unverified"
+        sets = ", ".join(f"{c} = excluded.{c}" for c in self.FACT_FIELDS)
+        cur = self._db.execute(
+            f"INSERT INTO facts ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})"
+            f" ON CONFLICT(project, subject, fid) DO UPDATE SET {sets}",
+            values,
+        )
+        self._db.commit()
+        row = self._db.execute(
+            "SELECT id FROM facts WHERE project = ? AND subject = ? AND fid = ?",
+            (fact["project"], fact["subject"], fact["fid"]),
+        ).fetchone()
+        return int(row["id"]) if row else int(cur.lastrowid)
+
+    def facts(self, project: str | None = None, subject: str | None = None) -> list[Record]:
+        sql, args = "SELECT * FROM facts WHERE 1 = 1", []
+        if project:
+            sql += " AND project = ?"
+            args.append(project)
+        if subject:
+            sql += " AND subject = ?"
+            args.append(subject)
+        return [dict(r) for r in self._db.execute(sql + " ORDER BY subject, fid", args).fetchall()]
+
+    def update_fact(self, fact_id: int, **fields: Any) -> None:
+        keep = {k: v for k, v in fields.items() if k in self.FACT_FIELDS}
+        if not keep:
+            return
+        sets = ", ".join(f"{k} = ?" for k in keep)
+        self._db.execute(f"UPDATE facts SET {sets} WHERE id = ?", (*keep.values(), fact_id))
         self._db.commit()
 
     # --- vectors ----------------------------------------------------------

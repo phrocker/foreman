@@ -14,6 +14,8 @@ ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman collect
 # Repository history is its own feed with its own cursor; the checkpoint's
 # "what went quiet" reads it, so it is swept too.
 ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman history
+# Are the county facts the sites cite still the facts? Re-fetches every source.
+ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman facts-verify
 # Which open pull requests look like the ones that needed a deep review.
 # Local embeddings; spends nothing.
 ExecStart=/mnt/ExtraDrive/repos/foreman/.venv/bin/foreman risk
