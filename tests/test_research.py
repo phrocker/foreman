@@ -424,3 +424,17 @@ async def test_a_ceiling_says_so_when_it_cannot_bind(store):
         log=quiet.append,
     )
     assert not any("cannot bind" in line for line in quiet)
+
+
+def test_a_subject_knows_where_its_countys_facts_live_and_its_trade_key():
+    """A run for fairfaxcountyroofrepair.com starts from county:fairfax-va and
+    tags what it gathers as roofing — the platform's key, not the domain's
+    token. A town's facts are its county's."""
+    from foreman.research import subject_of
+
+    assert subject_of("fairfaxcountyroofrepair.com").slug == "fairfax-va"
+    assert subject_of("fairfaxcountyroofrepair.com").trade_key == "roofing"
+    assert subject_of("loudouncountytreeservice.com").slug == "loudoun-va"
+    assert subject_of("loudouncountytreeservice.com").trade_key == "treeservice"
+    assert subject_of("columbiamoldremoval.com").slug == "howard-md"
+    assert subject_of("columbiamoldremoval.com").trade_key == "moldremoval"

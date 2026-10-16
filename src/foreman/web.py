@@ -35,7 +35,10 @@ from .config import find_registry, load_registry
 from .connectors import build as build_connectors
 from .connectors import describe as describe_connectors
 from .diff import project_drift
+from .facts import brief as fact_brief
 from .facts import export_yaml, import_repo
+from .facts import from_research as facts_from_research
+from .facts import header_of as fact_header
 from .facts import summary as facts_summary
 from .facts import verify as verify_facts
 from .fix import DEFAULT_CEILING_USD as FIX_CEILING_USD
@@ -2335,6 +2338,11 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     "state": x.state,
                     "trade": x.trade,
                     "title": x.title,
+                    # Where its county's facts live, and the platform's trade
+                    # key — what a research run needs to start from the store
+                    # and land back in it.
+                    "slug": x.slug,
+                    "trade_key": x.trade_key,
                 }
                 for x in subjects_for(s)
             ]
@@ -2342,7 +2350,12 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             s.close()
 
     @app.post("/api/issues/research")
-    async def research_issue(subject: str = Query(...), about: str = Query("")) -> dict[str, Any]:
+    async def research_issue(
+        subject: str = Query(...),
+        about: str = Query(""),
+        county: str = Query(""),
+        trade: str = Query(""),
+    ) -> dict[str, Any]:
         """Gather evidence for an issue that asks a question about the world.
 
         Several agents gather on different facets, each returning claims that
@@ -2363,6 +2376,14 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                 try:
                     project, facts = await facts_for_issue(st, subject, note)
                     topic = about or facts.get("title") or subject
+                    # A county named means the run starts from what the store
+                    # already holds for it, and what stands up lands back in
+                    # the store — and in the same pull request as the evidence,
+                    # as the county's re-exported facts.yaml.
+                    county_subject = f"county:{county}" if county else ""
+                    known = fact_brief(st, project.id, county_subject) if county_subject else ""
+                    if known:
+                        note(f"starting from the facts already established for {county}")
                     result = await run_research(
                         project.id,
                         st,
@@ -2370,11 +2391,26 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         COUNTY_FACETS,
                         budget=Budget(RESEARCH_CEILING_USD),
                         connectors=backends(),
+                        known=known,
                         log=note,
                     )
+                    extra: dict[str, str] = {}
+                    if county_subject and result.stands:
+                        landed = facts_from_research(st, project.id, county_subject, result, trade)
+                        note(f"{landed['facts']} claim(s) recorded as facts for {county}")
+                        header: dict[str, Any] = {}
+                        if project.repo is not None:
+                            header = fact_header(
+                                project.repo / "content" / "counties" / county / "facts.yaml"
+                            )
+                        extra[f"content/counties/{county}/facts.yaml"] = export_yaml(
+                            st, project.id, county_subject, **header
+                        )
                     # Sync, and the loop must not wait on it: a push and a
                     # pull request are minutes of network apiece.
-                    url = await offloaded(deliver_research, project, st, facts, result, log=note)
+                    url = await offloaded(
+                        deliver_research, project, st, facts, result, extra_files=extra, log=note
+                    )
                     note(f"opened {url}" if url else "nothing stood up; no pull request opened")
                     note(f"${result.cost_usd:.2f}")
                     if url:

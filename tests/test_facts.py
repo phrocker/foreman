@@ -169,3 +169,51 @@ def test_the_content_domain_has_no_collector_of_its_own():
     from foreman.domains import DOMAINS
 
     assert DOMAINS["content"].collectors == ()
+
+
+# --- research in, research out ---------------------------------------------------
+
+
+def test_the_brief_names_what_stands_so_a_gather_does_not_regather(store, tmp_path):
+    F.import_repo(store, "p", _repo(tmp_path))
+    text = F.brief(store, "p", "county:fairfax-va")
+    assert text.startswith("## Already established for this county (3 facts)")
+    assert "`fees.schedule` (fees): Fees are set by Appendix Q." in text
+    assert "hvac,plumbing only" in text
+    assert F.brief(store, "p", "county:nowhere") == ""
+
+
+def test_claims_that_stood_up_become_facts_and_a_rerun_lands_on_the_same_rows(store):
+    from foreman.research import SUPPORTED, UNSUPPORTED, Checked, Claim, Facet, Verdict
+
+    facet = Facet("permits", "Permits", "what permits?")
+    good = Claim(
+        statement="A roofing permit is $70.",
+        source_url="https://c.test/fees",
+        source_title="Fees",
+        as_of="2026-07-01",
+    )
+    bad = Claim(
+        statement="Permits are free.", source_url="https://c.test/fees", source_title="Fees"
+    )
+    unsourced = Claim(statement="Everyone says so.")
+    result = SimpleNamespace(
+        stands=(
+            Checked(facet, good, Verdict(claim=0, verdict=SUPPORTED)),
+            Checked(facet, unsourced, Verdict(claim=2, verdict=SUPPORTED)),
+        ),
+        rejected=(Checked(facet, bad, Verdict(claim=1, verdict=UNSUPPORTED)),),
+    )
+
+    out = F.from_research(
+        store, "p", "county:fairfax-va", result, trade="roofing", today="2026-10-16"
+    )
+    assert out["facts"] == 1
+    (row,) = store.facts(project="p")
+    assert row["fid"].startswith("permits.") and row["trades"] == "roofing"
+    assert row["status"] == "unverified" and row["source_sha"] == ""
+    assert row["gathered_on"] == "2026-10-16" and row["expires"] == "2027-10-16"
+    assert row["dated"] == "2026-07-01"
+
+    F.from_research(store, "p", "county:fairfax-va", result, trade="roofing", today="2026-10-17")
+    assert len(store.facts(project="p")) == 1

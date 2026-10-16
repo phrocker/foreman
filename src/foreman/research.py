@@ -301,7 +301,6 @@ async def _validate(
     return (checked, result.cost_usd)
 
 
-
 @dataclass(frozen=True)
 class Research:
     subject: str
@@ -344,6 +343,11 @@ async def research(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     connectors: list[Connector] | None = None,
     model: str | None = None,
+    # What is already established about the subject — a county's verified
+    # facts, by id — so the gatherers add to it rather than re-gather it.
+    # The validator never sees it, for the same reason it never sees the
+    # briefing.
+    known: str = "",
     log=lambda _: None,
 ) -> Research:
     """Gather on several facets at once, then try to knock every claim down."""
@@ -359,6 +363,8 @@ async def research(
     warn_unmetered(budget, connectors, log)
 
     brief = briefing(store, project_id)
+    if known:
+        brief = f"{brief}\n\n{known}" if brief else known
     run_id = store.start_run(project_id, "research")
     spent = 0.0
     try:
@@ -419,10 +425,7 @@ async def research(
                 documents.setdefault(item[1].source_url, []).append(item)
 
             groups = list(documents.items())
-            log(
-                f"validating {len(pending)} claim(s) against "
-                f"{len(groups)} distinct source(s)"
-            )
+            log(f"validating {len(pending)} claim(s) against {len(groups)} distinct source(s)")
 
             done = 0
             for i in range(0, len(groups), VALIDATE_BATCH):
@@ -452,9 +455,7 @@ async def research(
                     )
                     break
 
-        out = Research(
-            subject, tuple(checked), tuple(gaps), round(spent, 2), tuple(unvalidated)
-        )
+        out = Research(subject, tuple(checked), tuple(gaps), round(spent, 2), tuple(unvalidated))
         log(
             f"{len(out.stands)} stood up, {len(out.rejected)} rejected, "
             f"{len(out.unreachable)} unreachable, {len(gaps)} gap(s)"
@@ -614,6 +615,19 @@ PLACES: tuple[tuple[str, str, str], ...] = (
     ("woodbine", "Woodbine, Howard County", "Maryland"),
 )
 
+# Where a place's facts live. The content tree and the fact store name a county
+# by this slug, and a town's facts are its county's.
+COUNTY_SLUGS = {
+    "Prince William County": "princewilliam-va",
+    "Howard County": "howard-md",
+    "Fairfax County": "fairfax-va",
+    "Loudoun County": "loudoun-va",
+    "Columbia, Howard County": "howard-md",
+    "Woodbine, Howard County": "howard-md",
+}
+# Where the domain's token and the platform's trade key differ.
+TRADE_KEYS = {"roofrepair": "roofing", "plumber": "plumbing"}
+
 # The trades, longest first so `draincleaning` does not match `cleaning` and
 # leave `drain` stranded. Written out rather than split on a dictionary because
 # a wrong guess here becomes the subject line of a research run.
@@ -650,6 +664,23 @@ class Subject:
     @property
     def title(self) -> str:
         return f"{self.trade} in {self.place}, {self.state}"
+
+    @property
+    def slug(self) -> str:
+        """The county's slug as the facts store and the content tree name it —
+        `fairfax-va` — so a run can start from the county's facts and land its
+        own there. A town resolves to its county: Columbia's facts are Howard's."""
+        return COUNTY_SLUGS.get(self.place, "")
+
+    @property
+    def trade_key(self) -> str:
+        """The platform's trade key for this subject, for tagging facts that
+        apply to one trade rather than the whole county."""
+        stem = self.domain.rsplit(".", 1)[0].lower()
+        for token, _ in TRADES:
+            if stem.endswith(token):
+                return TRADE_KEYS.get(token, token)
+        return ""
 
 
 def subject_of(domain: str) -> Subject | None:

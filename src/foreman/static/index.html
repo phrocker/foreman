@@ -1671,10 +1671,18 @@ async function researchIssue(subject, button) {
     "and the link.\n\n" +
     "What stands up is committed as a document and opened as a pull request. " +
     "Rejected claims and gaps are kept in it — an agent asserting something " +
-    "its own source does not support is the most useful thing on the page."
+    "its own source does not support is the most useful thing on the page.\n\n" +
+    "The gatherers start from the county facts already in the store and add " +
+    "what is specific to this trade; what stands up is recorded as facts and " +
+    "the county's facts.yaml is re-exported into the same pull request."
   )) return;
   button.disabled = true;
-  const qs = `subject=${encodeURIComponent(subject)}&about=${encodeURIComponent(about || "")}`;
+  // The county and trade travel with the request: the run starts from the
+  // facts already established for the county, and what stands up lands back
+  // in the store under that county and trade — and in the pull request as
+  // the county's re-exported facts.yaml.
+  const qs = `subject=${encodeURIComponent(subject)}&about=${encodeURIComponent(about || "")}`
+    + `&county=${encodeURIComponent(choice.slug || "")}&trade=${encodeURIComponent(choice.trade_key || "")}`;
   const res = await fetch(`/api/issues/research?${qs}`, { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

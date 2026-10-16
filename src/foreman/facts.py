@@ -328,3 +328,97 @@ def summary(store: Any, project: str) -> list[dict[str, Any]]:
             s["by_status"].get(r.get("status") or "unverified", 0) + 1
         )
     return [out[k] for k in sorted(out)]
+
+
+# --- research in, research out ----------------------------------------------------
+
+
+def brief(store: Any, project: str, subject: str) -> str:
+    """What is already established for a county, for a gatherer about to start.
+
+    The whole reason the facts are in one place: a roofing gather for Fairfax
+    should not re-research the permit portal, the fee schedule's surcharges or
+    which code edition applies. It is told what stands, by id, and asked for
+    what is specific to its trade.
+    """
+    rows = [
+        r for r in store.facts(project=project, subject=subject) if r.get("status") != "retired"
+    ]
+    if not rows:
+        return ""
+    lines = [
+        f"- `{r['fid']}` ({r.get('topic') or 'general'}"
+        + (f", {r['trades']} only" if r.get("trades") else "")
+        + f"): {r.get('statement') or ''}"
+        + (f" — {r.get('publisher') or ''}, {r.get('url') or ''}" if r.get("url") else "")
+        for r in rows
+    ]
+    return (
+        f"## Already established for this county ({len(rows)} facts)\n\n"
+        "These are verified and cited elsewhere. Do not re-gather them, and do not "
+        "restate them as new claims: refer to them by id where your answer depends "
+        "on one, and gather only what is specific to this trade or genuinely new.\n\n"
+        + "\n".join(lines)
+    )
+
+
+def _fid(facet_key: str, statement: str, url: str) -> str:
+    """A stable id for a gathered claim: the facet, and a short hash of what it
+    says and where it points, so a re-run of the same gather lands on the same
+    row rather than a duplicate."""
+    digest = hashlib.sha1(f"{statement.strip().lower()}|{url.strip()}".encode()).hexdigest()[:8]
+    return f"{facet_key}.{digest}"
+
+
+# How long a gathered fact stays current before it is an assumption again,
+# by what kind of thing it is. Fees move with a budget year; rules rarely.
+SHELF_LIFE_DAYS = {"permits": 365, "fees": 365, "timing": 180, "rates": 180, "housing": 365}
+DEFAULT_SHELF_LIFE_DAYS = 365
+
+
+def from_research(
+    store: Any,
+    project: str,
+    subject: str,
+    result: Any,
+    trade: str = "",
+    today: str | None = None,
+) -> dict[str, int]:
+    """Every claim that stood up to validation, as a fact in the store.
+
+    Unverified until the next sweep stamps its source: the validator read the
+    page, but the fingerprint the content rules compare against is taken by
+    the same fetch every later check uses. Rejected and unvalidated claims
+    are not facts and are not recorded as such.
+    """
+    from datetime import timedelta
+
+    today_d = datetime.fromisoformat(today) if today else datetime.now(UTC)
+    gathered_on = today_d.strftime("%Y-%m-%d")
+    added = 0
+    for checked in getattr(result, "stands", ()):
+        claim, facet = checked.claim, checked.facet
+        if not claim.source_url:
+            continue
+        days = SHELF_LIFE_DAYS.get(facet.key, DEFAULT_SHELF_LIFE_DAYS)
+        store.upsert_fact(
+            {
+                "project": project,
+                "subject": subject,
+                "fid": _fid(facet.key, claim.statement, claim.source_url),
+                "topic": facet.key,
+                "trades": trade,
+                "statement": claim.statement.strip(),
+                "publisher": "",
+                "title": claim.source_title,
+                "url": claim.source_url,
+                "dated": claim.as_of,
+                "gathered_on": gathered_on,
+                "expires": (today_d + timedelta(days=days)).strftime("%Y-%m-%d"),
+                "method": "fetched",
+                "source_sha": "",
+                "status": "unverified",
+            }
+        )
+        added += 1
+    return {"facts": added, "county": subject}

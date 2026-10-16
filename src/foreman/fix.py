@@ -211,9 +211,15 @@ def deliver_research(
     issue: dict[str, Any],
     result: Any,
     *,
+    extra_files: dict[str, str] | None = None,
     log=lambda _: None,
 ) -> str:
     """Commit the evidence and open a pull request for it.
+
+    `extra_files` are more files for the same pull request, path -> text —
+    the county's facts.yaml re-exported from the store after the run's
+    claims were recorded in it, so the evidence and the facts the site
+    renders from land together.
 
     Evidence is reviewed the same way code is, and for the same reason: a
     document asserting what permit costs in Howard County is going to be built
@@ -240,6 +246,11 @@ def deliver_research(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(as_markdown(result))
         _git(work, "add", "--", str(path))
+        for rel, text in (extra_files or {}).items():
+            extra = work / rel
+            extra.parent.mkdir(parents=True, exist_ok=True)
+            extra.write_text(text)
+            _git(work, "add", "--", rel)
         summary = f"Evidence for #{number}: {result.subject}"
         _git(work, "commit", "-m", summary)
         push(work, branch, log)
