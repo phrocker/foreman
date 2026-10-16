@@ -11,6 +11,7 @@ page feeds both performance and search visibility; neither owns it.
 
 from __future__ import annotations
 
+from .countyfacts import CountyFactsCollector
 from .crawl import CrawlCollector
 from .gcloud import GcloudCollector
 from .github import DependabotCollector, GitHubActivityCollector
@@ -24,6 +25,7 @@ COLLECTORS = {
     c.name: c
     for c in (
         CrawlCollector(),
+        CountyFactsCollector(),
         TlsCollector(),
         RenderCollector(),
         DependabotCollector(),
@@ -42,6 +44,7 @@ OPTIONAL = ("render",)
 __all__ = [
     "COLLECTORS",
     "OPTIONAL",
+    "CountyFactsCollector",
     "CrawlCollector",
     "DependabotCollector",
     "GcloudCollector",

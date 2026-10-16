@@ -52,6 +52,7 @@ def _registry() -> dict[str, Domain]:
     # Imported inside the function so a domain's rules can import config without
     # a cycle back through here.
     from .rules import cloud as cloud_rules
+    from .rules import content as content_rules
     from .rules import delivery as delivery_rules
     from .rules import dependencies as dependencies_rules
     from .rules import domains as domain_rules
@@ -100,6 +101,13 @@ def _registry() -> dict[str, Domain]:
             surfaces=("cloud",),
             collectors=("gcloud",),
             evaluate=cloud_rules.evaluate,
+        ),
+        Domain(
+            name="content",
+            summary="Whether the county facts a site cites are still the facts",
+            surfaces=("github",),
+            collectors=("countyfacts",),
+            evaluate=content_rules.evaluate,
         ),
         Domain(
             name="domains",
