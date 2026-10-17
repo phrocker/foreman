@@ -322,3 +322,51 @@ def test_the_reply_schema_has_no_object_without_properties():
 
     schema = strict(Reply.model_json_schema())
     assert all(isinstance(o.get("properties"), dict) for o in objects(schema))
+
+
+@pytest.mark.asyncio
+async def test_a_drafted_plan_is_a_row_the_operator_can_activate(world):
+    """The model said "it is attached" three times and the page showed nothing
+    each time: the plan travelled only inside the reply and was dropped on the
+    way to the page. A draft is a row now — status drafted, phases and all,
+    named in the turn's refs — and nothing in it runs until activated."""
+    from foreman.chat import DraftPhase, DraftPlan
+
+    registry, store = world
+    reply = Reply(
+        reply="here is a shape of work",
+        plan=DraftPlan(
+            goal="nationalbusinessparkway.com takes listings",
+            subjects=["domain:fairfaxcountyroofrepair.com"],
+            phases=[
+                DraftPhase(
+                    name="Pay range on the form",
+                    gate="confirmed",
+                    params={"key": "confirmed:pay_range"},
+                ),
+                DraftPhase(name="Serves over HTTPS", gate="serves"),
+                DraftPhase(name="Not a gate", gate="no-such-gate"),
+            ],
+        ),
+    )
+    conv, _, _ = await ask(store, registry, "plan nbp", connectors=[_Canned(reply)])
+
+    drafted = [p for p in store.plans() if p["status"] == "drafted"]
+    assert len(drafted) == 1
+    plan = drafted[0]
+    assert plan["goal"] == "nationalbusinessparkway.com takes listings"
+    assert json.loads(plan["subjects"]) == ["domain:fairfaxcountyroofrepair.com"]
+    phases = store.phases(int(plan["id"]))
+    assert [ph["name"] for ph in phases] == ["Pay range on the form", "Serves over HTTPS"]
+
+    # The turn that drafted it names it, so a reload still leads there.
+    turn = store.conversation(conv)[-1]
+    assert json.loads(turn["refs"])["plans"] == [int(plan["id"])]
+
+    # Drafted is not active: it is not carried as a research subject and does
+    # not count as work in progress until the operator says so.
+    from foreman.research import subjects_for
+
+    assert subjects_for(store) == []
+    store.set_plan_status(int(plan["id"]), "active")
+    assert [s.domain for s in subjects_for(store)] == ["fairfaxcountyroofrepair.com"]

@@ -151,7 +151,7 @@ ISSUE_PROMPT = """Do the work described in this issue.
 ## {slug}#{number} — {title}
 
 {body}
-
+{context}
 ## Your checkout
 
 You are in a git worktree at the repository root, on a new branch `{branch}`
@@ -203,6 +203,54 @@ what you found that means it should not be done this way.
 
 `declined` is what you deliberately did not do, with the reason.
 """
+
+
+def _issue_context(work: Path, number: str, title: str) -> str:
+    """What the checkout already holds for this issue, and what is still owed.
+
+    The first page build on a gathered issue came back "nothing built": the
+    agent found the research merged under docs/research and concluded the
+    work was done, when the research was the input and the page was the
+    deliverable. The brief now says both, when both can be read off the tree:
+    the evidence file, if it exists, and the content bundle a hostname named
+    in the title still has empty.
+    """
+    parts: list[str] = []
+    evidence = work / "docs" / "research" / f"issue-{number}.md"
+    if number and evidence.exists():
+        parts.append(
+            "## Evidence already gathered\n\n"
+            f"The research for this issue is merged at `docs/research/issue-{number}.md`, "
+            "with the county's facts beside it under `content/counties/`. It is the input "
+            "to this work and not the work: do not gather again, and do not conclude the "
+            "issue is done because the evidence exists."
+        )
+    properties = work / "config" / "properties.json"
+    if properties.exists():
+        try:
+            doc = json.loads(properties.read_text())
+        except (OSError, ValueError):
+            doc = {}
+        lowered = title.lower()
+        for prop in doc.get("properties") or []:
+            host = str((prop or {}).get("hostname") or "").lower()
+            bundle = str((prop or {}).get("content_bundle") or "")
+            if not host or host not in lowered or not bundle:
+                continue
+            if (work / "content" / bundle / "page.md").exists():
+                continue
+            brief = work / "docs" / "content-brief.md"
+            parts.append(
+                "## Deliverable\n\n"
+                f"`{host}` is a draft property whose content bundle `content/{bundle}/` has "
+                "no `page.md`. The deliverable is that page"
+                + (", written to `docs/content-brief.md`" if brief.exists() else "")
+                + ". The site renders it as the county page a homeowner lands on; "
+                '"nothing to build" is the wrong answer here, because the research exists '
+                "and the page does not."
+            )
+            break
+    return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
 def deliver_research(
@@ -370,6 +418,7 @@ async def build_issue(
                     number=number,
                     title=issue.get("title") or "",
                     body=(issue.get("body") or "")[:8000],
+                    context=_issue_context(work, number, str(issue.get("title") or "")),
                     branch=branch,
                     base=base,
                     in_flight=_in_flight(store, project),

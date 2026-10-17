@@ -713,7 +713,9 @@ def subjects_for(store: Store, plan_id: int | None = None) -> list[Subject]:
     the operator said which domains this project is about — the portfolio holds
     a hundred and fifty-nine and most of them are not this.
     """
-    plans = [p for p in store.plans() if p["status"] != "superseded"]
+    # Active only. A superseded plan is history and a drafted one is a
+    # proposal nobody has accepted; neither says what this project is about.
+    plans = [p for p in store.plans() if p["status"] == "active"]
     if plan_id is not None:
         plans = [p for p in plans if int(p["id"]) == plan_id]
 

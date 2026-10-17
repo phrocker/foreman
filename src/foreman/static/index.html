@@ -2938,9 +2938,10 @@ function renderPlans() {
     const subjects = Object.entries(plan.subjects || {});
     const head = `<div class="plan-head">
         <div class="plan-goal">${esc(plan.goal)}</div>
-        <div class="plan-meta">${subjects.length} subject(s) · ${esc(plan.status)} · started ${esc((plan.created_at || "").slice(0, 10))}
-          · <button class="link-ish plan-status" data-id="${plan.id}" data-to="${plan.status === "superseded" ? "active" : "superseded"}">${
-            plan.status === "superseded" ? "bring back" : "supersede"}</button>
+        <div class="plan-meta">${subjects.length} subject(s) · ${esc(plan.status)} · ${plan.status === "drafted" ? "drafted" : "started"} ${esc((plan.created_at || "").slice(0, 10))}
+          ${plan.status === "drafted" ? `· <button class="link-ish plan-status" data-id="${plan.id}" data-to="active">activate</button>
+          · <button class="link-ish plan-status" data-id="${plan.id}" data-to="superseded">discard</button>` : `· <button class="link-ish plan-status" data-id="${plan.id}" data-to="${plan.status === "superseded" ? "active" : "superseded"}">${
+            plan.status === "superseded" ? "bring back" : "supersede"}</button>`}
           ${plan.status !== "superseded" ? `· <button class="link-ish plan-add" data-id="${plan.id}">add subjects</button>` : ""}</div>
       </div>
       <div class="phase-bar">${(plan.summary || []).map((line) => {
@@ -3599,11 +3600,23 @@ function renderChat(pending) {
     const proposed = (t.remember || []).map((m) =>
       `<div class="kept"><span class="kept-mark">◆</span><span>Remembered: “${esc(m.statement)}”${
         m.about && m.about.length ? ` [${m.about.map((a) => esc(nodeLabel(a))).join(", ")}]` : ""}</span></div>`).join("");
+    // A plan the answer drafted is a row on the Plans tab, drafted and not
+    // started; here it is a card with the two buttons that decide it.
+    const drafted = ((t.refs || {}).plans || []).map((id) => {
+      const plan = (state.plans || []).find((p) => String(p.id) === String(id));
+      const status = plan ? plan.status : "drafted";
+      const phases = plan && plan.phases ? plan.phases.map((ph) => esc(ph.name)).join(" → ") : "";
+      return `<div class="suggest"><span>Plan #${esc(String(id))}${plan ? ` — ${esc(plan.goal)}` : ""}${
+        phases ? `<br><small class="muted">${phases}</small>` : ""} <em>(${esc(status)})</em></span>
+        ${status === "drafted" ? `<button class="primary plan-status" data-id="${esc(String(id))}" data-to="active">Activate</button>
+        <button class="plan-status" data-id="${esc(String(id))}" data-to="superseded">Discard</button>` : ""}</div>`;
+    }).join("");
     return `<div class="turn ${esc(t.role)}">
       <div class="turn-role">${t.role === "user" ? "you" : "foreman"}</div>
       <div class="turn-body">${md(t.content)}</div>
       ${refs ? `<div class="turn-refs">${refs}</div>` : ""}
       ${suggests ? `<div class="suggests">${suggests}</div>` : ""}
+      ${drafted ? `<div class="suggests">${drafted}</div>` : ""}
       ${proposed ? `<div class="suggests">${proposed}</div>` : ""}
     </div>`;
   }).join("") + (pending
@@ -3618,6 +3631,21 @@ function renderChat(pending) {
     b.addEventListener("click", () => decide(b.dataset.id, "approve")));
   log.querySelectorAll(".sg-reject").forEach((b) =>
     b.addEventListener("click", () => decide(b.dataset.id, "reject")));
+  log.querySelectorAll(".plan-status").forEach((b) =>
+    b.addEventListener("click", () => setDraftStatus(b.dataset.id, b.dataset.to, b)));
+}
+
+/** Activate a drafted plan, or discard it. Discarded is superseded: kept as
+ *  the record of what was proposed, never deleted. */
+async function setDraftStatus(id, to, button) {
+  if (to === "superseded" && !confirm("Discard this drafted plan? It is kept as the record of what was proposed.")) return;
+  button.disabled = true;
+  const res = await fetch(`/api/plans/${id}/status`, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ status: to }) });
+  if (!res.ok) { alert((await res.json().catch(() => ({}))).detail || `Failed with ${res.status}`); button.disabled = false; return; }
+  state.plans = await fetchPart("/api/plans", state.plans || []);
+  renderChat(false);
+  if (typeof renderPlans === "function") renderPlans();
 }
 
 $("chatForm").addEventListener("submit", async (e) => {

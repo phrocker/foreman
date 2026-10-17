@@ -589,16 +589,44 @@ async def ask(
     except ConnectorError as exc:
         raise ChatError(str(exc)) from exc
     reply, cost = result.value, result.cost_usd
-
-    store.add_message(
-        conversation_id,
-        "assistant",
-        reply.reply,
-        refs={k: v for k, v in reply.refs.items() if v},
-        cost_usd=cost,
-    )
+    refs = {k: v for k, v in reply.refs.items() if v}
+    drafted = _draft(store, reply)
+    if drafted is not None:
+        # The turn names the plan it drafted, so a reload of the conversation
+        # still leads to it, and the Plans tab holds it beside the others.
+        refs["plans"] = [*refs.get("plans", []), drafted]
+    store.add_message(conversation_id, "assistant", reply.reply, refs=refs, cost_usd=cost)
     _keep(store, conversation_id, reply)
     return conversation_id, reply, cost
+
+
+def _draft(store: Store, reply: Reply) -> int | None:
+    """Put a drafted plan in the store, status `drafted`, and return its id.
+
+    A plan used to travel only inside the reply, and the reply dropped it on
+    the way to the page: the model said "it is attached" three times and the
+    operator saw nothing each time. A draft that exists only in a sentence
+    is not a draft. It is a row now — drafted, never started, beside the
+    active plans on the Plans tab with an Activate button — and nothing in it
+    runs until the operator presses that.
+    """
+    plan = reply.plan
+    if plan is None or not (plan.goal or "").strip() or not plan.phases:
+        return None
+    phases = [ph for ph in plan.phases if (ph.name or "").strip() and ph.gate in GATES]
+    if not phases:
+        return None
+    plan_id = store.create_plan(plan.goal.strip(), [str(x) for x in plan.subjects if str(x)])
+    for position, ph in enumerate(phases, start=1):
+        store.add_phase(
+            plan_id,
+            position,
+            ph.name.strip(),
+            ph.gate,
+            {str(k): str(v) for k, v in dict(ph.params or {}).items()},
+        )
+    store.set_plan_status(plan_id, "drafted")
+    return plan_id
 
 
 def _keep(store: Store, conversation_id: int, reply: Reply) -> None:

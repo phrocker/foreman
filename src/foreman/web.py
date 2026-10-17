@@ -323,37 +323,36 @@ def _sweep_schedule(unit: str = "foreman-sweep.timer") -> str | None:
     return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _gather_issue(slug: str, host: str, subject: Any) -> int:
+def _gather_issue(slug: str, host: str, subject: Any) -> dict[str, Any]:
     """The open issue that is this host's gather, opened if there is none.
 
     Through `gh`, like every other write Foreman makes to GitHub, so it is
-    the operator's token and the operator's name on the issue.
+    the operator's token and the operator's name on the issue. Returned as
+    the facts a research run needs — number, title, url, body — so the run
+    does not have to find it in a snapshot taken before it existed, which it
+    tried and lost three times in a row.
     """
     listed = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "list",
-            "-R",
-            slug,
-            "--state",
-            "open",
-            "--search",
-            host,
-            "--json",
-            "number,title",
-            "--limit",
-            "20",
-        ],
+        ["gh", "issue", "list", "-R", slug, "--state", "open", "--search", host,
+         "--json", "number,title,url,body", "--limit", "20"],
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
-    )
+    )  # fmt: skip
     if listed.returncode == 0:
         for item in json.loads(listed.stdout or "[]"):
             if host in str(item.get("title") or "").lower():
-                return int(item["number"])
+                return {
+                    "number": str(item["number"]),
+                    "title": str(item.get("title") or ""),
+                    "url": str(item.get("url") or ""),
+                    "body": str(item.get("body") or ""),
+                }
+    title = (
+        f"Gather what a {subject.place}, {subject.state} homeowner needs to know "
+        f"about {subject.trade}, for {host}"
+    )
     body = (
         f"{host} is a draft property with an empty content bundle. Before it goes live it "
         f"needs the county page a homeowner lands on: what {subject.place} requires for "
@@ -365,18 +364,7 @@ def _gather_issue(slug: str, host: str, subject: Any) -> int:
         "is re-exported in the same pull request."
     )
     created = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "create",
-            "-R",
-            slug,
-            "--title",
-            f"Gather what a {subject.place}, {subject.state} homeowner needs to know "
-            f"about {subject.trade}, for {host}",
-            "--body",
-            body,
-        ],
+        ["gh", "issue", "create", "-R", slug, "--title", title, "--body", body],
         capture_output=True,
         text=True,
         timeout=60,
@@ -384,7 +372,8 @@ def _gather_issue(slug: str, host: str, subject: Any) -> int:
     )
     if created.returncode != 0:
         raise HTTPException(502, f"gh issue create: {created.stderr.strip()[:200]}")
-    return int(created.stdout.strip().rpartition("/")[2])
+    url = created.stdout.strip()
+    return {"number": url.rpartition("/")[2], "title": title, "url": url, "body": body}
 
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
@@ -1225,6 +1214,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         """Supersede a plan, or bring one back. Never deleted: a superseded
         plan is the record of what was intended."""
         status = str(payload.get("status") or "").strip()
+        # `drafted` is set by the chat alone: a plan arrives drafted and leaves
+        # that state through here, to active or to superseded, never back.
         if status not in {"active", "superseded"}:
             raise HTTPException(400, "status must be 'active' or 'superseded'")
         s = store()
@@ -2430,7 +2421,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
     ) -> dict[str, Any]:
         return dispatch_research(subject, about, county, trade)
 
-    def dispatch_research(subject: str, about: str, county: str, trade: str) -> dict[str, Any]:
+    def dispatch_research(
+        subject: str,
+        about: str,
+        county: str,
+        trade: str,
+        given: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Gather evidence for an issue that asks a question about the world.
 
         Several agents gather on different facets, each returning claims that
@@ -2449,7 +2446,15 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 st = store()
                 try:
-                    project, facts = await facts_for_issue(st, subject, note)
+                    if given is not None:
+                        # The caller opened this issue a moment ago and knows
+                        # it better than the snapshot does.
+                        project = project_for_subject(load_registry(registry_path), subject)
+                        if project is None:
+                            raise KeyError(f"no project for {subject}")
+                        facts = given
+                    else:
+                        project, facts = await facts_for_issue(st, subject, note)
                     topic = about or facts.get("title") or subject
                     # A county named means the run starts from what the store
                     # already holds for it, and what stands up lands back in
@@ -2519,9 +2524,13 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         if subject is None:
             raise HTTPException(400, f"{host} does not read as a county and a trade")
         slug = f"{target.github.owner}/{target.github.repo}"
-        number = await asyncio.to_thread(_gather_issue, slug, host, subject)
+        issue = await asyncio.to_thread(_gather_issue, slug, host, subject)
         return dispatch_research(
-            f"issue:{slug}#{number}", subject.title, subject.slug, subject.trade_key
+            f"issue:{slug}#{issue['number']}",
+            subject.title,
+            subject.slug,
+            subject.trade_key,
+            given={**issue, "slug": slug},
         )
 
     @app.post("/api/pulls/review")

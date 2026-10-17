@@ -1079,3 +1079,57 @@ def test_the_refresh_names_a_collector_that_exists():
     assert 'collect_project(project, ["pulls"]' in src
     assert pulls.Pulls.name == "pulls"
     assert 'f"issue:' in inspect.getsource(pulls)
+
+
+@pytest.mark.asyncio
+async def test_the_brief_names_merged_evidence_and_the_page_still_owed(world, monkeypatch):
+    """The first page build on a gathered issue came back "nothing built": the
+    agent found the research merged and took it for the work. The brief now
+    says the evidence is the input and names the page that is the deliverable."""
+    import subprocess
+
+    from foreman import fix as fixmod
+
+    project, store = world
+    repo = project.repo
+    (repo / "docs" / "research").mkdir(parents=True)
+    (repo / "docs" / "research" / "issue-9.md").write_text("# Evidence\n")
+    (repo / "docs" / "content-brief.md").write_text("# Brief\n")
+    (repo / "config").mkdir()
+    (repo / "config" / "properties.json").write_text(
+        json.dumps(
+            {
+                "properties": [
+                    {
+                        "hostname": "fairfaxcountyroofrepair.com",
+                        "content_bundle": "fairfax-va-roofing",
+                        "status": "draft",
+                    }
+                ]
+            }
+        )
+    )
+    for args in (
+        ("add", "-A"),
+        ("commit", "-q", "-m", "evidence"),
+        ("push", "-q", "origin", "main"),
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    monkeypatch.setattr(fixmod, "open_pull_request", lambda *a: "https://h.test/pull/1")
+
+    agent = _Agent(summary="looked")
+    await fixmod.build_issue(
+        project,
+        store,
+        {
+            "slug": "o/r",
+            "number": "9",
+            "title": "Gather … for fairfaxcountyroofrepair.com",
+            "body": "b",
+        },
+        connectors=[agent],
+    )
+    brief = agent.seen[0].instructions
+    assert "docs/research/issue-9.md" in brief and "do not gather again" in brief
+    assert "content/fairfax-va-roofing/" in brief and "docs/content-brief.md" in brief
+    assert "The deliverable is that page" in brief
