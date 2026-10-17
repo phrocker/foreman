@@ -14,6 +14,11 @@ teaches the right thing:
   does not, or holds it differently, so the pages are citing a record that
   has moved on without them.
 
+And one that is not about facts but about their absence: a hostname
+registered as a draft with no page in its content bundle is a site bought and
+not built. It is medium until a gather is open for it, and low after, so the
+board says "waiting on the gather" rather than "nothing is happening".
+
 All medium. None of these is the site being wrong; each is the site being
 unverified, which the content brief treats as the same failure and the
 weekly checkpoint should keep asking about.
@@ -43,8 +48,51 @@ def _facts(facts: dict[str, str | None]) -> dict[str, dict[str, str | None]]:
     return out
 
 
+def _gather_open(pages: Pages, host: str) -> str:
+    """The open issue that is this host's gather, by number, or ''."""
+    for subject, facts in pages.items():
+        if subject.startswith("issue:") and host in str(facts.get("title") or "").lower():
+            return subject.rpartition("#")[2]
+    return ""
+
+
+def _unbuilt(pages: Pages, add: Add) -> None:
+    for subject, facts in sorted(pages.items()):
+        if not subject.startswith("host:"):
+            continue
+        if facts.get("status") != "draft" or facts.get("has_page") != "false":
+            continue
+        host = subject.removeprefix("host:")
+        bundle = facts.get("content_bundle") or "?"
+        county = facts.get("county") or "its county"
+        issue = _gather_open(pages, host)
+        if issue:
+            add(
+                "draft_without_content",
+                Severity.LOW,
+                f"{host}: registered, no page yet — a gather is open (#{issue})",
+                [subject],
+                f"Draft property with nothing in content/{bundle}. Issue #{issue} is gathering "
+                f"the {county} evidence for it. When that pull request merges, send an agent "
+                "at the issue to write the page from the evidence; when the page merges, "
+                "promote the property to live in the console and this clears.",
+            )
+        else:
+            add(
+                "draft_without_content",
+                Severity.MEDIUM,
+                f"{host}: registered and serving nothing",
+                [subject],
+                f"A draft property with no page in content/{bundle}; in production a draft "
+                f"answers nothing. Gather opens an issue and sends the research agents at the "
+                f"{county} {facts.get('trade') or ''} page, starting from the county facts the "
+                "store already holds. Costs money; what stands up arrives as a pull request.",
+            )
+
+
 def evaluate(pages: Pages, add: Add, today: str | None = None) -> None:
     today = today or datetime.now(UTC).strftime("%Y-%m-%d")
+    _unbuilt(pages, add)
     for subject, facts in pages.items():
         if not subject.startswith("county:"):
             continue

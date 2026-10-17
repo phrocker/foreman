@@ -221,10 +221,12 @@ def test_summary_counts_each_county_by_status(store, tmp_path):
     assert s["export_behind"] == 2  # the statement, and the fingerprint verify stamped
 
 
-def test_the_content_domain_has_no_collector_of_its_own():
+def test_the_content_domain_reads_only_the_property_set():
+    # The facts themselves live in the store; the one thing collected is the
+    # platform's property set, so a hostname with nothing behind it is seen.
     from foreman.domains import DOMAINS
 
-    assert DOMAINS["content"].collectors == ()
+    assert DOMAINS["content"].collectors == ("properties",)
 
 
 # --- research in, research out ---------------------------------------------------

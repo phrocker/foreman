@@ -1830,6 +1830,33 @@ async function startRevision(subject, button) {
  *  an operation answers goes through the action ledger instead — that path has
  *  an equivalence class behind it and earns trust; this one never can, and
  *  offering both would blur the only line that matters. */
+/** A registered hostname with nothing to serve: the answer is a gather, not
+ *  a fix. One button, which opens the issue and sends the research agents. */
+function gatherable(f) {
+  return f.rule === "draft_without_content" && !f.outcome && f.severity === "medium";
+}
+
+async function gatherHost(project, host, button) {
+  if (!confirm(
+    `Gather the county page for ${host}?\n\n` +
+    "Foreman opens an issue for it (or reuses the open one), then several agents " +
+    "gather on the county's permits, fees, housing and rules, starting from the " +
+    "facts already in the store, and a separate agent tries to knock each claim " +
+    "down. What stands up arrives as a pull request with the county's facts.yaml " +
+    "re-exported.\n\nThis costs money. Promoting the property is still your click."
+  )) return;
+  button.disabled = true;
+  const res = await fetch(`/api/hosts/gather?project=${encodeURIComponent(project)}&host=${encodeURIComponent(host)}`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(body.detail || `Failed with ${res.status}`);
+    button.disabled = false;
+    return;
+  }
+  showTab("activity");
+  watchActivity();
+}
+
 function fixable(f) {
   const project = (state.declared || []).find((p) => p.id === f.project);
   const answerable = (state.settings && state.settings.answerable) || [];
@@ -3346,6 +3373,7 @@ function renderFindings() {
       : `<div class="decide">
           <button class="decide-acted" data-id="${f.id}">I fixed this</button>
           <button class="decide-dismissed" data-id="${f.id}">Not worth it</button>
+          ${gatherable(f) ? `<button class="primary gather-it" data-project="${esc(f.project)}" data-host="${esc(String(f.subjects[0] || "").replace("host:", ""))}">Gather</button>` : ""}
           ${fixable(f) ? `<button class="primary fix-it" data-id="${f.id}" data-also="${
               esc(siblingsOf(f).join(","))}">Have an agent fix it${
               siblingsOf(f).length ? ` (with ${siblingsOf(f).length} more)` : ""}</button>` : ""}
@@ -3399,6 +3427,8 @@ function renderFindings() {
       renderCounts();
     });
   }
+  document.querySelectorAll(".gather-it").forEach((b) =>
+    b.addEventListener("click", () => gatherHost(b.dataset.project, b.dataset.host, b)));
   document.querySelectorAll(".fix-it").forEach((b) =>
     b.addEventListener("click", (e) => {
       e.stopPropagation();

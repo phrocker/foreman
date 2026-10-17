@@ -104,12 +104,15 @@ def _registry() -> dict[str, Domain]:
         ),
         Domain(
             name="content",
-            summary="Whether the county facts a site cites are still the facts",
+            summary="Whether the county facts a site cites are still the facts, "
+            "and whether every hostname registered has a page to serve",
             surfaces=("github",),
-            # No collector: the facts live in the store, and `facts.verify`
-            # (a sweep step, like risk) re-fetches their sources and records
-            # what it saw under the countyfacts collector name.
-            collectors=(),
+            # The facts live in the store, and `facts.verify` (a sweep step,
+            # like risk) re-fetches their sources and records what it saw
+            # under the countyfacts collector name. `properties` reads the
+            # platform's own property set, so a hostname registered with
+            # nothing behind it is a finding and not a surprise.
+            collectors=("properties",),
             evaluate=content_rules.evaluate,
         ),
         Domain(

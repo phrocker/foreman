@@ -55,7 +55,7 @@ from .precision import rank, rule_scores
 from .registry_edit import RegistryError, add_project, set_enabled
 from .registry_edit import projects as registry_projects
 from .report import write_report
-from .research import COUNTY_FACETS, subjects_for
+from .research import COUNTY_FACETS, subject_of, subjects_for
 from .research import DEFAULT_CEILING_USD as RESEARCH_CEILING_USD
 from .research import research as run_research
 from .revise import DEFAULT_CEILING_USD as REVISE_CEILING_USD
@@ -321,6 +321,70 @@ def _sweep_schedule(unit: str = "foreman-sweep.timer") -> str | None:
     except ValueError:
         return None
     return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _gather_issue(slug: str, host: str, subject: Any) -> int:
+    """The open issue that is this host's gather, opened if there is none.
+
+    Through `gh`, like every other write Foreman makes to GitHub, so it is
+    the operator's token and the operator's name on the issue.
+    """
+    listed = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "list",
+            "-R",
+            slug,
+            "--state",
+            "open",
+            "--search",
+            host,
+            "--json",
+            "number,title",
+            "--limit",
+            "20",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if listed.returncode == 0:
+        for item in json.loads(listed.stdout or "[]"):
+            if host in str(item.get("title") or "").lower():
+                return int(item["number"])
+    body = (
+        f"{host} is a draft property with an empty content bundle. Before it goes live it "
+        f"needs the county page a homeowner lands on: what {subject.place} requires for "
+        f"{subject.trade} work, what it charges, how inspections run, who may do the work, "
+        "and what tends to go wrong with houses of the age the county was built.\n\n"
+        f"Start from the county facts Foreman already holds for {subject.slug} and add only "
+        f"what is specific to {subject.trade}. Every figure carries its source and the date it "
+        "was read. What stands up lands in Foreman's fact store and the county's facts.yaml "
+        "is re-exported in the same pull request."
+    )
+    created = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "create",
+            "-R",
+            slug,
+            "--title",
+            f"Gather what a {subject.place}, {subject.state} homeowner needs to know "
+            f"about {subject.trade}, for {host}",
+            "--body",
+            body,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if created.returncode != 0:
+        raise HTTPException(502, f"gh issue create: {created.stderr.strip()[:200]}")
+    return int(created.stdout.strip().rpartition("/")[2])
 
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
@@ -2364,6 +2428,9 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
         county: str = Query(""),
         trade: str = Query(""),
     ) -> dict[str, Any]:
+        return dispatch_research(subject, about, county, trade)
+
+    def dispatch_research(subject: str, about: str, county: str, trade: str) -> dict[str, Any]:
         """Gather evidence for an issue that asks a question about the world.
 
         Several agents gather on different facets, each returning claims that
@@ -2432,6 +2499,30 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
 
         asyncio.create_task(work())
         return slot.as_dict()
+
+    @app.post("/api/hosts/gather")
+    async def gather_host(project: str = Query(...), host: str = Query(...)) -> dict[str, Any]:
+        """Build the page a registered hostname has nothing to serve.
+
+        The `draft_without_content` finding's button. A research run attaches
+        to an issue, so one is opened for the host — or the open one whose
+        title names it is reused — and the run starts from the county's
+        established facts, tagged for the host's trade. What stands up lands
+        in the store and arrives as a pull request; promoting the property is
+        still the operator's click in the console.
+        """
+        registry = load_registry(registry_path)
+        target = registry.get(project)
+        if target.github is None:
+            raise HTTPException(400, f"{project} has no GitHub repository to open an issue on")
+        subject = subject_of(host)
+        if subject is None:
+            raise HTTPException(400, f"{host} does not read as a county and a trade")
+        slug = f"{target.github.owner}/{target.github.repo}"
+        number = await asyncio.to_thread(_gather_issue, slug, host, subject)
+        return dispatch_research(
+            f"issue:{slug}#{number}", subject.title, subject.slug, subject.trade_key
+        )
 
     @app.post("/api/pulls/review")
     async def review_pull(subject: str = Query(...)) -> dict[str, Any]:

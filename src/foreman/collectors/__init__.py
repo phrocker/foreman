@@ -15,6 +15,7 @@ from .crawl import CrawlCollector
 from .gcloud import GcloudCollector
 from .github import DependabotCollector, GitHubActivityCollector
 from .godaddy import GoDaddyCollector
+from .properties import PropertiesCollector
 from .pulls import Pulls
 from .render import RenderCollector
 from .siteprobe import SiteProbeCollector
@@ -32,6 +33,7 @@ COLLECTORS = {
         GoDaddyCollector(),
         SiteProbeCollector(),
         Pulls(),
+        PropertiesCollector(),
     )
 }
 
@@ -46,6 +48,7 @@ __all__ = [
     "DependabotCollector",
     "GcloudCollector",
     "GoDaddyCollector",
+    "PropertiesCollector",
     "Pulls",
     "GitHubActivityCollector",
     "RenderCollector",
