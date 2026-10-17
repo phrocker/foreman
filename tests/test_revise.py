@@ -1095,6 +1095,10 @@ async def test_the_brief_names_merged_evidence_and_the_page_still_owed(world, mo
     (repo / "docs" / "research").mkdir(parents=True)
     (repo / "docs" / "research" / "issue-9.md").write_text("# Evidence\n")
     (repo / "docs" / "content-brief.md").write_text("# Brief\n")
+    (repo / "cmd" / "prosecheck").mkdir(parents=True)
+    (repo / "cmd" / "prosecheck" / "main.go").write_text("package main\n")  # git keeps no empty dir
+    (repo / "content").mkdir(exist_ok=True)
+    (repo / "content" / "prose-baseline.json").write_text('{"pages": {}}')
     (repo / "config").mkdir()
     (repo / "config" / "properties.json").write_text(
         json.dumps(
@@ -1133,3 +1137,4 @@ async def test_the_brief_names_merged_evidence_and_the_page_still_owed(world, mo
     assert "docs/research/issue-9.md" in brief and "do not gather again" in brief
     assert "content/fairfax-va-roofing/" in brief and "docs/content-brief.md" in brief
     assert "The deliverable is that page" in brief
+    assert "prosecheck -analysis" in brief and "-update" in brief

@@ -250,6 +250,25 @@ def _issue_context(work: Path, number: str, title: str) -> str:
                 "and the page does not."
             )
             break
+    # The prose gate. Nine of ten page builds failed CI for one reason: the
+    # check refuses a page with no recorded number, and the brief never said
+    # so. One agent found the gate on its own and recorded its entry; the
+    # others left it for a person.
+    if (work / "content" / "prose-baseline.json").exists() and (
+        work / "cmd" / "prosecheck"
+    ).exists():
+        parts.append(
+            "## Prose gate\n\n"
+            "CI runs `cmd/prosecheck` over every page against `content/prose-baseline.json` "
+            "and refuses any page with no recorded entry. A new page needs its entry "
+            "recorded before the pull request can pass: install the pinned analyser "
+            "(`tools/lingity/requirements.txt`), analyse every page under `content/` with "
+            "`lingity analyze <page> --profile web-copy --output <dir>/<key>.json`, then "
+            "`go run ./cmd/prosecheck -analysis <dir> -update <key>` and commit the baseline "
+            "change with the page. The number recorded is the page's own and is reviewed, "
+            "not a pass. If the analyser cannot be installed where you are, say so in "
+            "`declined` so the caller records it."
+        )
     return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
