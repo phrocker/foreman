@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
-from . import secrets
+from . import net, secrets
 from .actions import Stale, _ops, effect_of, landed_at, target_label
 from .actions.sagform import automatable, policy_allows
 from .adversary import DEFAULT_CEILING_USD as REVIEW_CEILING_USD
@@ -325,6 +325,9 @@ def _sweep_schedule(unit: str = "foreman-sweep.timer") -> str | None:
 
 def create_app(registry_path: Path | None = None, db_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="Foreman", docs_url=None, redoc_url=None)
+    # One DNS lookup per host for everything the dashboard fetches; the Run
+    # sweep button crawls the same portfolio the timer does. See foreman.net.
+    net.install()
     db = db_path
     # One slot per piece of work, not per kind of work. Two revisions on two
     # different pull requests never collide — each gets its own throwaway
@@ -2762,6 +2765,8 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             try:
                 s = store()
                 try:
+                    net.clear()
+                    net.reset_stats()
                     reg = load_registry(registry_path)
                     await collect_all(reg, s, project=project, log=note)
                     # The same sweep the timer runs, in the same order: the
@@ -2776,6 +2781,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     note("verify: asking each project's checks about applied actions")
                     await verify_applied(reg, s, project=project, log=note)
                     check_all(reg, s, project=project, log=note)
+                    note(net.stats().line())
                 finally:
                     s.close()
             except Exception as exc:  # noqa: BLE001 — surfaced in the UI, not swallowed

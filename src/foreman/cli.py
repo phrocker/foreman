@@ -12,6 +12,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from . import net
 from .actions import Stale, target_label
 from .actions.sagform import automatable, policy_allows
 from .audit import DEFAULT_SKILL, STALE_AFTER_DAYS, AuditError, run_audit, select_for_audit
@@ -104,6 +105,8 @@ def collect(
         raise typer.BadParameter(f"unknown collector {collector!r} (have: {', '.join(COLLECTORS)})")
 
     async def run() -> None:
+        net.clear()
+        net.reset_stats()
         with open_store(db, registry=registry) as store:
             total = await collect_all(
                 reg,
@@ -112,7 +115,7 @@ def collect(
                 collectors=names,
                 log=lambda m: console.print(f"  {m}"),
             )
-            console.print(f"\n[bold]{total}[/] observations stored.")
+            console.print(f"\n[bold]{total}[/] observations stored. {net.stats().line()}.")
 
     asyncio.run(run())
 
@@ -1268,6 +1271,10 @@ def serve(
 
 
 def main() -> None:
+    # One DNS lookup per host for everything this process fetches. A sweep
+    # resolving every page's host afresh is what tripped the operator's
+    # resolver rate limit; see foreman.net.
+    net.install()
     app()
 
 
