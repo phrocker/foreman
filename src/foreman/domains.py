@@ -56,6 +56,7 @@ def _registry() -> dict[str, Domain]:
     from .rules import delivery as delivery_rules
     from .rules import dependencies as dependencies_rules
     from .rules import domains as domain_rules
+    from .rules import ops as ops_rules
     from .rules import performance as performance_rules
     from .rules import security as security_rules
     from .rules import seo as seo_rules
@@ -101,6 +102,13 @@ def _registry() -> dict[str, Domain]:
             surfaces=("cloud",),
             collectors=("gcloud",),
             evaluate=cloud_rules.evaluate,
+        ),
+        Domain(
+            name="ops",
+            summary="Whether each deployed service is serving, and could survive a bad hour",
+            surfaces=("cloud",),
+            collectors=("runtime",),
+            evaluate=ops_rules.evaluate,
         ),
         Domain(
             name="content",

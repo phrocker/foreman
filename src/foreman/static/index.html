@@ -2331,7 +2331,33 @@ async function renderProjectState() {
         <span class="pstate-label">In flight</span>
         <span>${d.issues.length} open issue(s) · ${d.pulls.length} open pull request(s)</span>
       </div>
-      ${coverageRow(cov) + factsRow(d.facts)}
+      ${coverageRow(cov) + factsRow(d.facts) + runtimeRow(d.runtime)}
+    </div>`;
+}
+
+// How each deployed service is behaving, from the last sweep. One chip per
+// service: the revision serving, ready or not, requests and failures in the
+// last hour, p95. A service with no metrics says so rather than showing zero.
+function runtimeRow(rows) {
+  if (!rows || !rows.length) return "";
+  const cells = rows.map((r) => {
+    const name = esc(String(r.name).split("/").slice(2).join("/"));
+    const ready = r.ready === "True";
+    const bits = [];
+    if (r.latest_ready_revision) bits.push(esc(String(r.latest_ready_revision).replace(/^.*-(\d+-\w+)$/, "$1")));
+    if (r.replicas_desired !== undefined) bits.push(`${esc(r.replicas_ready || 0)}/${esc(r.replicas_desired)} ready${r.autoscaled === "true" ? " · hpa" : ""}`);
+    if (r.metrics_error) bits.push(`<span class="sev-medium" title="${esc(r.metrics_error)}">no metrics</span>`);
+    else if (r.requests_1h !== undefined && r.requests_1h !== null) {
+      const rate = Number(r.error_rate_1h || 0);
+      bits.push(`${esc(r.requests_1h)} req/h`);
+      bits.push(`<span class="${rate >= 1 ? "sev-high" : rate >= 0.1 ? "sev-medium" : ""}">${esc(r.error_rate_1h || "0")}% 5xx</span>`);
+      if (r.p95_ms_1h) bits.push(`p95 ${esc(Math.round(Number(r.p95_ms_1h)))} ms`);
+    }
+    return `<span class="cov-host" title="${esc(r.subject)}"><span class="cov-dot" style="background:${ready ? "var(--ok, #12703a)" : "var(--bad, #a51f1f)"}"></span>${name} · ${ready ? "serving" : `<span class="sev-high">not ready</span>`}${bits.length ? " · " + bits.join(" · ") : ""}</span>`;
+  }).join("");
+  return `<div class="pstate-row">
+      <span class="pstate-label">Runtime</span>
+      <span class="cov-grid">${cells}</span>
     </div>`;
 }
 

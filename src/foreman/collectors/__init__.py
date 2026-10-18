@@ -18,6 +18,7 @@ from .godaddy import GoDaddyCollector
 from .properties import PropertiesCollector
 from .pulls import Pulls
 from .render import RenderCollector
+from .runtime import RuntimeCollector
 from .siteprobe import SiteProbeCollector
 from .tls import TlsCollector
 
@@ -34,6 +35,7 @@ COLLECTORS = {
         SiteProbeCollector(),
         Pulls(),
         PropertiesCollector(),
+        RuntimeCollector(),
     )
 }
 
@@ -52,6 +54,7 @@ __all__ = [
     "Pulls",
     "GitHubActivityCollector",
     "RenderCollector",
+    "RuntimeCollector",
     "SiteProbeCollector",
     "TlsCollector",
 ]

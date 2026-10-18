@@ -323,6 +323,40 @@ def _sweep_schedule(unit: str = "foreman-sweep.timer") -> str | None:
     return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+RUNTIME_KEYS = (
+    "kind",
+    "ready",
+    "latest_ready_revision",
+    "traffic_on_latest",
+    "replicas_ready",
+    "replicas_desired",
+    "autoscaled",
+    "requests_1h",
+    "errors_5xx_1h",
+    "error_rate_1h",
+    "p95_ms_1h",
+    "requests_24h",
+    "error_rate_24h",
+    "p95_ms_24h",
+    "metrics_error",
+)
+
+
+def _runtime_rows(observations: list[Any]) -> list[dict[str, Any]]:
+    """One row per deployed service, from the runtime collector's latest facts."""
+    by: dict[str, dict[str, Any]] = {}
+    for ob in observations:
+        subject = str(ob.get("subject") or "")
+        if ob.get("collector") != "runtime" or not subject.startswith("service:"):
+            continue
+        key = str(ob.get("key") or "")
+        if key in RUNTIME_KEYS:
+            by.setdefault(subject, {"subject": subject, "name": subject.removeprefix("service:")})[
+                key
+            ] = ob.get("value")
+    return [by[k] for k in sorted(by)]
+
+
 def _gather_issue(slug: str, host: str, subject: Any) -> dict[str, Any]:
     """The open issue that is this host's gather, opened if there is none.
 
@@ -1799,6 +1833,7 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                     )
             known = briefing(s, project_id)
             county_facts = facts_summary(s, project_id)
+            runtime = _runtime_rows(s.latest_observations(project_id))
         finally:
             s.close()
 
@@ -1817,6 +1852,10 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
             # whether each fact still stands. The repository's facts.yaml is
             # an export of this, never the other way round.
             "facts": county_facts,
+            # How each deployed service is behaving, from the last sweep: the
+            # revision serving, whether it is ready, requests and failures in
+            # the last hour, p95. Absent keys are absent, not zero.
+            "runtime": runtime,
             "plans": plans,
             "issues": issues,
             "pulls": pulls,
