@@ -1493,3 +1493,37 @@ def test_a_fact_is_one_row_per_county_and_id_and_keeps_what_verification_learned
     assert len(rows) == 1 and rows[0]["source_sha"] == "abc" and rows[0]["status"] == "verified"
     assert store.facts(project="p", subject="county:nowhere") == []
     assert store.facts(project="q") == []
+
+
+def test_an_experiment_is_drafted_approved_and_keeps_its_last_outcome(store):
+    eid = store.add_experiment(
+        {
+            "project": "a",
+            "name": "Kill one advisor pod",
+            "hypothesis": "The HPA and readiness probes hold the error rate under 1%.",
+            "service": "service:gcp/acme/main/production/advisor",
+            "environment": "staging",
+            "steady_key": "error_rate_1h",
+            "steady_max": "1",
+            "injection": "observe",
+            "params": '{"pods": 1}',
+            "blast_radius": "one pod of one deployment",
+            "abort_key": "ready",
+            "abort_max": "",
+        }
+    )
+    assert eid >= 1
+    (row,) = store.experiments(project="a")
+    assert row["id"] == eid and row["status"] == "drafted" and row["approved_at"] is None
+    assert row["params"] == '{"pods": 1}' and row["abort_max"] == "" and row["steady_max"] == "1"
+    assert store.experiments(project="other") == []
+
+    store.update_experiment(eid, status="approved", approved_at="2026-10-18T10:00:00+00:00")
+    store.update_experiment(
+        eid, last_run_at="2026-10-18T10:05:00+00:00", last_outcome="held", status="approved"
+    )
+    store.update_experiment(eid, bogus="ignored")
+    got = store.experiment(eid)
+    assert got["status"] == "approved" and got["last_outcome"] == "held"
+    assert got["approved_at"] == "2026-10-18T10:00:00+00:00"
+    assert store.experiment(eid + 100) is None

@@ -768,6 +768,7 @@
     <button class="tab" data-tab="memory"   role="tab" aria-selected="false">Memory <span class="count" id="countMemory"></span></button>
     <button class="tab" data-tab="reports" role="tab" aria-selected="false">Reports <span class="count" id="countReports"></span></button>
     <button class="tab" data-tab="plans"    role="tab" aria-selected="false">Plans <span class="count" id="countPlans"></span></button>
+    <button class="tab" data-tab="chaos"    role="tab" aria-selected="false">Chaos <span class="count" id="countChaos"></span></button>
     <button class="tab" data-tab="rules"    role="tab" aria-selected="false">Rules</button>
     <button class="tab" data-tab="settings" role="tab" aria-selected="false">Settings</button>
   </nav>
@@ -880,6 +881,28 @@
       </form>
     </div>
     <div class="panel scroll"><div id="planList"></div></div>
+  </section>
+
+  <section id="panel-chaos" role="tabpanel" hidden>
+    <div class="panel" style="margin-bottom:12px">
+      <form id="chaosForm" class="plan-form" autocomplete="off">
+        <input name="name" placeholder="Experiment name" required style="flex:1 1 16em">
+        <select name="project" id="chaosProject" aria-label="Project" style="flex:0 1 12em"></select>
+        <select name="environment" aria-label="Environment" style="flex:0 1 9em"><option value="staging">staging</option><option value="production">production</option></select>
+        <input name="hypothesis" placeholder="Hypothesis, one sentence: what stays true while this happens" required style="flex:1 1 100%">
+        <input name="service" id="chaosService" list="chaosServices" placeholder="service:gcp/<account>/<name>" required style="flex:1 1 24em">
+        <datalist id="chaosServices"></datalist>
+        <select name="steady_key" aria-label="Steady-state fact" style="flex:0 1 11em"><option value="error_rate_1h">error_rate_1h</option><option value="p95_ms_1h">p95_ms_1h</option><option value="ready">ready</option><option value="replicas_ready">replicas_ready</option><option value="requests_1h">requests_1h</option></select>
+        <input name="steady_max" placeholder="at most (e.g. 1, or True)" required style="flex:0 1 11em">
+        <select name="injection" aria-label="Injection" style="flex:0 1 9em"><option value="observe">observe</option></select>
+        <input name="blast_radius" placeholder="blast radius, in words" style="flex:1 1 16em">
+        <select name="abort_key" aria-label="Abort on" style="flex:0 1 11em"><option value="">no abort condition</option><option value="ready">ready</option><option value="error_rate_1h">error_rate_1h</option><option value="p95_ms_1h">p95_ms_1h</option></select>
+        <input name="abort_max" placeholder="abort if beyond" style="flex:0 1 9em">
+        <span class="hint">Drafted, never started. Approve it, then run it; production is one approval, one run. <code>observe</code> injects nothing and measures twice — the control.</span>
+        <button type="submit">Draft experiment</button>
+      </form>
+    </div>
+    <div class="panel scroll"><div id="chaosList"></div></div>
   </section>
 
   <section id="panel-rules" role="tabpanel" hidden>
@@ -1050,7 +1073,7 @@ async function load() {
     try { render(); } catch (err) { console.error(`render ${name}`, err); }
   }
   const [findings, actions, drift, precision, history, connectors, skills, memories,
-         settings, plans, reports, pulls, activity, signals, issues,
+         settings, plans, experiments, reports, pulls, activity, signals, issues,
          subjects, next] =
     await Promise.all([
     fetchPart("/api/findings", []),
@@ -1063,6 +1086,7 @@ async function load() {
     fetchPart("/api/memories", []),
     fetchPart("/api/settings", null),
     fetchPart("/api/plans", []),
+    fetchPart("/api/experiments", []),
     fetchPart("/api/reports", []),
     fetchPart("/api/pulls", []),
     fetchPart("/api/activity", null),
@@ -1073,7 +1097,7 @@ async function load() {
   ]);
   Object.assign(state, {
     findings, actions, drift, precision, history,
-    connectors, skills, memories, settings, plans, reports, pulls, activity,
+    connectors, skills, memories, settings, plans, experiments, reports, pulls, activity,
     signals, issues, subjects, next,
   });
   renderStale();
@@ -1092,7 +1116,7 @@ async function load() {
     ["attention", renderAttention], ["checkpoint", renderCheckpoint], ["nextUp", renderNext], ["projectState", renderProjectState], ["working", renderWorking], ["issues", renderIssues], ["work", renderWork], ["activity", renderActivity], ["drift", renderDrift], ["history", renderHistory],
     ["connectors", renderConnectors], ["skills", renderSkills],
     ["rules", renderPrecision], ["memory", renderMemory],
-    ["plans", renderPlans], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
+    ["plans", renderPlans], ["chaos", renderChaos], ["reports", renderReports], ["projectAdmin", renderProjectAdmin], ["settings", renderSettings], ["counts", renderCounts],
     ["chat", () => renderChat(false)],
   ]) {
     try {
@@ -3766,6 +3790,107 @@ try {
 }
 
 // --- tabs ------------------------------------------------------------------
+
+/** Chaos: experiments as a history — drafted, approved, run, and what each
+ *  run said. Nothing here injects anything without an approval, and the
+ *  buttons are the approval. */
+function renderChaos() {
+  const list = $("chaosList");
+  const rows = state.experiments || [];
+  const live = rows.filter((e) => e.status !== "discarded");
+  $("countChaos").textContent = live.length ? String(live.length) : "";
+  // The declare form's project and service choices, from what is declared
+  // and what the last sweep saw running.
+  const projSel = $("chaosProject");
+  if (projSel && !projSel.options.length) {
+    for (const p of (state.declared || [])) {
+      const o = document.createElement("option"); o.value = p.id; o.textContent = p.name || p.id; projSel.appendChild(o);
+    }
+  }
+  const dl = $("chaosServices");
+  if (dl) {
+    if (!state.runtimeSubjects) {
+      state.runtimeSubjects = [];
+      fetchPart("/api/runtime", []).then((rows) => {
+        state.runtimeSubjects = rows.map((r) => r.subject);
+        renderChaos();
+      });
+    }
+    dl.innerHTML = state.runtimeSubjects.map((sv) => `<option value="${esc(sv)}"></option>`).join("");
+  }
+  if (!live.length) {
+    list.innerHTML = '<div class="empty">No experiments yet. An experiment is a hypothesis about a service, tested on purpose: draft one above, approve it, run it.</div>';
+    return;
+  }
+  const OUT = { held: "sev-low", failed: "sev-high", aborted: "sev-high", unavailable: "sev-medium", error: "sev-medium" };
+  list.innerHTML = live.map((e) => {
+    const outcome = e.last_outcome ? String(e.last_outcome) : "";
+    const kind = outcome.split(":")[0];
+    const buttons = e.status === "drafted"
+      ? `<button class="primary chaos-status" data-id="${e.id}" data-to="approved">Approve</button>
+         <button class="chaos-status" data-id="${e.id}" data-to="discarded">Discard</button>`
+      : e.status === "approved"
+      ? `<button class="primary chaos-run" data-id="${e.id}">Run</button>
+         <button class="chaos-status" data-id="${e.id}" data-to="drafted">Withdraw approval</button>`
+      : e.status === "running" ? `<em>running…</em>` : "";
+    return `<div class="plan">
+      <div class="plan-head"><strong>${esc(e.name)}</strong> <span class="muted">· ${esc(e.project)} · ${esc(e.environment)} · ${esc(e.status)}</span></div>
+      <div class="plan-meta">${esc(e.hypothesis)}</div>
+      <div class="plan-meta"><code>${esc(e.service)}</code> · steady: <code>${esc(e.steady_key)} ≤ ${esc(e.steady_max)}</code> · inject: <code>${esc(e.injection)}</code>${
+        e.abort_key ? ` · abort if <code>${esc(e.abort_key)}</code> beyond <code>${esc(e.abort_max)}</code>` : ""}${
+        e.blast_radius ? ` · blast radius: ${esc(e.blast_radius)}` : ""}</div>
+      ${outcome ? `<div class="plan-meta">Last run ${esc(String(e.last_run_at || "").slice(0, 16).replace("T", " "))}: <span class="${OUT[kind] || ""}">${esc(outcome)}</span></div>` : ""}
+      <div class="plan-meta">${buttons}</div>
+    </div>`;
+  }).join("");
+  list.querySelectorAll(".chaos-status").forEach((b) =>
+    b.addEventListener("click", () => setExperimentStatus(b.dataset.id, b.dataset.to, b)));
+  list.querySelectorAll(".chaos-run").forEach((b) =>
+    b.addEventListener("click", () => runExperiment(b.dataset.id, b)));
+}
+
+async function reloadExperiments() {
+  state.experiments = await fetchPart("/api/experiments", state.experiments || []);
+  renderChaos();
+}
+
+async function setExperimentStatus(id, to, button) {
+  const e = (state.experiments || []).find((x) => String(x.id) === String(id)) || {};
+  if (to === "approved" && !confirm(
+    `Approve "${e.name}" on ${e.environment}?\n\n${e.hypothesis}\n\nInjection: ${e.injection}. Blast radius: ${e.blast_radius || "not stated"}.\n\n` +
+    (e.environment === "production" ? "Production: this approval is spent by one run." : "Staging: the approval stands until withdrawn."))) return;
+  if (to === "discarded" && !confirm("Discard this experiment? It is kept as the record of what was proposed.")) return;
+  button.disabled = true;
+  const res = await fetch(`/api/experiments/${id}/status`, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ status: to }) });
+  if (!res.ok) { alert((await res.json().catch(() => ({}))).detail || `Failed with ${res.status}`); button.disabled = false; return; }
+  await reloadExperiments();
+}
+
+async function runExperiment(id, button) {
+  const e = (state.experiments || []).find((x) => String(x.id) === String(id)) || {};
+  if (!confirm(`Run "${e.name}" now on ${e.environment}? The steady state is measured before and after; the log is on the Activity tab.`)) return;
+  button.disabled = true;
+  const res = await fetch(`/api/experiments/${id}/run`, { method: "POST" });
+  if (!res.ok) { alert((await res.json().catch(() => ({}))).detail || `Failed with ${res.status}`); button.disabled = false; return; }
+  await reloadExperiments();
+  showTab("activity");
+  watchActivity();
+}
+
+(() => {
+  const form = $("chaosForm");
+  if (!form) return;
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const data = Object.fromEntries(new FormData(form).entries());
+    const res = await fetch("/api/experiments", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify(data) });
+    if (!res.ok) { alert((await res.json().catch(() => ({}))).detail || `Failed with ${res.status}`); return; }
+    form.reset();
+    await reloadExperiments();
+  });
+})();
 
 function showTab(name) {
   state.tab = name;

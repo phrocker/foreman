@@ -172,6 +172,25 @@ FIELDS: dict[str, tuple[str, ...]] = {
         "verified_on",
         "status",
     ),
+    "experiment": (
+        "project",
+        "name",
+        "hypothesis",
+        "service",
+        "environment",
+        "steady_key",
+        "steady_max",
+        "injection",
+        "params",
+        "blast_radius",
+        "abort_key",
+        "abort_max",
+        "status",
+        "created_at",
+        "approved_at",
+        "last_run_at",
+        "last_outcome",
+    ),
     "draft": (
         "project",
         "subject",
@@ -697,6 +716,81 @@ class ShoalStore:
     def finding(self, finding_id: int) -> Record | None:
         found = self._entities(f"ent:finding|{_pad(finding_id)}")
         return next(iter(found.values()), None)
+
+    # --- chaos experiments ---------------------------------------------------
+
+    EXPERIMENT_FIELDS = (
+        "name",
+        "hypothesis",
+        "service",
+        "environment",
+        "steady_key",
+        "steady_max",
+        "injection",
+        "params",
+        "blast_radius",
+        "abort_key",
+        "abort_max",
+        "status",
+        "approved_at",
+        "last_run_at",
+        "last_outcome",
+    )
+
+    def add_experiment(self, fields: dict[str, Any]) -> int:
+        experiment_id = self._next_id("experiment")
+        self._write(
+            [
+                self._put(
+                    _rid("experiment", _pad(experiment_id)),
+                    "experiment",
+                    {
+                        "project": fields["project"],
+                        "name": fields["name"],
+                        "hypothesis": fields["hypothesis"],
+                        "service": fields["service"],
+                        "environment": fields.get("environment") or "staging",
+                        "steady_key": fields["steady_key"],
+                        "steady_max": str(fields["steady_max"]),
+                        "injection": fields["injection"],
+                        "params": fields.get("params") or "{}",
+                        "blast_radius": fields.get("blast_radius") or "",
+                        "abort_key": fields.get("abort_key") or "",
+                        "abort_max": str(fields.get("abort_max") or ""),
+                        "status": "drafted",
+                        "created_at": utcnow(),
+                    },
+                )
+            ]
+        )
+        return experiment_id
+
+    @staticmethod
+    def _experiment_row(r: Record) -> Record:
+        out = dict(r)
+        # Empty cells read back as None; the sqlite twin keeps ''.
+        for k in ("params", "blast_radius", "abort_key", "abort_max"):
+            out[k] = out.get(k) or ("{}" if k == "params" else "")
+        return out
+
+    def experiments(self, project: str | None = None) -> list[Record]:
+        rows = [
+            self._experiment_row(r)
+            for r in self._entities("ent:experiment|").values()
+            if not project or r.get("project") == project
+        ]
+        rows.sort(key=lambda r: int(r["id"]))
+        return rows
+
+    def experiment(self, experiment_id: int) -> Record | None:
+        rows = self._entities(f"ent:experiment|{_pad(experiment_id)}")
+        row = next(iter(rows.values()), None)
+        return self._experiment_row(row) if row else None
+
+    def update_experiment(self, experiment_id: int, **fields: Any) -> None:
+        keep = {k: v for k, v in fields.items() if k in self.EXPERIMENT_FIELDS}
+        if keep:
+            self._write([self._put(_rid("experiment", _pad(experiment_id)), "experiment", keep)])
 
     # --- review drafts -------------------------------------------------------
 

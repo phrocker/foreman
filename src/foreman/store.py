@@ -113,6 +113,12 @@ class Store(Protocol):
     def finding_keys_before(self, since: str) -> set[tuple[str, str, str]]: ...
 
     # --- review drafts ---
+    # --- chaos experiments ---
+    def add_experiment(self, fields: dict[str, Any]) -> int: ...
+    def experiments(self, project: str | None = None) -> list[Record]: ...
+    def experiment(self, experiment_id: int) -> Record | None: ...
+    def update_experiment(self, experiment_id: int, **fields: Any) -> None: ...
+
     def record_drafts(self, drafts: Sequence[dict[str, Any]]) -> list[int]: ...
     def drafts(self, subject: str | None = None, status: str | None = None) -> list[Record]: ...
     def draft(self, draft_id: int) -> Record | None: ...
@@ -331,6 +337,30 @@ CREATE TABLE IF NOT EXISTS drafts (
     posted_url  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_drafts_subject ON drafts (subject, status);
+
+-- A chaos experiment: a hypothesis about a service, the steady state it
+-- rests on, the injection that tests it, how far it may reach, and the
+-- condition that stops it. Drafted, approved, run; never run unapproved.
+CREATE TABLE IF NOT EXISTS experiments (
+    id            INTEGER PRIMARY KEY,
+    project       TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    hypothesis    TEXT NOT NULL,
+    service       TEXT NOT NULL,               -- the runtime subject it is about
+    environment   TEXT NOT NULL DEFAULT 'staging',  -- staging | production
+    steady_key    TEXT NOT NULL,               -- the runtime fact that defines steady state
+    steady_max    TEXT NOT NULL,               -- the most that fact may be and still be steady
+    injection     TEXT NOT NULL,               -- the injection kind
+    params        TEXT NOT NULL DEFAULT '{}',  -- its arguments, JSON
+    blast_radius  TEXT NOT NULL DEFAULT '',
+    abort_key     TEXT NOT NULL DEFAULT '',
+    abort_max     TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'drafted',  -- drafted | approved | running | discarded
+    created_at    TEXT NOT NULL,
+    approved_at   TEXT,
+    last_run_at   TEXT,
+    last_outcome  TEXT                         -- held | failed | aborted | unavailable | error
+);
 
 -- A fact with provenance: what a county page may say, the source it rests
 -- on, when it was gathered, when it stops being current, and what the cited
@@ -1252,6 +1282,70 @@ class SqliteStore:
     # --- review drafts ----------------------------------------------------
 
     DRAFT_FIELDS = ("body", "status", "posted_at", "posted_url", "finding_id")
+
+    EXPERIMENT_FIELDS = (
+        "name",
+        "hypothesis",
+        "service",
+        "environment",
+        "steady_key",
+        "steady_max",
+        "injection",
+        "params",
+        "blast_radius",
+        "abort_key",
+        "abort_max",
+        "status",
+        "approved_at",
+        "last_run_at",
+        "last_outcome",
+    )
+
+    def add_experiment(self, fields: dict[str, Any]) -> int:
+        cur = self._db.execute(
+            "INSERT INTO experiments (project, name, hypothesis, service, environment,"
+            " steady_key, steady_max, injection, params, blast_radius, abort_key, abort_max,"
+            " status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'drafted', ?)",
+            (
+                fields["project"],
+                fields["name"],
+                fields["hypothesis"],
+                fields["service"],
+                fields.get("environment") or "staging",
+                fields["steady_key"],
+                str(fields["steady_max"]),
+                fields["injection"],
+                fields.get("params") or "{}",
+                fields.get("blast_radius") or "",
+                fields.get("abort_key") or "",
+                str(fields.get("abort_max") or ""),
+                utcnow(),
+            ),
+        )
+        self._db.commit()
+        return int(cur.lastrowid)
+
+    def experiments(self, project: str | None = None) -> list[Record]:
+        sql, args = "SELECT * FROM experiments WHERE 1 = 1", []
+        if project:
+            sql += " AND project = ?"
+            args.append(project)
+        return [dict(r) for r in self._db.execute(sql + " ORDER BY id", args).fetchall()]
+
+    def experiment(self, experiment_id: int) -> Record | None:
+        return _one(
+            self._db.execute("SELECT * FROM experiments WHERE id = ?", (experiment_id,)).fetchone()
+        )
+
+    def update_experiment(self, experiment_id: int, **fields: Any) -> None:
+        keep = {k: v for k, v in fields.items() if k in self.EXPERIMENT_FIELDS}
+        if not keep:
+            return
+        sets = ", ".join(f"{k} = ?" for k in keep)
+        self._db.execute(
+            f"UPDATE experiments SET {sets} WHERE id = ?", (*keep.values(), experiment_id)
+        )
+        self._db.commit()
 
     def record_drafts(self, drafts: Sequence[dict[str, Any]]) -> list[int]:
         ids: list[int] = []

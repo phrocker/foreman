@@ -27,6 +27,8 @@ from .actions.sagform import automatable, policy_allows
 from .adversary import DEFAULT_CEILING_USD as REVIEW_CEILING_USD
 from .adversary import LENSES, diff_from_github, diff_of, post_drafts, review_change, summarise
 from .budget import Budget
+from .chaos import run_experiment as run_chaos
+from .chaos import validate as chaos_validate
 from .chat import ChatError, ask
 from .checkpoint import checkpoint, narrate
 from .collectors.github import GitHubError
@@ -2643,6 +2645,105 @@ def create_app(registry_path: Path | None = None, db_path: Path | None = None) -
                         # The pull request now carries comments, so its own row
                         # is stale and the Address-comments button belongs on it.
                         await refresh_pulls(project, st, note)
+                finally:
+                    st.close()
+            except Exception as exc:  # noqa: BLE001 — surfaced in the UI
+                finish(slot, f"{type(exc).__name__}: {exc}")
+            else:
+                finish(slot)
+
+        asyncio.create_task(work())
+        return slot.as_dict()
+
+    # --- chaos experiments ---------------------------------------------------
+
+    @app.get("/api/runtime")
+    def runtime_everywhere() -> list[dict[str, Any]]:
+        """Every deployed service the last sweep saw, across projects: what
+        an experiment is declared against."""
+        registry = load_registry(registry_path)
+        s = store()
+        try:
+            out: list[dict[str, Any]] = []
+            for project in registry.active:
+                for row in _runtime_rows(s.latest_observations(project.id)):
+                    out.append({**row, "project": project.id})
+            return out
+        finally:
+            s.close()
+
+    @app.get("/api/experiments")
+    def list_experiments(project: str | None = Query(None)) -> list[dict[str, Any]]:
+        """Every experiment with its status and last outcome: a history, not a
+        dashboard of green."""
+        s = store()
+        try:
+            return s.experiments(project=project)
+        finally:
+            s.close()
+
+    @app.post("/api/experiments")
+    def declare_experiment(payload: dict[str, Any]) -> dict[str, Any]:
+        """Draft an experiment. Drafted, never started: it waits for approval."""
+        registry = load_registry(registry_path)
+        try:
+            fields = chaos_validate(payload, {p.id for p in registry.projects})
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        s = store()
+        try:
+            eid = s.add_experiment(fields)
+            return s.experiment(eid) or {"id": eid}
+        finally:
+            s.close()
+
+    @app.post("/api/experiments/{experiment_id}/status")
+    def experiment_status(experiment_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Approve or discard. Approval is the operator's click and is recorded
+        with its time; production approvals are spent by one run."""
+        status = str(payload.get("status") or "").strip()
+        if status not in {"approved", "discarded", "drafted"}:
+            raise HTTPException(400, "status must be 'approved', 'discarded' or 'drafted'")
+        s = store()
+        try:
+            row = s.experiment(experiment_id)
+            if row is None:
+                raise HTTPException(404, f"no experiment {experiment_id}")
+            if row["status"] == "running":
+                raise HTTPException(409, "the experiment is running")
+            fields: dict[str, Any] = {"status": status}
+            if status == "approved":
+                fields["approved_at"] = utcnow()
+            s.update_experiment(experiment_id, **fields)
+            return s.experiment(experiment_id) or {}
+        finally:
+            s.close()
+
+    @app.post("/api/experiments/{experiment_id}/run")
+    async def run_experiment_now(experiment_id: int) -> dict[str, Any]:
+        """Run an approved experiment in a slot, like a review or a build:
+        the log is on the Activity tab while it runs and the outcome lands on
+        the experiment when it is done."""
+        s = store()
+        try:
+            row = s.experiment(experiment_id)
+        finally:
+            s.close()
+        if row is None:
+            raise HTTPException(404, f"no experiment {experiment_id}")
+        if row["status"] != "approved":
+            raise HTTPException(409, f"experiment {experiment_id} is {row['status']}, not approved")
+        registry = load_registry(registry_path)
+        project = registry.get(str(row["project"]))
+        slot = start("chaos", f"experiment:{experiment_id}")
+        note = note_to(slot)
+
+        async def work() -> None:
+            try:
+                st = store()
+                try:
+                    note(f"{row['name']}: {row['hypothesis']}")
+                    await run_chaos(st, project, row, note)
                 finally:
                     st.close()
             except Exception as exc:  # noqa: BLE001 — surfaced in the UI
