@@ -66,7 +66,9 @@ def test_the_shipped_configuration_declares_every_county_domain(
         # something to fail.
         pytest.skip("no local foreman.yaml; this checks the operator's own registry")
     doc = yaml.safe_load(registry.read_text())
-    project = next(p for p in doc["projects"] if p["id"] == project_id)
+    project = next((p for p in doc["projects"] if p["id"] == project_id), None)
+    if project is None:
+        pytest.skip(f"operator registry does not include {project_id}")
 
     surface = WebSurface(**project["web"])
     assert len(surface.hosts) >= expected_min, (

@@ -376,7 +376,10 @@ def test_the_shipped_portfolio_deep_crawls_every_county_domain() -> None:
         # something to fail.
         pytest.skip("no local foreman.yaml; this checks the operator's own registry")
     doc = yaml.safe_load(registry.read_text())
-    web = next(p for p in doc["projects"] if p["id"] == "procareedge")["web"]
+    project = next((p for p in doc["projects"] if p["id"] == "procareedge"), None)
+    if project is None:
+        pytest.skip("operator registry does not include procareedge")
+    web = project["web"]
 
     from foreman.config import WebSurface
 

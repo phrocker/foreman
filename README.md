@@ -478,3 +478,18 @@ never load-bearing.
    than re-deriving the same findings nightly. `foreman diff` and
    `foreman precision` are the inputs; nothing consumes them yet.
 3. More collectors — Search Console, CrUX, `osv-scanner`, `nuclei`.
+
+### Graph workspace on the Shoal store
+
+`deploy/systemd/install.sh` installs the Foreman store, dashboard, sweep timer,
+and a loopback Sharkbite Explorer for the described `graph` table. The store
+unit runs `deploy/shoal/prepare-store.sh` before it starts: on a fresh data
+directory this creates `graph` and records `deploy/shoal/graph-schema.json`.
+Restarts re-record the same version idempotently; a newer descriptor already
+in the store is left intact. Bump the descriptor version when Foreman's row
+layout changes.
+
+The Explorer listens on `127.0.0.1:8090` and currently uses development auth
+with the `graph` label. Keep it on loopback for the demo. The graph API conceals
+the mounted table from a viewer without that label. For a customer deployment,
+replace development auth with the intended identity and label grants.

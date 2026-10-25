@@ -1,0 +1,12 @@
+[Unit]
+Description=Sharkbite Explorer for the Foreman graph (127.0.0.1:8090)
+Requires=foreman-store.service
+After=foreman-store.service
+
+[Service]
+ExecStart=%h/.shoal/bin/shoal-explore-web -state-dir %h/.shoal/explorer-web -listen 127.0.0.1:8090 -dev-auth -dev-auth-labels shoal-explore-web/workspace=public,shoal-explore-web/workspace=graph -graph-table graph -graph-table-label graph -graph-stores 127.0.0.1:9880
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

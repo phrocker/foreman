@@ -1,0 +1,16 @@
+{
+  "table": "graph",
+  "schema_id": "foreman.graph",
+  "version": 1,
+  "description": "Foreman portfolio store: ent:<kind>|<key> entities and evt:<kind>|<id> events, cf = record type, cq = field, text values; edges cf=edge, cq=<relationship>NUL<kind>|<key> resolved under ent:",
+  "nodes": [
+    {"name": "entity", "row_prefix": "ent:", "kind_sep": "|", "kind_index": 0,
+     "attribute_qualifier": "QUALIFIER_ROLE_FIELD", "attribute_encoding": "VALUE_ENCODING_TEXT"},
+    {"name": "event", "row_prefix": "evt:", "kind_sep": "|", "kind_index": 0,
+     "attribute_qualifier": "QUALIFIER_ROLE_FIELD", "attribute_encoding": "VALUE_ENCODING_TEXT"}
+  ],
+  "edges": [
+    {"name": "edge", "edge_cf": "edge", "edge_field": "qualifier", "field_sep": "\u0000",
+     "id_index": 1, "id_index_set": true, "rel_index": 0, "primary_prefix": "ent:"}
+  ]
+}
