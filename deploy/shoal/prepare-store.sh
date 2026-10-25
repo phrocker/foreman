@@ -17,6 +17,12 @@ trap 'rm -f "$current"' EXIT HUP INT TERM
 if "$engine" schema get --data "$data" --table graph > "$current" 2>/dev/null; then
   current_version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$current")
   desired_version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$schema")
+  current_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_id"])' "$current")
+  desired_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_id"])' "$schema")
+  if [ "$current_id" != "$desired_id" ]; then
+    echo "graph schema ID mismatch: store has $current_id, deployment has $desired_id" >&2
+    exit 1
+  fi
   if [ "$current_version" -gt "$desired_version" ]; then
     exit 0
   fi
