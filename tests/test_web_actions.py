@@ -345,6 +345,13 @@ def test_one_project_answers_where_it_stands_in_one_call():
 
         pytest.skip("no local registry to read")
 
+    import pytest
+    import yaml
+
+    doc = yaml.safe_load(registry.read_text())
+    if not any(p["id"] == "procareedge" for p in doc["projects"]):
+        pytest.skip("operator registry does not include procareedge")
+
     client = TestClient(create_app(registry_path=registry))
     body = client.get("/api/project/procareedge").json()
 
