@@ -3,9 +3,11 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$HOME/.config/systemd/user"
-for f in foreman-store.service foreman-dashboard.service foreman-sweep.service foreman-sweep.timer; do
+for f in foreman-store.service foreman-dashboard.service foreman-sweep.service foreman-sweep.timer sharkbite-explore-web.service; do
   ln -sf "$here/$f" "$HOME/.config/systemd/user/$f"
 done
+mkdir -p "$HOME/.shoal/bin"
+ln -sf "$here/../shoal/prepare-store.sh" "$HOME/.shoal/bin/foreman-prepare-store"
 # The units run with systemd's own PATH, which does not include wherever the
 # operator installed gcloud or kubectl. Under the timer, every cloud and
 # runtime collection then reported "the gcloud CLI is not installed" while the
@@ -28,5 +30,5 @@ done
 systemctl --user daemon-reload
 # Without linger, user services stop at logout and never start at boot.
 loginctl enable-linger "$USER" 2>/dev/null || echo "enable-linger needs: sudo loginctl enable-linger $USER"
-systemctl --user enable foreman-store.service foreman-dashboard.service foreman-sweep.timer
-echo "installed; start with: systemctl --user start foreman-store foreman-dashboard foreman-sweep.timer"
+systemctl --user enable foreman-store.service foreman-dashboard.service foreman-sweep.timer sharkbite-explore-web.service
+echo "installed; start with: systemctl --user start foreman-store foreman-dashboard foreman-sweep.timer sharkbite-explore-web"

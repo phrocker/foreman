@@ -5,7 +5,8 @@
 Description=Foreman store (shoal-embed on 127.0.0.1:9880)
 
 [Service]
-ExecStart=%h/.shoal/bin/shoal-embed serve --data %h/.shoal/foreman --port 9880
+ExecStartPre=/bin/sh %h/.shoal/bin/foreman-prepare-store
+ExecStart=%h/.shoal/bin/shoal-embed serve --data %h/.shoal/foreman --port 9880 --metrics-port 9881
 Restart=always
 RestartSec=3
 
